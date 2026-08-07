@@ -1,0 +1,1 @@
+"""Trading scanner application package."""

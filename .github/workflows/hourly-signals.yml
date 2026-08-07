@@ -1,0 +1,25 @@
+name: Hourly Signal Pipeline
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch: {}
+
+jobs:
+  signals:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: abatilo/actions-poetry@v3
+        with:
+          poetry-version: "1.8.4"
+      - run: poetry install --no-interaction
+      - run: poetry run python -m trading_scanner.signals
+        env:
+          TRADING_SCANNER_TURSO_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TRADING_SCANNER_TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+          TRADING_SCANNER_TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TRADING_SCANNER_TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

@@ -69,6 +69,32 @@ data is limited to the configured candle history. Before display, the scanner
 requires at least 200 rows and the `Open`, `High`, `Low`, `Close`, and `Volume`
 columns.
 
+## Example Output
+
+```text
+2026-08-06 10:00:00 INFO: Application Started
+2026-08-06 10:00:00 INFO: Loaded 5 symbols
+2026-08-06 10:00:00 INFO: Downloading RELIANCE.NS
+--------------------------------------------------
+
+RELIANCE.NS
+
+Rows:
+300
+
+Latest Candle
+
+Time: 2026-08-06 09:15:00+05:30
+Open: 1420.5
+High: 1428.0
+Low: 1418.1
+Close: 1425.7
+Volume: 1250000
+--------------------------------------------------
+2026-08-06 10:00:01 INFO: Completed RELIANCE.NS
+2026-08-06 10:00:05 INFO: Application Finished
+```
+
 ## Alpha Engine Validation
 
 Export every candle's Alpha Engine result to compare it bar-by-bar with the
@@ -83,7 +109,127 @@ PYTHONPATH=src python -m trading_scanner.validate \
 
 The command downloads all available hourly candles from the requested calendar
 day window, evaluates AlphaEngine once for every historical candle, and writes
-the result to `validation/validation_AARTIIND_1h.csv`.
+the result to `validation/validation_AARTIIND_1h.csv`. The exchange suffix is
+removed from the filename; for example, `AARTIIND.NS` becomes `AARTIIND`.
+
+The CSV includes each bar's prediction, filter states, entry/exit conditions,
+and final BUY/SELL event. Use it to compare every `start_long_trade` and
+`start_short_trade` value against TradingView.
+
+### Debug CSV
+
+Every run also writes `validation/validation_debug_AARTIIND_1h.csv`. It
+contains the same OHLC and signal columns as the main CSV plus every
+intermediate value that feeds the final signal, so a mismatch against
+TradingView can be traced bar-by-bar without re-deriving anything:
+
+`timestamp`, `open`, `high`, `low`, `close`, `prediction`, `is_bullish`,
+`is_bearish`, `is_ema_uptrend`, `is_ema_downtrend`, `is_sma_uptrend`,
+`is_sma_downtrend`, `filter_all`, `bars_held`, `is_new_buy_signal`,
+`is_new_sell_signal`, `start_long_trade`, `start_short_trade`,
+`end_long_trade`, `end_short_trade`, `kernel_estimate`, `kernel_bullish`,
+`kernel_bearish`, `signal`.
+
+When one signal differs from TradingView, open this file at that timestamp
+and compare each intermediate column to find exactly which filter or state
+diverged.
+
+### Verbose mode
+
+Add `--verbose` to print every BUY/SELL bar to the console while the CSVs are
+generated:
+
+```bash
+PYTHONPATH=src python -m trading_scanner.validate \
+  --symbol AARTIIND.NS \
+  --interval 1h \
+  --days 10 \
+  --verbose
+```
+
+```text
+2026-08-02 11:00:00+05:30
+Prediction: 8
+BUY
+--------------------------------
+```
+
+Bars with a `NEUTRAL` signal are not printed.
+
+## Hourly Signal Pipeline
+
+`trading_scanner.signals` runs the scanner across every symbol in
+`config/symbols.txt` on a schedule, accumulating candles in a database so
+AlphaEngine has real warm-up history instead of re-downloading a short window
+every run. It stores candles in [Turso](https://turso.tech) (hosted
+libSQL/SQLite), tracks which signals have already been notified, and sends
+BUY/SELL signals through `TelegramNotifier` (or logs them if Telegram isn't
+configured).
+
+For each symbol, every run:
+
+1. Downloads a small recent window from Yahoo Finance (just enough to cover
+   any gap since the last run) and upserts it into the `candles` table.
+2. Loads the **full** accumulated history for that symbol — never truncated,
+   since matching TradingView requires the neighbor search to always see the
+   same starting point (see `application/fast_predict.py`'s module docstring).
+3. Skips the symbol with a "warming up" log line until at least 200 candles
+   are stored — AlphaEngine's regime filter needs that much history to be
+   meaningful.
+4. Evaluates only the newest bar (`application/fast_predict.evaluate_latest_bar`)
+   instead of AlphaEngine's full-history `analyze()` — the ANN neighbor queue
+   and exit-tracking state are persisted between runs (`engine_state` table)
+   so each run costs ~1-3s instead of the ~43s a full re-derivation would
+   take. A new symbol pays a one-time "bootstrapping" cost to build that
+   state from its accumulated history.
+5. Notifies once per new BUY/SELL signal (de-duplicated by `Signal.fingerprint`,
+   so re-running the same hour never double-notifies), and records the entry
+   in the `trades` table. When AlphaEngine's own dynamic exit
+   (`end_long`/`end_short`) fires, the matching open trade is closed and its
+   `pnl_percent` computed — long profits on price rising, short on price
+   falling — for later win-rate/backtest analysis.
+
+### Market index context
+
+Set `TRADING_SCANNER_INDEX_SYMBOL` (defaults to `^NSEI`, NIFTY 50) to have a
+broad market index evaluated the same way every run. Its current
+signal/prediction/early-flip state is appended to every stock notification's
+rationale — purely informational, to help judge whether a signal lines up
+with the broader market or looks like noise against it. It never suppresses
+a stock signal, even when the two disagree. Set it to an empty string to
+disable index tracking entirely.
+
+### Setting up Turso
+
+1. Create a free database: `turso db create trading-scanner` (or sign up at
+   [turso.tech](https://turso.tech)).
+2. Get the connection details: `turso db show trading-scanner --url` and
+   `turso db tokens create trading-scanner`.
+3. Add them as GitHub Actions repository secrets: `TURSO_DATABASE_URL` and
+   `TURSO_AUTH_TOKEN`.
+4. Optionally add `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` secrets to
+   receive signals on Telegram instead of just the logs.
+
+### Running locally with no account
+
+`libsql-client` also speaks directly to a local SQLite file, so the whole
+pipeline can be developed and tested without a Turso account:
+
+```bash
+TRADING_SCANNER_TURSO_URL="file:local.db" \
+PYTHONPATH=src python -m trading_scanner.signals
+```
+
+Candles accumulate in `local.db` across repeated runs exactly as they would
+against a hosted Turso database — only the URL changes between local
+development and production.
+
+### Scheduling
+
+[`.github/workflows/hourly-signals.yml`](.github/workflows/hourly-signals.yml)
+runs the pipeline every hour via `cron: "0 * * * *"` (also triggerable
+manually via `workflow_dispatch`). Since this repository is public, GitHub
+Actions minutes are free regardless of run frequency or symbol count.
 
 ## Current Limitations
 
