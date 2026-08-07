@@ -6,3 +6,5 @@ __pycache__/
 .ruff_cache/
 data/*.json
 !data/.gitkeep
+validation/*.csv
+local.db*

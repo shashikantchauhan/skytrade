@@ -298,6 +298,21 @@ class TursoTradeRepository:
             [exit_timestamp.isoformat(), float(exit_price), float(pnl_percent), trade_id],
         )
 
+    async def abandon_open_trade(self, symbol: str, interval: str, side: SignalSide) -> None:
+        """Mark a still-open trade abandoned, excluded from win-rate stats.
+
+        Mirrors Pine's ``ml.backtest``: a new opposite-side entry discards
+        whatever position was still open without scoring it -- not closed,
+        not a win, not a loss.
+        """
+        await self._client.execute(
+            """
+            UPDATE trades SET status = 'abandoned'
+            WHERE symbol = ? AND interval = ? AND side = ? AND status = 'open'
+            """,
+            [symbol, interval, side.value],
+        )
+
     async def get_trades(self, symbol: str | None, interval: str) -> Sequence[Trade]:
         query = """
             SELECT symbol, side, entry_timestamp, entry_price, prediction_at_entry,

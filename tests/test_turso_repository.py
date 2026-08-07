@@ -174,3 +174,21 @@ async def test_close_open_trade_computes_pnl_percent_for_short(tmp_path: Path) -
         assert stored.pnl_percent == Decimal("10")  # short profits when price falls
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_abandon_open_trade_marks_it_abandoned_without_scoring(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoTradeRepository(client)
+        await repository.ensure_schema()
+        await repository.open_trade("1h", _trade(side=SignalSide.BUY, entry_price=Decimal("100")))
+
+        await repository.abandon_open_trade("AARTIIND.NS", "1h", SignalSide.BUY)
+        stored = (await repository.get_trades("AARTIIND.NS", "1h"))[0]
+
+        assert stored.status == "abandoned"
+        assert stored.exit_price is None
+        assert stored.pnl_percent is None  # never scored as a win or a loss
+    finally:
+        await client.close()

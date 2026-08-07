@@ -187,7 +187,19 @@ For each symbol, every run:
    in the `trades` table. When AlphaEngine's own dynamic exit
    (`end_long`/`end_short`) fires, the matching open trade is closed and its
    `pnl_percent` computed — long profits on price rising, short on price
-   falling — for later win-rate/backtest analysis.
+   falling — for later win-rate/backtest analysis. Trade bookkeeping mirrors
+   Pine's own `ml.backtest` scoring exactly (single active position per
+   symbol, `(high+low+open+open)/4` pricing) — see
+   `application/backtest.py`'s module docstring.
+6. Appends that symbol's own historical win rate (e.g. `win_rate=66.0%
+   (33W/17L)`, computed from its closed trades so far) to every BUY/SELL
+   notification's rationale — so you never see a fresh signal without
+   knowing how this symbol's past trades have actually performed. Omitted
+   entirely for a symbol with no closed trades yet.
+
+Only entries (BUY/SELL) trigger a Telegram notification. Exits
+(`end_long`/`end_short`) are recorded and close out the trade silently —
+there is no separate "position closed" alert.
 
 ### Market index context
 

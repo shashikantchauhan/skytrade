@@ -74,4 +74,14 @@ class TradeRepository(Protocol):
         exit_price: Decimal,
     ) -> None: ...
 
+    async def abandon_open_trade(self, symbol: str, interval: str, side: SignalSide) -> None:
+        """Discard a still-open trade without scoring it as a win or a loss.
+
+        Mirrors Pine's ``ml.backtest``: a new opposite-side entry silently
+        overwrites the single ``start_long_trade``/``start_short_trade``
+        variable it tracks per symbol, so a position that never reached its
+        own exit condition is never counted -- not a win, not a loss.
+        """
+        ...
+
     async def get_trades(self, symbol: str | None, interval: str) -> Sequence[Trade]: ...

@@ -207,7 +207,7 @@ Settings settings =
    input.int(title="Feature Count", defval=5, group="Feature Engineering", minval=2, maxval=5, tooltip="Number of features to use for ML predictions."),
    input.int(title="Color Compression", defval=1, group="General Settings", minval=1, maxval=10, tooltip="Compression factor for adjusting the intensity of the color scale."),
    input.bool(title="Show Default Exits", defval=false, group="General Settings", tooltip="Default exits occur exactly 4 bars after an entry signal. This corresponds to the predefined length of a trade during the model's training process.", inline="exits"),
-   input.bool(title="Use Dynamic Exits", defval=false, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", inline="exits")
+   input.bool(title="Use Dynamic Exits", defval=true, group="General Settings", tooltip="Dynamic exits attempt to let profits ride by dynamically adjusting the exit threshold based on kernel regression logic.", inline="exits")
  )
    
 // Trade Stats Settings
@@ -217,7 +217,7 @@ useWorstCase = input.bool(false, "Use Worst Case Estimates", tooltip="Whether to
 
 // When enabled, this option allows the ML model to analyze the entire chart history for pattern recognition,
 // helping to identify rare but significant patterns across different market regimes that might not appear in recent data.
-includeFullHistory = input.bool(title="Include Full History", defval=false, group="General Settings", tooltip="Extends back to the beginning of the chart's history to pick up exotic fractals for training a model. This can be useful for finding rare but significant historical patterns that might not appear in the recent price action. It can provide valuable insights by capturing patterns from different market regimes throughout the chart's history.")
+includeFullHistory = input.bool(title="Include Full History", defval=true, group="General Settings", tooltip="Extends back to the beginning of the chart's history to pick up exotic fractals for training a model. This can be useful for finding rare but significant historical patterns that might not appear in the recent price action. It can provide valuable insights by capturing patterns from different market regimes throughout the chart's history.")
 
 // Settings object for user-defined settings
 FilterSettings filterSettings =
@@ -640,7 +640,18 @@ plot(backTestStream, "Backtest Stream", display=display.none)
 
 // The following can be used to display real-time trade stats. This can be a useful mechanism for obtaining real-time feedback during Feature Engineering. This does NOT replace the need to properly backtest.
 // Note: In this context, a "Stop-Loss" is defined instances where the ML Signal prematurely flips directions before an exit signal can be generated.
-[totalWins, totalLosses, totalEarlySignalFlips, totalTrades, tradeStatsHeader, winLossRatio, winRate] = ml.backtest(high, low, open, startLongTrade, endLongTrade, startShortTrade, endShortTrade, isEarlySignalFlip, maxBarsBackIndex, bar_index, settings.source, useWorstCase)
+
+// Restricts the on-chart win/loss stat table below to bars on/after this date, so it can be
+// directly compared against an external backtest whose stored history starts on the same date
+// (rather than wherever this chart's own loaded data happens to start). Does NOT affect the
+// actual BUY/SELL signals, plots, or alerts above -- only this stat table's counted trades.
+backtestStatsStartDate = input.time(timestamp("2023-08-28T00:00:00"), title="Backtest Stats Start Date", tooltip="Restricts the Winrate/Trades/WL Ratio table below to trades on or after this date, so it can be compared against an external backtest covering the same window. Does not affect signals, plots, or alerts.", group="General Settings")
+startLongTradeForStats = startLongTrade and time >= backtestStatsStartDate
+endLongTradeForStats = endLongTrade and time >= backtestStatsStartDate
+startShortTradeForStats = startShortTrade and time >= backtestStatsStartDate
+endShortTradeForStats = endShortTrade and time >= backtestStatsStartDate
+
+[totalWins, totalLosses, totalEarlySignalFlips, totalTrades, tradeStatsHeader, winLossRatio, winRate] = ml.backtest(high, low, open, startLongTradeForStats, endLongTradeForStats, startShortTradeForStats, endShortTradeForStats, isEarlySignalFlip, maxBarsBackIndex, bar_index, settings.source, useWorstCase)
 
 init_table() =>
     c_transparent = color.new(color.black, 100)

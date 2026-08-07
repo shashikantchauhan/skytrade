@@ -199,48 +199,75 @@ async def _process_symbol(
     notifier: Notifier,
     index_result: FastPredictResult | None,
 ) -> None:
-    """Evaluate the newest bar, record/close trades, and notify for one symbol."""
+    """Evaluate the newest bar, record/close trades, and notify for one symbol.
+
+    Trade bookkeeping mirrors Pine's own ``ml.backtest`` block order and
+    scoring exactly (see ``application/backtest.py``'s module docstring): a
+    new entry first abandons -- without scoring -- whatever opposite-side
+    position was still open, then that side's own exit (if it fires the same
+    bar) is applied. Entry/exit price uses Pine's ``(high+low+open+open)/4``
+    scoring convention, not the close, so live trades stay consistent with
+    the historical backtest.
+    """
     evaluated = await _evaluate_symbol(
         symbol, config, provider, engine, candle_repository, engine_state_repository
     )
     if evaluated is None:
         return
     result, newest_candle = evaluated
+    market_price = _market_price(newest_candle)
 
-    if result.end_long:
-        await trade_repository.close_open_trade(
-            symbol,
+    if result.signal == "BUY":
+        await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.SELL)
+        await trade_repository.open_trade(
             config.candle_interval,
-            SignalSide.BUY,
-            newest_candle.timestamp,
-            newest_candle.close,
+            Trade(
+                symbol=symbol,
+                side=SignalSide.BUY,
+                entry_timestamp=newest_candle.timestamp,
+                entry_price=market_price,
+                prediction_at_entry=result.prediction,
+                is_early_signal_flip=result.is_early_signal_flip,
+            ),
+        )
+    if result.end_long:
+        await _notify_exit(
+            symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
+            trade_repository, signal_repository, notifier,
+        )
+        await trade_repository.close_open_trade(
+            symbol, config.candle_interval, SignalSide.BUY, newest_candle.timestamp, market_price
+        )
+    if result.signal == "SELL":
+        await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
+        await trade_repository.open_trade(
+            config.candle_interval,
+            Trade(
+                symbol=symbol,
+                side=SignalSide.SELL,
+                entry_timestamp=newest_candle.timestamp,
+                entry_price=market_price,
+                prediction_at_entry=result.prediction,
+                is_early_signal_flip=result.is_early_signal_flip,
+            ),
         )
     if result.end_short:
+        await _notify_exit(
+            symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
+            trade_repository, signal_repository, notifier,
+        )
         await trade_repository.close_open_trade(
-            symbol,
-            config.candle_interval,
-            SignalSide.SELL,
-            newest_candle.timestamp,
-            newest_candle.close,
+            symbol, config.candle_interval, SignalSide.SELL, newest_candle.timestamp, market_price
         )
 
     if result.signal not in ("BUY", "SELL"):
         return
 
     side = SignalSide.BUY if result.signal == "BUY" else SignalSide.SELL
-    await trade_repository.open_trade(
-        config.candle_interval,
-        Trade(
-            symbol=symbol,
-            side=side,
-            entry_timestamp=newest_candle.timestamp,
-            entry_price=newest_candle.close,
-            prediction_at_entry=result.prediction,
-            is_early_signal_flip=result.is_early_signal_flip,
-        ),
-    )
-
     rationale = f"prediction={result.prediction}"
+    win_rate_summary = await _win_rate_summary(symbol, config, trade_repository)
+    if win_rate_summary is not None:
+        rationale += f"; {win_rate_summary}"
     if index_result is not None:
         rationale += (
             f"; index({config.index_symbol})={index_result.signal},"
@@ -258,6 +285,76 @@ async def _process_symbol(
         return
     await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
+
+
+async def _notify_exit(
+    symbol: str,
+    config: AppConfig,
+    side: SignalSide,
+    exit_timestamp,
+    exit_price: Decimal,
+    trade_repository: TradeRepository,
+    signal_repository: SignalRepository,
+    notifier: Notifier,
+) -> None:
+    """Notify that an open position closed, with its realized pnl_percent.
+
+    Reads the still-open trade's entry price before ``close_open_trade`` is
+    called, so this must run first. A distinct ``strategy`` tag keeps this
+    signal's fingerprint from ever colliding with an entry notification at
+    the same symbol/side/timestamp (see Signal.fingerprint).
+    """
+    trades = await trade_repository.get_trades(symbol, config.candle_interval)
+    open_trade = next((trade for trade in trades if trade.side == side and trade.status == "open"), None)
+    if open_trade is None:
+        return  # Nothing was actually open (e.g. abandoned by an opposite entry earlier).
+
+    pnl_percent = (
+        (exit_price - open_trade.entry_price) / open_trade.entry_price * 100
+        if side == SignalSide.BUY
+        else (open_trade.entry_price - exit_price) / open_trade.entry_price * 100
+    )
+    signal = Signal(
+        symbol=symbol,
+        side=side,
+        strategy=f"{_STRATEGY_NAME}-exit",
+        timestamp=exit_timestamp,
+        price=exit_price,
+        rationale=(
+            f"exit; entry={open_trade.entry_price}, exit={exit_price}, pnl={pnl_percent:.2f}%"
+        ),
+    )
+    if await signal_repository.contains(signal.fingerprint):
+        return
+    await notifier.send_signal(signal)
+    await signal_repository.record(signal.fingerprint, signal.timestamp)
+
+
+async def _win_rate_summary(
+    symbol: str, config: AppConfig, trade_repository: TradeRepository
+) -> str | None:
+    """Summarize this symbol's historical closed-trade win rate for a notification.
+
+    Returns None if there's no closed-trade history yet (a brand-new symbol,
+    or one whose only trades are still open) -- nothing meaningful to show.
+    """
+    trades = await trade_repository.get_trades(symbol, config.candle_interval)
+    closed = [trade for trade in trades if trade.status == "closed"]
+    if not closed:
+        return None
+    wins = sum(1 for trade in closed if trade.pnl_percent is not None and trade.pnl_percent > 0)
+    losses = sum(1 for trade in closed if trade.pnl_percent is not None and trade.pnl_percent < 0)
+    win_rate = 100 * wins / len(closed)
+    return f"win_rate={win_rate:.1f}%({wins}W/{losses}L)"
+
+
+def _market_price(candle: Candle) -> Decimal:
+    """Pine's ``ml.backtest`` scoring price: (high + low + open + open) / 4.
+
+    Not the close -- matches ``application/backtest.py``'s historical
+    replay so live and backtested trades use the same price convention.
+    """
+    return (candle.high + candle.low + candle.open + candle.open) / 4
 
 
 def _dataframe_to_candles(symbol: str, data: pd.DataFrame) -> list[Candle]:

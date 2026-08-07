@@ -68,12 +68,16 @@ class FakeTradeRepository:
     def __init__(self) -> None:
         self.opened: list[Trade] = []
         self.closed: list[tuple[str, str, object, object, object]] = []
+        self.abandoned: list[tuple[str, str, object]] = []
 
     async def open_trade(self, interval, trade: Trade) -> None:
         self.opened.append(trade)
 
     async def close_open_trade(self, symbol, interval, side, exit_timestamp, exit_price) -> None:
         self.closed.append((symbol, interval, side, exit_timestamp, exit_price))
+
+    async def abandon_open_trade(self, symbol, interval, side) -> None:
+        self.abandoned.append((symbol, interval, side))
 
     async def get_trades(self, symbol, interval):
         return self.opened
@@ -366,7 +370,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
     assert trade.side == SignalSide.BUY
     assert trade.prediction_at_entry == 6
     assert trade.is_early_signal_flip is True
-    assert trade.entry_price == Decimal("100.5")  # _small_recent_download's close
+    assert trade.entry_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
     assert notifier.sent  # entry still notifies as before
 
 
@@ -414,7 +418,176 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
     symbol, interval, side, exit_timestamp, exit_price = trade_repository.closed[0]
     assert symbol == "AARTIIND.NS"
     assert side == SignalSide.BUY
-    assert exit_price == Decimal("100.5")
+    assert exit_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
+
+
+@pytest.mark.asyncio
+async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(monkeypatch) -> None:
+    """A new SELL entry must abandon any still-open BUY position rather than
+    leave it dangling -- mirrors Pine's ml.backtest, which silently discards
+    whatever position was open when the opposite side enters, never scoring
+    it as a win or a loss."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="SELL",
+            prediction=-6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=-1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        notifier,
+    )
+
+    assert trade_repository.abandoned == [("AARTIIND.NS", "1h", SignalSide.BUY)]
+    assert trade_repository.closed == []  # abandoned, not closed -- never scored
+    assert len(trade_repository.opened) == 1
+    assert trade_repository.opened[0].side == SignalSide.SELL
+
+
+@pytest.mark.asyncio
+async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None:
+    """A dynamic exit must notify too (not just silently close the trade),
+    showing the realized pnl_percent, using a fingerprint distinct from any
+    entry notification at the same symbol/side/timestamp."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="NEUTRAL",
+            prediction=-2,
+            end_long=True,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    trade_repository.opened = [
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 8, 1, tzinfo=UTC), entry_price=Decimal("80"),
+            prediction_at_entry=4, is_early_signal_flip=False, status="open",
+        ),
+    ]
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        notifier,
+    )
+
+    assert len(notifier.sent) == 1
+    exit_signal = notifier.sent[0]
+    assert exit_signal.strategy == "lorentzian-exit"
+    assert exit_signal.side == SignalSide.BUY
+    assert "pnl=25.00%" in exit_signal.rationale  # (100-80)/80*100, market_price=100
+
+
+@pytest.mark.asyncio
+async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None:
+    """Prior closed trades for this symbol must be summarized in the
+    notification's rationale, so a signal is never sent without context on
+    how this symbol has actually performed historically."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="BUY",
+            prediction=6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    # Pre-existing closed trade history: 2 wins, 1 loss.
+    trade_repository.opened = [
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, 1, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, 2, tzinfo=UTC), exit_price=Decimal("110"),
+            pnl_percent=Decimal("10"), status="closed",
+        ),
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.SELL,
+            entry_timestamp=datetime(2026, 1, 3, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=-4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, 4, tzinfo=UTC), exit_price=Decimal("105"),
+            pnl_percent=Decimal("-5"), status="closed",
+        ),
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, 5, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, 6, tzinfo=UTC), exit_price=Decimal("108"),
+            pnl_percent=Decimal("8"), status="closed",
+        ),
+    ]
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        notifier,
+    )
+
+    assert notifier.sent
+    assert "win_rate=66.7%(2W/1L)" in notifier.sent[0].rationale
 
 
 @pytest.mark.asyncio
