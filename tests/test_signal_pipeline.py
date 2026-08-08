@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -11,7 +12,7 @@ from trading_scanner.application.signal_pipeline import (
     run_signal_pipeline,
 )
 from trading_scanner.config.settings import AppConfig
-from trading_scanner.domain.models import Candle, SignalSide, Trade
+from trading_scanner.domain.models import Candle, PaperPosition, SignalSide, Trade
 from trading_scanner.domain.ports import EngineState
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
@@ -83,6 +84,42 @@ class FakeTradeRepository:
         return self.opened
 
 
+class FakePaperAccountRepository:
+    """In-memory PaperAccountRepository fake."""
+
+    def __init__(self, cash_balance=Decimal("500000")) -> None:
+        self._cash_balance = cash_balance
+        self.opened = []
+        self.closed = []
+
+    async def get_cash_balance(self) -> Decimal:
+        return self._cash_balance
+
+    async def open_position(self, position) -> None:
+        self.opened.append(position)
+        self._cash_balance -= position.capital_allocated
+
+    async def close_position(self, symbol, exit_timestamp, exit_price):
+        matching = [p for p in self.opened if p.symbol == symbol]
+        if not matching:
+            return None
+        position = matching[-1]
+        pnl_amount = (exit_price - position.entry_price) * position.quantity
+        self._cash_balance += position.capital_allocated + pnl_amount
+        closed = replace(
+            position,
+            exit_timestamp=exit_timestamp,
+            exit_price=exit_price,
+            pnl_amount=pnl_amount,
+            status="closed",
+        )
+        self.closed.append(closed)
+        return closed
+
+    async def get_open_positions(self):
+        return [p for p in self.opened if p.status == "open"]
+
+
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent = []
@@ -148,6 +185,7 @@ async def test_symbol_below_minimum_history_is_skipped_without_analysis(monkeypa
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -157,6 +195,7 @@ async def test_symbol_below_minimum_history_is_skipped_without_analysis(monkeypa
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -176,6 +215,7 @@ async def test_candles_are_upserted_every_run(monkeypatch) -> None:
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -185,6 +225,7 @@ async def test_candles_are_upserted_every_run(monkeypatch) -> None:
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -207,6 +248,7 @@ async def test_new_symbol_triggers_a_full_backfill_window(monkeypatch) -> None:
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -216,6 +258,7 @@ async def test_new_symbol_triggers_a_full_backfill_window(monkeypatch) -> None:
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -236,6 +279,7 @@ async def test_known_symbol_only_requests_the_recent_window(monkeypatch) -> None
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -245,6 +289,7 @@ async def test_known_symbol_only_requests_the_recent_window(monkeypatch) -> None
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -267,6 +312,7 @@ async def test_one_failing_symbol_does_not_stop_the_batch(monkeypatch) -> None:
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -276,6 +322,7 @@ async def test_one_failing_symbol_does_not_stop_the_batch(monkeypatch) -> None:
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -298,6 +345,7 @@ async def test_repeated_run_with_same_newest_candle_does_not_reprocess(monkeypat
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -307,6 +355,7 @@ async def test_repeated_run_with_same_newest_candle_does_not_reprocess(monkeypat
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
     state_after_first_run = await engine_state_repository.get_state("AARTIIND.NS", "1h")
@@ -318,6 +367,7 @@ async def test_repeated_run_with_same_newest_candle_does_not_reprocess(monkeypat
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
     state_after_second_run = await engine_state_repository.get_state("AARTIIND.NS", "1h")
@@ -352,6 +402,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -361,6 +412,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -401,6 +453,7 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -410,6 +463,7 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -450,6 +504,7 @@ async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(mon
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -459,6 +514,7 @@ async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(mon
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -496,6 +552,7 @@ async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     trade_repository.opened = [
         Trade(
             symbol="AARTIIND.NS", side=SignalSide.BUY,
@@ -512,6 +569,7 @@ async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
@@ -550,6 +608,7 @@ async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     # Pre-existing closed trade history: 2 wins, 1 loss.
     trade_repository.opened = [
         Trade(
@@ -583,11 +642,277 @@ async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 
     assert notifier.sent
     assert "win_rate=66.7%(2W/1L)" in notifier.sent[0].rationale
+
+
+@pytest.mark.asyncio
+async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> None:
+    """A BUY entry for a symbol with a strong (>=55%) closed BUY-only track
+    record must open a real paper position, sized off the account's
+    remaining cash balance."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="BUY",
+            prediction=6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    # 5 closed BUY trades, 4 wins -- 80% win rate, well above the 55% bar.
+    trade_repository.opened = [
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, index, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, index, tzinfo=UTC), exit_price=Decimal("110"),
+            pnl_percent=Decimal("10" if index != 1 else "-5"), status="closed",
+        )
+        for index in range(1, 6)
+    ]
+    paper_account_repository = FakePaperAccountRepository()
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    assert len(paper_account_repository.opened) == 1
+    position = paper_account_repository.opened[0]
+    assert position.symbol == "AARTIIND.NS"
+    assert position.quantity == 750  # POSITION_SIZE(75000) / entry_price(100)
+    assert "paper: opened 750 qty" in notifier.sent[0].rationale
+
+
+@pytest.mark.asyncio
+async def test_buy_entry_skips_paper_position_when_not_eligible(monkeypatch) -> None:
+    """A symbol with no (or insufficient) closed BUY track record must not
+    open a paper position -- still notifies, tagged as not eligible."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="BUY",
+            prediction=6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()  # no closed trade history at all
+    paper_account_repository = FakePaperAccountRepository()
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    assert paper_account_repository.opened == []
+    assert "paper: not eligible" in notifier.sent[0].rationale
+
+
+@pytest.mark.asyncio
+async def test_buy_entry_skips_paper_position_when_no_capital(monkeypatch) -> None:
+    """An eligible symbol must still be skipped (not notified as opened) once
+    the account's cash balance can't cover one more position slot."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="BUY",
+            prediction=6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    trade_repository.opened = [
+        Trade(
+            symbol="AARTIIND.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, index, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, index, tzinfo=UTC), exit_price=Decimal("110"),
+            pnl_percent=Decimal("10"), status="closed",
+        )
+        for index in range(1, 6)
+    ]
+    paper_account_repository = FakePaperAccountRepository(cash_balance=Decimal("1000"))
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    assert paper_account_repository.opened == []
+    assert "paper: SKIPPED (no capital available)" in notifier.sent[0].rationale
+
+
+@pytest.mark.asyncio
+async def test_end_long_closes_the_paper_position_and_notifies_pnl(monkeypatch) -> None:
+    """A dynamic exit must close the matching open paper position (crediting
+    cash back) and send a distinct paper-exit notification with the realized
+    rupee P&L."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="NEUTRAL",
+            prediction=-2,
+            end_long=True,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
+    paper_account_repository.opened = [
+        PaperPosition(
+            symbol="AARTIIND.NS",
+            entry_timestamp=datetime(2026, 8, 1, tzinfo=UTC),
+            entry_price=Decimal("80"),
+            quantity=100,
+            capital_allocated=Decimal("8000"),
+        )
+    ]
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    assert len(paper_account_repository.closed) == 1
+    exit_signal = next(
+        s for s in notifier.sent if s.strategy == "lorentzian-paper-exit"
+    )
+    assert exit_signal.side == SignalSide.BUY
+    assert "pnl=₹2000" in exit_signal.rationale  # (100-80)*100 qty
+
+
+@pytest.mark.asyncio
+async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
+    """SELL signals must never touch the paper account -- NSE cash market
+    doesn't allow short selling for multi-day holds -- and must be tagged
+    as informational only in the notification."""
+    monkeypatch.setattr(
+        YahooProvider,
+        "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="SELL",
+            prediction=-6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=-1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        ["AARTIIND.NS"],
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    assert paper_account_repository.opened == []
+    assert "informational only -- not tradeable in NSE cash market" in notifier.sent[0].rationale
 
 
 @pytest.mark.asyncio
@@ -655,6 +980,7 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
     signal_repository = FakeSignalRepository()
     engine_state_repository = FakeEngineStateRepository()
     trade_repository = FakeTradeRepository()
+    paper_account_repository = FakePaperAccountRepository()
     notifier = FakeNotifier()
 
     await run_signal_pipeline(
@@ -664,6 +990,7 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         signal_repository,
         engine_state_repository,
         trade_repository,
+        paper_account_repository,
         notifier,
     )
 

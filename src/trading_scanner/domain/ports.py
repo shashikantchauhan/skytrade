@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
+from trading_scanner.domain.models import Candle, PaperPosition, Signal, SignalSide, Trade
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,3 +85,35 @@ class TradeRepository(Protocol):
         ...
 
     async def get_trades(self, symbol: str | None, interval: str) -> Sequence[Trade]: ...
+
+
+class PaperAccountRepository(Protocol):
+    """Tracks the paper-trading account's cash balance and open/closed positions.
+
+    Long-only (see ``application/paper_trading.py``): every ``PaperPosition``
+    here represents real capital committed against a BUY entry, never a
+    short. One account only -- no ``symbol`` scoping on the cash balance.
+    """
+
+    async def get_cash_balance(self) -> Decimal:
+        """Return the current cash balance, initializing it on first call."""
+        ...
+
+    async def open_position(self, position: PaperPosition) -> None:
+        """Record a new open position and deduct its capital from cash."""
+        ...
+
+    async def close_position(
+        self,
+        symbol: str,
+        exit_timestamp: datetime,
+        exit_price: Decimal,
+    ) -> PaperPosition | None:
+        """Close the most recent open position for ``symbol``, crediting cash.
+
+        Returns the closed position (with pnl_amount filled in), or None if
+        nothing was open (e.g. never eligible, or capacity was full at entry).
+        """
+        ...
+
+    async def get_open_positions(self) -> Sequence[PaperPosition]: ...

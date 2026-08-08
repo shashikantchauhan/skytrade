@@ -1,8 +1,17 @@
 name: Hourly Signal Pipeline
 
+# Runs only during NSE market hours (9:15 AM - 3:30 PM IST), weekdays only.
+# Hourly candles close at 10:15, 11:15, 12:15, 13:15, 14:15, 15:15 IST -- each
+# trigger fires 5 minutes after the candle closes (IST = UTC+5:30), giving
+# Yahoo Finance time to actually have that candle available before we fetch
+# it. This does not account for NSE holidays; on a holiday the pipeline just
+# finds no new candle and skips every symbol gracefully (see
+# application/signal_pipeline.py's "No new candle... skipping" log line) --
+# harmless, not broken. GitHub's own cron scheduling can also run a few
+# minutes late under load, which eats into that 5-minute buffer.
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "50 4-9 * * 1-5"
   workflow_dispatch: {}
 
 jobs:

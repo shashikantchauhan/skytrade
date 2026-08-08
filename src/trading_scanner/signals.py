@@ -3,6 +3,7 @@
 import asyncio
 import logging
 
+from trading_scanner.application.paper_trading import INITIAL_CAPITAL
 from trading_scanner.application.signal_pipeline import run_signal_pipeline
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
@@ -10,6 +11,7 @@ from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNot
 from trading_scanner.infrastructure.turso import (
     TursoCandleRepository,
     TursoEngineStateRepository,
+    TursoPaperAccountRepository,
     TursoSignalRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -39,10 +41,12 @@ async def _run(config: AppConfig) -> None:
         signal_repository = TursoSignalRepository(client)
         engine_state_repository = TursoEngineStateRepository(client)
         trade_repository = TursoTradeRepository(client)
+        paper_account_repository = TursoPaperAccountRepository(client, INITIAL_CAPITAL)
         await candle_repository.ensure_schema()
         await signal_repository.ensure_schema()
         await engine_state_repository.ensure_schema()
         await trade_repository.ensure_schema()
+        await paper_account_repository.ensure_schema()
 
         notifier = _build_notifier(config)
         await run_signal_pipeline(
@@ -52,6 +56,7 @@ async def _run(config: AppConfig) -> None:
             signal_repository,
             engine_state_repository,
             trade_repository,
+            paper_account_repository,
             notifier,
         )
     finally:

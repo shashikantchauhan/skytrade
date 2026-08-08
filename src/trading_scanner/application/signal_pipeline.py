@@ -1,11 +1,13 @@
 """Hourly pipeline: accumulate candles per symbol and notify on AlphaEngine signals."""
 
 import logging
+from datetime import UTC
 from decimal import Decimal
 
 import pandas as pd
 
 from trading_scanner.alpha_engine import AlphaEngine
+from trading_scanner.application import paper_trading
 from trading_scanner.application.fast_predict import (
     ExitState,
     FastPredictResult,
@@ -20,6 +22,7 @@ from trading_scanner.domain.ports import (
     EngineState,
     EngineStateRepository,
     Notifier,
+    PaperAccountRepository,
     SignalRepository,
     TradeRepository,
 )
@@ -71,6 +74,7 @@ async def run_signal_pipeline(
     signal_repository: SignalRepository,
     engine_state_repository: EngineStateRepository,
     trade_repository: TradeRepository,
+    paper_account_repository: PaperAccountRepository,
     notifier: Notifier,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
@@ -107,6 +111,7 @@ async def run_signal_pipeline(
                 signal_repository,
                 engine_state_repository,
                 trade_repository,
+                paper_account_repository,
                 notifier,
                 index_result,
             )
@@ -196,6 +201,7 @@ async def _process_symbol(
     signal_repository: SignalRepository,
     engine_state_repository: EngineStateRepository,
     trade_repository: TradeRepository,
+    paper_account_repository: PaperAccountRepository,
     notifier: Notifier,
     index_result: FastPredictResult | None,
 ) -> None:
@@ -208,6 +214,12 @@ async def _process_symbol(
     bar) is applied. Entry/exit price uses Pine's ``(high+low+open+open)/4``
     scoring convention, not the close, so live trades stay consistent with
     the historical backtest.
+
+    BUY entries additionally attempt to open a real paper-trading position
+    (see ``application/paper_trading.py``) -- gated on the symbol's own
+    BUY-only win-rate track record and on the account having free capital.
+    SELL signals never touch the paper account: NSE cash market doesn't
+    allow short selling for multi-day holds, so they stay informational only.
     """
     evaluated = await _evaluate_symbol(
         symbol, config, provider, engine, candle_repository, engine_state_repository
@@ -216,6 +228,7 @@ async def _process_symbol(
         return
     result, newest_candle = evaluated
     market_price = _market_price(newest_candle)
+    paper_note = None
 
     if result.signal == "BUY":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.SELL)
@@ -230,6 +243,10 @@ async def _process_symbol(
                 is_early_signal_flip=result.is_early_signal_flip,
             ),
         )
+        paper_note = await _open_paper_position(
+            symbol, config, newest_candle.timestamp, market_price,
+            trade_repository, paper_account_repository,
+        )
     if result.end_long:
         await _notify_exit(
             symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
@@ -237,6 +254,10 @@ async def _process_symbol(
         )
         await trade_repository.close_open_trade(
             symbol, config.candle_interval, SignalSide.BUY, newest_candle.timestamp, market_price
+        )
+        await _close_paper_position(
+            symbol, newest_candle.timestamp, market_price,
+            paper_account_repository, signal_repository, notifier,
         )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
@@ -268,6 +289,10 @@ async def _process_symbol(
     win_rate_summary = await _win_rate_summary(symbol, config, trade_repository)
     if win_rate_summary is not None:
         rationale += f"; {win_rate_summary}"
+    if side == SignalSide.SELL:
+        rationale += "; informational only -- not tradeable in NSE cash market"
+    elif paper_note is not None:
+        rationale += f"; {paper_note}"
     if index_result is not None:
         rationale += (
             f"; index({config.index_symbol})={index_result.signal},"
@@ -330,6 +355,59 @@ async def _notify_exit(
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
+async def _open_paper_position(
+    symbol: str,
+    config: AppConfig,
+    entry_timestamp,
+    entry_price: Decimal,
+    trade_repository: TradeRepository,
+    paper_account_repository: PaperAccountRepository,
+) -> str | None:
+    """Attempt to open a real paper position for a BUY entry; return a status note.
+
+    Returns a short human-readable reason whenever no position was opened
+    (not yet eligible, or the account is out of free capital) so the caller
+    can surface it in the notification instead of silently skipping.
+    """
+    if not await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
+        return "paper: not eligible yet (win_rate<55% or insufficient trade history)"
+    position = await paper_trading.try_open_position(
+        symbol, entry_timestamp, entry_price, paper_account_repository
+    )
+    if position is None:
+        return "paper: SKIPPED (no capital available)"
+    return f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f})"
+
+
+async def _close_paper_position(
+    symbol: str,
+    exit_timestamp,
+    exit_price: Decimal,
+    paper_account_repository: PaperAccountRepository,
+    signal_repository: SignalRepository,
+    notifier: Notifier,
+) -> None:
+    """Close an open paper position (if any) and notify the realized P&L."""
+    closed = await paper_account_repository.close_position(symbol, exit_timestamp, exit_price)
+    if closed is None:
+        return  # Nothing was ever opened for this symbol (not eligible / no capacity).
+    signal = Signal(
+        symbol=symbol,
+        side=SignalSide.BUY,
+        strategy=f"{_STRATEGY_NAME}-paper-exit",
+        timestamp=exit_timestamp,
+        price=exit_price,
+        rationale=(
+            f"paper CLOSE {closed.quantity} qty; entry={closed.entry_price}, "
+            f"exit={exit_price}, pnl=₹{closed.pnl_amount:.0f}"
+        ),
+    )
+    if await signal_repository.contains(signal.fingerprint):
+        return
+    await notifier.send_signal(signal)
+    await signal_repository.record(signal.fingerprint, signal.timestamp)
+
+
 async def _win_rate_summary(
     symbol: str, config: AppConfig, trade_repository: TradeRepository
 ) -> str | None:
@@ -374,7 +452,17 @@ def _dataframe_to_candles(symbol: str, data: pd.DataFrame) -> list[Candle]:
 
 
 def _candles_to_dataframe(candles) -> pd.DataFrame:
-    """Convert chronological Candle objects into the OHLCV DataFrame AlphaEngine expects."""
+    """Convert chronological Candle objects into the OHLCV DataFrame AlphaEngine expects.
+
+    Normalizes every timestamp to UTC before building the index -- candles
+    stored across different runs can carry equivalent-offset but distinct
+    tzinfo objects (e.g. a fixed +05:30 offset vs. a zoneinfo-based one),
+    which pandas refuses to unify into one DatetimeIndex without this
+    (raises "Tz-aware datetime.datetime cannot be converted to datetime64
+    unless utc=True"). AlphaEngine only depends on chronological order and
+    OHLCV values, never the displayed hour, so this is safe -- the original
+    Candle objects (with their real tzinfo) are still used everywhere else.
+    """
     return pd.DataFrame(
         {
             "Open": [float(candle.open) for candle in candles],
@@ -383,5 +471,5 @@ def _candles_to_dataframe(candles) -> pd.DataFrame:
             "Close": [float(candle.close) for candle in candles],
             "Volume": [candle.volume for candle in candles],
         },
-        index=pd.DatetimeIndex([candle.timestamp for candle in candles]),
+        index=pd.DatetimeIndex([candle.timestamp.astimezone(UTC) for candle in candles]),
     )

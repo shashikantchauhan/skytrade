@@ -31,6 +31,7 @@ matter for matching TradingView's numbers exactly:
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from datetime import UTC
 
 import pandas as pd
 
@@ -186,7 +187,13 @@ def _is_early_signal_flip(changed, bar: int) -> bool:
 
 
 def _candles_to_dataframe(candles: Sequence[Candle]) -> pd.DataFrame:
-    """Convert chronological Candle objects into the OHLCV DataFrame AlphaEngine expects."""
+    """Convert chronological Candle objects into the OHLCV DataFrame AlphaEngine expects.
+
+    Normalizes every timestamp to UTC before building the index -- see
+    ``application/signal_pipeline.py``'s identical helper for why this is
+    required (candles can carry equivalent-offset but distinct tzinfo
+    objects, which pandas refuses to unify without this).
+    """
     return pd.DataFrame(
         {
             "Open": [float(candle.open) for candle in candles],
@@ -195,5 +202,5 @@ def _candles_to_dataframe(candles: Sequence[Candle]) -> pd.DataFrame:
             "Close": [float(candle.close) for candle in candles],
             "Volume": [candle.volume for candle in candles],
         },
-        index=pd.DatetimeIndex([candle.timestamp for candle in candles]),
+        index=pd.DatetimeIndex([candle.timestamp.astimezone(UTC) for candle in candles]),
     )

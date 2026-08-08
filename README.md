@@ -197,9 +197,44 @@ For each symbol, every run:
    knowing how this symbol's past trades have actually performed. Omitted
    entirely for a symbol with no closed trades yet.
 
-Only entries (BUY/SELL) trigger a Telegram notification. Exits
-(`end_long`/`end_short`) are recorded and close out the trade silently —
-there is no separate "position closed" alert.
+Only entries (BUY/SELL) trigger a Telegram notification. When AlphaEngine's
+own dynamic exit fires, a distinct "CLOSE" notification is sent too, showing
+the realized `pnl_percent`.
+
+### Paper trading account
+
+`application/paper_trading.py` simulates a real-money account (₹5,00,000
+starting capital) alongside the strategy's own signals — long-only, since
+NSE cash market doesn't allow short selling for multi-day (delivery) holds
+and this strategy's average holding period is ~3.5 days. Every BUY entry is
+gated on two checks before it becomes a real paper position:
+
+1. **Eligibility**: the symbol needs at least 5 closed BUY-only trades and a
+   BUY-only win rate of at least 55% (computed from the same `trades` table
+   the win-rate notification summary uses). A symbol with no track record
+   yet, or a weak one, still notifies — just tagged
+   `paper: not eligible yet`.
+2. **Capacity**: positions are sized at a fixed ₹75,000 (chosen so the
+   BUY-only average winning trade, ~3.34%, nets ~₹2,500 — the target
+   average win). ₹5,00,000 / ₹75,000 gives ~6-7 concurrent slots. Once the
+   account's cash balance can't cover one more slot, the entry is skipped
+   and tagged `paper: SKIPPED (no capital available)` rather than silently
+   dropped.
+
+SELL signals never touch the paper account — they still notify, tagged
+`informational only — not tradeable in NSE cash market`, since they can't be
+executed as real cash-market positions. When a paper position's matching
+`end_long` exit fires, it closes with a distinct `lorentzian-paper-exit`
+notification showing the realized rupee P&L, and its capital (plus/minus
+P&L) returns to the account's cash balance for the next eligible entry.
+
+This is a deliberate first phase before any real capital or broker
+connection: once a week of paper results confirms the account is actually
+profitable, the plan is to buy a Zerodha Kite Connect market-data
+subscription (needed for real-time execution anyway) and go live with real
+money — and, in a later phase, use that same real option-chain data to
+explore buying PE (put) options as a synthetic short for SELL signals, since
+direct short selling isn't available in the cash market.
 
 ### Market index context
 
@@ -239,9 +274,14 @@ development and production.
 ### Scheduling
 
 [`.github/workflows/hourly-signals.yml`](.github/workflows/hourly-signals.yml)
-runs the pipeline every hour via `cron: "0 * * * *"` (also triggerable
-manually via `workflow_dispatch`). Since this repository is public, GitHub
-Actions minutes are free regardless of run frequency or symbol count.
+runs only during NSE market hours (9:15 AM-3:30 PM IST), weekdays only, via
+`cron: "50 4-9 * * 1-5"` -- each trigger fires 5 minutes after an hourly
+candle closes (10:15, 11:15, 12:15, 13:15, 14:15, 15:15 IST), giving Yahoo
+Finance time to actually have that candle ready. Also triggerable manually
+via `workflow_dispatch`. This doesn't account for NSE holidays; on a holiday
+the pipeline just finds no new candle for every symbol and skips gracefully.
+Since this repository is public, GitHub Actions minutes are free regardless
+of run frequency or symbol count.
 
 ## Current Limitations
 

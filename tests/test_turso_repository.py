@@ -4,9 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from trading_scanner.domain.models import Candle, SignalSide, Trade
+from trading_scanner.domain.models import Candle, PaperPosition, SignalSide, Trade
 from trading_scanner.infrastructure.turso import (
     TursoCandleRepository,
+    TursoPaperAccountRepository,
     TursoSignalRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -190,5 +191,57 @@ async def test_abandon_open_trade_marks_it_abandoned_without_scoring(tmp_path: P
         assert stored.status == "abandoned"
         assert stored.exit_price is None
         assert stored.pnl_percent is None  # never scored as a win or a loss
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_account_initializes_cash_balance_on_first_call(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoPaperAccountRepository(client, Decimal("500000"))
+        await repository.ensure_schema()
+
+        assert await repository.get_cash_balance() == Decimal("500000")
+        # A second call must not re-initialize (and thus not reset) the balance.
+        await repository.open_position(
+            PaperPosition(
+                symbol="AARTIIND.NS",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                entry_price=Decimal("100"),
+                quantity=750,
+                capital_allocated=Decimal("75000"),
+            )
+        )
+        assert await repository.get_cash_balance() == Decimal("425000")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_paper_position_open_close_round_trip_credits_pnl_to_cash(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoPaperAccountRepository(client, Decimal("500000"))
+        await repository.ensure_schema()
+        await repository.open_position(
+            PaperPosition(
+                symbol="AARTIIND.NS",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                entry_price=Decimal("100"),
+                quantity=750,
+                capital_allocated=Decimal("75000"),
+            )
+        )
+
+        closed = await repository.close_position(
+            "AARTIIND.NS", datetime(2026, 8, 7, 10, 15, tzinfo=UTC), Decimal("110")
+        )
+
+        assert closed.status == "closed"
+        assert closed.pnl_amount == Decimal("7500")  # (110-100) * 750
+        # 500000 - 75000 (opened) + 75000 + 7500 (closed: capital back + pnl).
+        assert await repository.get_cash_balance() == Decimal("507500")
+        assert await repository.get_open_positions() == []
     finally:
         await client.close()

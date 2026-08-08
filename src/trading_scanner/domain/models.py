@@ -54,3 +54,26 @@ class Trade:
     exit_price: Decimal | None = None
     pnl_percent: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperPosition:
+    """A simulated real-money position in the paper-trading account.
+
+    Long-only: NSE cash market doesn't allow short selling for multi-day
+    holds, so paper positions only ever come from BUY entries (SELL signals
+    stay informational -- see ``application/paper_trading.py``). Distinct
+    from ``Trade`` (which records the strategy's own raw backtest scoring
+    for every symbol regardless of tradability); this tracks actual capital
+    committed and returned by the paper account.
+    """
+
+    symbol: str
+    entry_timestamp: datetime
+    entry_price: Decimal
+    quantity: int
+    capital_allocated: Decimal
+    exit_timestamp: datetime | None = None
+    exit_price: Decimal | None = None
+    pnl_amount: Decimal | None = None
+    status: str = "open"  # "open" | "closed"
