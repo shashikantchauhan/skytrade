@@ -3,6 +3,134 @@
 This project downloads and validates market candles so that a strategy can be
 added in a later milestone.
 
+## ⚠️ Read this first — Project Plan & Status
+
+This section exists so work can resume from a completely different
+machine/account with zero prior context. Read this before touching code.
+
+### What this project actually is
+
+A Python port of a TradingView "Lorentzian Classification" Pine Script
+strategy (`strategy/lorentzian.pine`, `strategy/MLExtensions_v2.pine`), run
+hourly against ~220 NSE F&O stocks + sector indices, that:
+1. Generates BUY/SELL signals matching the TradingView chart bar-for-bar.
+2. Tracks every entry/exit as a `Trade` for real win-rate statistics.
+3. Runs a simulated (paper) ₹5,00,000 trading account on top of that,
+   long-only, gated by each symbol's own track record and available capital.
+4. Notifies everything via Telegram.
+
+The end goal (not yet reached) is: validate the paper account is actually
+profitable for about a week, then connect it to a real Zerodha account for
+live trading with real accounting.
+
+### Hard constraints — do not violate these
+
+- **No git/GitHub work from the assistant, ever.** The user (not the
+  assistant) runs all `git`/`gh` commands — init, commit, push, secrets,
+  repository settings. Only edit files locally.
+- **Long-only, always.** NSE cash market does not allow short selling for
+  multi-day (delivery) holds — only intraday MIS, squared off same day. This
+  strategy's average holding period is ~3.5 days, so **SELL signals can
+  never become real trades** in the cash market. They still notify
+  (informational only) but must never touch the paper account or (later)
+  place a real order. This is already implemented correctly — do not "fix"
+  it into placing short orders.
+- **`alpha_engine.py` (the Pine Script translation) is not to be modified.**
+  All fixes/extensions go in the `application/` layer around it, reusing its
+  private methods, so the core translation stays a faithful 1:1 port that
+  can always be checked against TradingView.
+- Personal coding standards from `~/.claude/CLAUDE.md` apply throughout: no
+  mutation, pure functions, flat/early-return logic, fail loudly (no silent
+  `None`/swallowed exceptions), comment only the *why*.
+
+### Key technical decisions already made (don't re-litigate)
+
+- **Pine-faithful trade scoring**: every trade (live and backtest) prices
+  entry/exit at `(high + low + open + open) / 4` — Pine's own `ml.backtest`
+  convention, not the close. See `application/backtest.py`'s module
+  docstring for the full derivation and why this (plus single-active-
+  position tracking) was the actual root cause of an earlier win-rate
+  mismatch against TradingView's own on-chart stats table.
+- **Single active position per symbol**: a new opposite-side entry silently
+  *abandons* (never scores as win/loss) whatever position was still open —
+  mirrors Pine's own overwritable `start_long_trade`/`start_short_trade`
+  variables exactly. See `TradeRepository.abandon_open_trade`.
+- **`AlphaEngine(include_full_history=True, use_dynamic_exits=True)`** is the
+  production config everywhere (live pipeline and backtest) — matches the
+  real TradingView chart's input overrides.
+- **Residual TradingView gap accepted as unfixable**: even with the above
+  fixes, win rate doesn't match TradingView 100% exactly, attributed to
+  Yahoo Finance's shorter historical data depth vs. TradingView's own feed
+  (`include_full_history=True`'s neighbor search sees whatever history is
+  available — deeper on TradingView). Not fixable without a paid longer-
+  history data source. Accepted as good enough; do not keep chasing this.
+- **Stock-split data corruption**: Yahoo's incremental candle upsert never
+  retroactively re-adjusts old rows after a real split, permanently
+  corrupting the price scale at the split date (e.g. BAJFINANCE.NS showed a
+  fake +80% "profit" from an actual 1:5 split). Fixed once via a full
+  wipe-and-redownload of all candle history. If this happens again (watch
+  for implausible >40% single-bar jumps), the fix is the same: wipe
+  `candles`/`engine_state`/`trades` for the affected symbol(s) and
+  re-download fresh in one call (self-consistent split adjustment).
+- **Paper-trading sizing rationale**: ₹75,000/position was chosen (not an
+  arbitrary round number) because the BUY-only average winning trade is
+  ~3.34%, and 3.34% of ₹75,000 ≈ ₹2,500 — squarely in the user's explicitly
+  requested target of ₹2,000-3,000 average win per trade. ₹5,00,000 /
+  ₹75,000 ≈ 6-7 concurrent slots, derived via Little's Law (concurrent
+  positions ≈ entries/day × average holding period).
+
+### Current status (last touched)
+
+- Paper-trading account code is **built, wired in, and fully tested**
+  (33/33 tests passing) — see the "Paper trading account" section below for
+  what it does. Nothing further needed here unless requirements change.
+- A full 220-symbol historical backtest re-run (`python -m
+  trading_scanner.backtest`, rebuilding the `trades` table with the
+  Pine-faithful scoring above) was intentionally **stopped partway through**
+  (~85/220 symbols, around `GRASIM.NS`) so the machine could be freed up to
+  move to a different laptop/account. **This needs to be re-run to
+  completion** before the paper-trading eligibility filter has a full,
+  reliable picture across all 220 symbols (it degrades gracefully with
+  partial data — symbols never backtested just show "not eligible yet" —
+  but the plan calls for full coverage). Before re-running: confirm no
+  other backtest process is already running (`ps aux | grep
+  trading_scanner.backtest`) to avoid the double-DELETE race that happened
+  once earlier.
+- `config/symbols.txt` is fully populated: 220 symbols (208 real NSE F&O
+  stocks + `AARTIIND.NS` + 11 sector indices). Nothing to redo here.
+- GitHub Actions schedule (`.github/workflows/hourly-signals.yml`) is
+  already set to NSE market hours only. Nothing to redo here unless the
+  schedule needs adjusting.
+
+### Pending / next steps, in order
+
+1. Re-run the full 220-symbol backtest to completion (see above).
+2. Share the completed backtest results **one symbol at a time** (total
+   wins, total losses, win rate %, WL ratio only — explicitly NOT a CSV
+   export, NOT trade-by-trade detail — the user corrected this format
+   explicitly once already).
+3. Run the live hourly pipeline for real (locally or via the GitHub Action)
+   for about a week and let the paper account accumulate real signals/trades.
+4. Review paper-account performance after that week. Only if genuinely
+   profitable, proceed to Phase 2.
+5. **Phase 2 (future, not yet started)**: buy a Zerodha Kite Connect
+   market-data subscription (~₹2k, user has already agreed to this spend
+   conditionally on Phase 1 being profitable) — needed for real-time
+   execution regardless. Then explore buying PE (put) options as a
+   synthetic short mechanism for SELL signals (impossible to backtest
+   properly today since Yahoo has no Indian stock options data; Kite
+   Connect does).
+6. Eventually: real Zerodha live-trading integration with real accounting,
+   once paper trading has proven the strategy out.
+
+### Secrets that must travel with the code (not in git, not in this repo folder by default)
+
+`.env` holds real production credentials — copy it separately/securely, not
+alongside a public code share:
+- `TRADING_SCANNER_TURSO_URL`, `TRADING_SCANNER_TURSO_AUTH_TOKEN` (hosted DB —
+  already has real accumulated candle/trade/paper-account history in it)
+- `TRADING_SCANNER_TELEGRAM_BOT_TOKEN`, `TRADING_SCANNER_TELEGRAM_CHAT_ID`
+
 ## Project Structure
 
 ```text
