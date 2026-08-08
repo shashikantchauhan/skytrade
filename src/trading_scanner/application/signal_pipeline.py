@@ -330,7 +330,9 @@ async def _notify_exit(
     the same symbol/side/timestamp (see Signal.fingerprint).
     """
     trades = await trade_repository.get_trades(symbol, config.candle_interval)
-    open_trade = next((trade for trade in trades if trade.side == side and trade.status == "open"), None)
+    open_trade = next(
+        (trade for trade in trades if trade.side == side and trade.status == "open"), None
+    )
     if open_trade is None:
         return  # Nothing was actually open (e.g. abandoned by an opposite entry earlier).
 

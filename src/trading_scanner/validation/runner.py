@@ -6,8 +6,13 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from trading_scanner.alpha_engine import AlphaEngine
-from trading_scanner.alpha_engine import _ema, _finite_compare, _rational_quadratic, _sma
+from trading_scanner.alpha_engine import (
+    AlphaEngine,
+    _ema,
+    _finite_compare,
+    _rational_quadratic,
+    _sma,
+)
 from trading_scanner.infrastructure.yahoo import YahooFinanceProvider
 
 

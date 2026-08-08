@@ -419,7 +419,8 @@ class TursoPaperAccountRepository:
         """Close the most recent open position for symbol, crediting cash back."""
         result = await self._client.execute(
             """
-            SELECT id, entry_timestamp, entry_price, quantity, capital_allocated FROM paper_positions
+            SELECT id, entry_timestamp, entry_price, quantity, capital_allocated
+            FROM paper_positions
             WHERE symbol = ? AND status = 'open'
             ORDER BY entry_timestamp DESC LIMIT 1
             """,

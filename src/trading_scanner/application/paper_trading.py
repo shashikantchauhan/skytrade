@@ -89,5 +89,7 @@ async def _buy_only_win_rate(
     ]
     if len(closed_buys) < MIN_CLOSED_TRADES:
         return None
-    wins = sum(1 for trade in closed_buys if trade.pnl_percent is not None and trade.pnl_percent > 0)
+    wins = sum(
+        1 for trade in closed_buys if trade.pnl_percent is not None and trade.pnl_percent > 0
+    )
     return Decimal(100 * wins) / len(closed_buys)

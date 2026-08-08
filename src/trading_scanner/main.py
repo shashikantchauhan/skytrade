@@ -3,7 +3,7 @@
 import logging
 
 from trading_scanner.application.scanner import scan_symbols
-from trading_scanner.application.symbols import SymbolLoadError, SymbolLoader
+from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
 
 

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from trading_scanner.application.symbols import SymbolLoadError, SymbolLoader
+from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 
 
 def test_symbol_loader_ignores_blank_lines_and_duplicates(tmp_path: Path) -> None:

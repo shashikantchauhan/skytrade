@@ -38,7 +38,9 @@ def parse(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-async def _index_return(client, index_symbol: str, interval: str, start: datetime, end: datetime) -> float | None:
+async def _index_return(
+    client, index_symbol: str, interval: str, start: datetime, end: datetime
+) -> float | None:
     """Nearest-candle close-to-close return of an index over [start, end]."""
     r = await client.execute(
         "SELECT timestamp, close FROM candles WHERE symbol = ? AND interval = ? "

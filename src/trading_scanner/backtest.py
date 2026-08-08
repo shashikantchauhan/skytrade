@@ -57,7 +57,9 @@ async def main() -> None:
     engine = AlphaEngine(**_ENGINE_SETTINGS)
     for symbol in symbols:
         try:
-            await _backtest_symbol(symbol, config, engine, candle_repository, trade_repository, logger)
+            await _backtest_symbol(
+                symbol, config, engine, candle_repository, trade_repository, logger
+            )
         except Exception:
             logger.exception("Unexpected exception while backtesting %s", symbol)
 

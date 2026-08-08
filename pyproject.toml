@@ -35,6 +35,10 @@ asyncio_mode = "auto"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+# alpha_engine.py is a faithful 1:1 Pine Script translation and must never be
+# modified (see README's hard constraints) -- excluded here rather than
+# reformatted so CI can pass without touching it.
+extend-exclude = ["src/trading_scanner/alpha_engine.py"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B"]
