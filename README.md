@@ -23,11 +23,6 @@ The end goal (not yet reached) is: validate the paper account is actually
 profitable for about a week, then connect it to a real Zerodha account for
 live trading with real accounting.
 
-### Hard constraints — do not violate these
-
-- **No git/GitHub work from the assistant, ever.** The user (not the
-  assistant) runs all `git`/`gh` commands — init, commit, push, secrets,
-  repository settings. Only edit files locally.
 - **Long-only, always.** NSE cash market does not allow short selling for
   multi-day (delivery) holds — only intraday MIS, squared off same day. This
   strategy's average holding period is ~3.5 days, so **SELL signals can
