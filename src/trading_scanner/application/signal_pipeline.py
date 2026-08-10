@@ -1,5 +1,6 @@
 """Hourly pipeline: accumulate candles per symbol and notify on AlphaEngine signals."""
 
+import asyncio
 import logging
 from datetime import UTC
 from decimal import Decimal
@@ -66,6 +67,14 @@ _FULL_HISTORY = None
 
 _STRATEGY_NAME = "lorentzian"
 
+# Per-symbol processing is dominated by network I/O (Yahoo Finance downloads),
+# so symbols are processed concurrently rather than one at a time -- cuts a
+# 220-symbol run from ~12 minutes to roughly one, without hammering Yahoo with
+# 220 simultaneous requests (which risks IP-level throttling, especially from
+# GitHub's shared runner IPs). This bound is deliberately conservative rather
+# than tuned for maximum throughput.
+_MAX_CONCURRENT_SYMBOLS = 12
+
 
 async def run_signal_pipeline(
     config: AppConfig,
@@ -100,23 +109,36 @@ async def run_signal_pipeline(
         except Exception:
             logger.exception("Unexpected exception while evaluating index %s", config.index_symbol)
 
-    for symbol in symbols:
-        try:
-            await _process_symbol(
-                symbol,
-                config,
-                provider,
-                engine,
-                candle_repository,
-                signal_repository,
-                engine_state_repository,
-                trade_repository,
-                paper_account_repository,
-                notifier,
-                index_result,
-            )
-        except Exception:
-            logger.exception("Unexpected exception while processing %s", symbol)
+    semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SYMBOLS)
+    # Paper-account reads/writes are check-then-act (read cash_balance, decide,
+    # then write) -- concurrent symbols must not interleave through that
+    # section, or two symbols could both see the same "enough capital" balance
+    # and both commit, overspending the account. Everything else per symbol
+    # (Yahoo download, AlphaEngine evaluation, per-symbol trade/candle rows)
+    # is fully independent across symbols and safe to run in parallel.
+    paper_account_lock = asyncio.Lock()
+
+    async def _process_with_limit(symbol: str) -> None:
+        async with semaphore:
+            try:
+                await _process_symbol(
+                    symbol,
+                    config,
+                    provider,
+                    engine,
+                    candle_repository,
+                    signal_repository,
+                    engine_state_repository,
+                    trade_repository,
+                    paper_account_repository,
+                    notifier,
+                    index_result,
+                    paper_account_lock,
+                )
+            except Exception:
+                logger.exception("Unexpected exception while processing %s", symbol)
+
+    await asyncio.gather(*(_process_with_limit(symbol) for symbol in symbols))
 
 
 async def _evaluate_symbol(
@@ -141,7 +163,12 @@ async def _evaluate_symbol(
     if needs_backfill:
         logger.info("Backfilling %s: downloading %d days of history.", symbol, window_days)
 
-    downloaded = provider.get_recent_history(symbol, config.candle_interval, window_days)
+    # get_recent_history is a blocking call (yfinance is synchronous); running
+    # it in a thread lets other symbols' downloads proceed concurrently on
+    # the event loop instead of serializing behind this one.
+    downloaded = await asyncio.to_thread(
+        provider.get_recent_history, symbol, config.candle_interval, window_days
+    )
     await candle_repository.upsert_candles(
         symbol, config.candle_interval, _dataframe_to_candles(symbol, downloaded)
     )
@@ -204,6 +231,7 @@ async def _process_symbol(
     paper_account_repository: PaperAccountRepository,
     notifier: Notifier,
     index_result: FastPredictResult | None,
+    paper_account_lock: asyncio.Lock,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -245,7 +273,7 @@ async def _process_symbol(
         )
         paper_note = await _open_paper_position(
             symbol, config, newest_candle.timestamp, market_price,
-            trade_repository, paper_account_repository,
+            trade_repository, paper_account_repository, paper_account_lock,
         )
     if result.end_long:
         await _notify_exit(
@@ -257,7 +285,7 @@ async def _process_symbol(
         )
         await _close_paper_position(
             symbol, newest_candle.timestamp, market_price,
-            paper_account_repository, signal_repository, notifier,
+            paper_account_repository, signal_repository, notifier, paper_account_lock,
         )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
@@ -364,18 +392,24 @@ async def _open_paper_position(
     entry_price: Decimal,
     trade_repository: TradeRepository,
     paper_account_repository: PaperAccountRepository,
+    paper_account_lock: asyncio.Lock,
 ) -> str | None:
     """Attempt to open a real paper position for a BUY entry; return a status note.
 
     Returns a short human-readable reason whenever no position was opened
     (not yet eligible, or the account is out of free capital) so the caller
     can surface it in the notification instead of silently skipping.
+
+    The eligibility check is read-only and per-symbol, so it stays outside
+    the lock; only the capital check-then-act in try_open_position needs
+    exclusive access to the shared account.
     """
     if not await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
         return "paper: not eligible yet (win_rate<55% or insufficient trade history)"
-    position = await paper_trading.try_open_position(
-        symbol, entry_timestamp, entry_price, paper_account_repository
-    )
+    async with paper_account_lock:
+        position = await paper_trading.try_open_position(
+            symbol, entry_timestamp, entry_price, paper_account_repository
+        )
     if position is None:
         return "paper: SKIPPED (no capital available)"
     return f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f})"
@@ -388,9 +422,11 @@ async def _close_paper_position(
     paper_account_repository: PaperAccountRepository,
     signal_repository: SignalRepository,
     notifier: Notifier,
+    paper_account_lock: asyncio.Lock,
 ) -> None:
     """Close an open paper position (if any) and notify the realized P&L."""
-    closed = await paper_account_repository.close_position(symbol, exit_timestamp, exit_price)
+    async with paper_account_lock:
+        closed = await paper_account_repository.close_position(symbol, exit_timestamp, exit_price)
     if closed is None:
         return  # Nothing was ever opened for this symbol (not eligible / no capacity).
     signal = Signal(

@@ -1,3 +1,4 @@
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -817,6 +818,116 @@ async def test_buy_entry_skips_paper_position_when_no_capital(monkeypatch) -> No
 
     assert paper_account_repository.opened == []
     assert "paper: SKIPPED (no capital available)" in notifier.sent[0].rationale
+
+
+class _DelayedPaperAccountRepository(FakePaperAccountRepository):
+    """FakePaperAccountRepository with a real suspension point in the
+    check-then-act window try_open_position relies on paper_account_lock to
+    protect.
+
+    The plain fake's get_cash_balance/open_position never actually suspend
+    (no real I/O), so asyncio never interleaves two tasks mid-check even when
+    scheduled concurrently -- CPython only switches tasks at genuine
+    suspension points. This subclass adds one real ``asyncio.sleep`` between
+    reading the balance and the caller deciding whether to commit, so
+    concurrent symbols racing for the same capital actually interleave right
+    at the vulnerable window, the way real network-backed I/O naturally
+    would.
+    """
+
+    async def get_cash_balance(self) -> Decimal:
+        # Snapshot BEFORE suspending: every concurrently-racing task's
+        # snapshot is taken while cash_balance is still unmodified, then each
+        # yields control during the sleep (letting other tasks also snapshot
+        # the same stale value), and returns that stale snapshot regardless
+        # of what anyone else did during the wait -- reproducing exactly the
+        # window paper_account_lock exists to close. (Sleeping *before*
+        # snapshotting would not race: each waker would just re-read the
+        # already-updated value with no real interleaving of the decision.)
+        snapshot = self._cash_balance
+        await asyncio.sleep(0.005)
+        return snapshot
+
+
+@pytest.mark.asyncio
+async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypatch) -> None:
+    """Many symbols processed concurrently must never collectively open more
+    positions than the account's capital actually allows.
+
+    Symbols are processed concurrently (see run_signal_pipeline's semaphore),
+    so without paper_account_lock serializing the check-then-act in
+    try_open_position, two symbols could both read the same "enough capital"
+    balance and both commit -- overspending the shared account.
+    _DelayedPaperAccountRepository forces genuine interleaving right at that
+    check-then-act window (see its docstring)."""
+    monkeypatch.setattr(
+        YahooProvider, "get_recent_history",
+        lambda self, symbol, interval, days: _small_recent_download(),
+    )
+    monkeypatch.setattr(
+        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
+            signal="BUY",
+            prediction=6,
+            end_long=False,
+            end_short=False,
+            is_early_signal_flip=False,
+            signal_previous=1,
+            queue_state=QueueState(),
+            exit_state=ExitState(),
+        ),
+    )
+
+    symbols = [f"SYM{i}.NS" for i in range(20)]
+    seed = {symbol: _seed_candles(symbol, 200) for symbol in symbols}
+    candle_repository = FakeCandleRepository(seed=seed)
+    signal_repository = FakeSignalRepository()
+    engine_state_repository = FakeEngineStateRepository()
+    trade_repository = FakeTradeRepository()
+    # Shared across all symbols (the fake's get_trades ignores its symbol
+    # argument) -- every symbol clears the eligibility bar identically, so
+    # all 20 genuinely compete for the same limited capital.
+    trade_repository.opened = [
+        Trade(
+            symbol="ANY.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, index, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=4, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, index, tzinfo=UTC), exit_price=Decimal("110"),
+            pnl_percent=Decimal("10"), status="closed",
+        )
+        for index in range(1, 6)
+    ]
+    # cash_balance/TARGET_SLOTS(32) = 60000/32 = 1875, floored to
+    # MIN_POSITION_SIZE(25000) -- so position_size is fixed at 25000, and
+    # only floor(60000/25000) = 2 of the 20 symbols can actually be afforded.
+    starting_cash = Decimal("60000")
+    paper_account_repository = _DelayedPaperAccountRepository(cash_balance=starting_cash)
+    notifier = FakeNotifier()
+
+    await run_signal_pipeline(
+        _config(),
+        symbols,
+        candle_repository,
+        signal_repository,
+        engine_state_repository,
+        trade_repository,
+        paper_account_repository,
+        notifier,
+    )
+
+    total_allocated = sum(
+        (position.capital_allocated for position in paper_account_repository.opened),
+        start=Decimal("0"),
+    )
+    # The invariant the lock protects: never collectively commit more capital
+    # than the account actually had, no matter how the concurrent symbols
+    # interleaved.
+    assert total_allocated <= starting_cash
+    assert len(paper_account_repository.opened) == 2
+    skipped_count = sum(
+        1 for signal in notifier.sent if "SKIPPED (no capital available)" in signal.rationale
+    )
+    assert skipped_count == len(symbols) - 2
 
 
 @pytest.mark.asyncio
