@@ -419,10 +419,15 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
     """Shared by the live shadow-tracking endpoint and the current-month
     backtest endpoint -- same shape, different ``source`` filter upstream.
 
-    Two independent structures, tracked and reported side by side (see
-    ``application/signal_pipeline.py``'s ``_open_derivatives_shadow``):
-    Structure A (option primary, ``directional_options`` + ``hedge_futures``)
-    and Structure B (futures primary, ``primary_futures`` + ``hedge_options``).
+    Two independent, unrelated legs per signal (see ``application/
+    signal_pipeline.py``'s ``_open_derivatives_shadow``): a naked
+    directional option (``directional_options``, no hedge -- a bought
+    option's risk is already capped at the premium) and a futures position
+    hedged by an option (``primary_futures`` + ``hedge_options``).
+    ``hedge_futures`` is legacy/always empty going forward -- an earlier
+    version of this feature mistakenly hedged the option leg with a future
+    too; kept here only so any rows already written under that scheme
+    don't silently vanish from the API shape.
     """
 
     def _options_summary(purpose: str) -> dict:
@@ -527,9 +532,9 @@ async def derivatives_backtest(
 async def margin_benefit(
     symbol: str, _: None = Depends(_require_session)
 ) -> JSONResponse:
-    """Live margin required for the symbol's open Structure B position
-    (primary future + hedge option) vs. holding the future alone, using
-    Kite's own basket-margin API -- not a guessed percentage (see
+    """Live margin required for the symbol's open futures position + its
+    hedge option vs. holding the future alone, using Kite's own
+    basket-margin API -- not a guessed percentage (see
     ``KiteDerivativesChain.margin_benefit``'s docstring for why the naive
     version of this got the wrong answer at first). Requires an active
     Kite session and an open primary-future position for the symbol."""
@@ -803,6 +808,16 @@ _PAGE = """<!doctype html>
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .row.between { justify-content: space-between; }
   .msg { font-size: 0.8rem; color: var(--muted); }
+  .tabnav {
+    display: flex; gap: 0.4rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+    padding: 0.6rem 0.9rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; border-radius: 0;
+  }
+  .tab-btn:hover { color: var(--text); background: none; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
 </style>
 </head>
 <body>
@@ -826,14 +841,21 @@ _PAGE = """<!doctype html>
   </div>
 </section>
 
-<section>
+<div class="tabnav">
+  <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
+  <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
+  <button class="tab-btn" data-tab="derivatives" onclick="switchTab('derivatives')">Derivatives</button>
+  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
+</div>
+
+<section class="tab-panel" data-tab="positions">
   <h2>Open positions</h2>
   <div class="panel table-wrap">
     <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Price diff</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
-<section>
+<section class="tab-panel" data-tab="trades" hidden>
   <div class="row between">
     <h2><span id="trades-title">Closed trades (buy-only win rate</span>: <span id="win-rate">-</span>)</h2>
     <label class="field">Filter by symbol
@@ -847,7 +869,7 @@ _PAGE = """<!doctype html>
   </div>
 </section>
 
-<section>
+<section class="tab-panel" data-tab="derivatives" hidden>
   <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
   <div class="cards" id="derivatives-cards"></div>
   <div class="panel row" style="margin-top: 0.8rem; align-items: flex-end;">
@@ -865,10 +887,8 @@ _PAGE = """<!doctype html>
       <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
-</section>
 
-<section>
-  <h2>Current-month derivatives backtest <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(replays this month's closed trades against Kite historical data -- expired contracts can't be reached, so only the current month works)</span></h2>
+  <h2 style="margin-top: 1.5rem;">Current-month derivatives backtest <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(replays this month's closed trades against Kite historical data -- expired contracts can't be reached, so only the current month works)</span></h2>
   <div class="panel row" style="margin-bottom: 0.8rem;">
     <button class="primary" onclick="runBacktest()">Run backtest</button>
     <span class="msg" id="backtest-msg"></span>
@@ -886,7 +906,7 @@ _PAGE = """<!doctype html>
   </div>
 </section>
 
-<section>
+<section class="tab-panel" data-tab="settings" hidden>
   <h2>Config</h2>
   <div class="panel row">
     <label class="field">Capital<input id="cfg-capital" /></label>
@@ -895,14 +915,17 @@ _PAGE = """<!doctype html>
     <button class="primary" onclick="saveConfig()" style="align-self: flex-end;">Save</button>
     <span class="msg" id="config-msg"></span>
   </div>
-</section>
 
-<section>
-  <h2>Recent logs</h2>
+  <h2 style="margin-top: 1.5rem;">Recent logs</h2>
   <pre id="logs"></pre>
 </section>
 
 <script>
+function switchTab(name) {
+  document.querySelectorAll(".tab-panel").forEach(el => { el.hidden = el.dataset.tab !== name; });
+  document.querySelectorAll(".tab-btn").forEach(el => { el.classList.toggle("active", el.dataset.tab === name); });
+}
+
 async function api(path, opts) {
   const res = await fetch(path, opts);
   if (res.status === 401) { window.location.href = "/login"; throw new Error("401"); }
@@ -1044,10 +1067,9 @@ async function loadKiteStatus() {
 function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
   const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
   document.getElementById(cardsId).innerHTML = `
-    <div class="card"><div class="label">Structure A: directional options (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
-    <div class="card"><div class="label">Structure A: hedge futures (${d.hedge_futures.closed_count} closed, ${fmt(d.hedge_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_futures.total_pnl)}</div></div>
-    <div class="card"><div class="label">Structure B: primary futures (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
-    <div class="card"><div class="label">Structure B: hedge options (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
+    <div class="card"><div class="label">Naked options -- no hedge (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
+    <div class="card"><div class="label">Futures -- the trade (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
+    <div class="card"><div class="label">Hedge option on the future (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
   `;
   document.querySelector(`#${optionsTableId} tbody`).innerHTML = d.recent_options.map(o => {
     const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");

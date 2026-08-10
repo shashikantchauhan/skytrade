@@ -596,17 +596,17 @@ async def _open_derivatives_shadow(
     options_trade_repository: TursoOptionsTradeRepository | None,
     futures_trade_repository: TursoFuturesTradeRepository | None,
 ) -> str | None:
-    """Best-effort: two independent strategies tracked side by side so they
-    can be compared, never a real order:
+    """Best-effort: two independent, unrelated legs per signal, never a
+    real order:
 
-    - Structure A (option-primary): a directional option (CALL for BUY,
-      PUT for SELL) as the main trade, hedged by a future at the opposite
-      delta (short future hedging a bought CALL, long future hedging a
-      bought PUT).
-    - Structure B (futures-primary): a futures position (long for BUY,
-      short for SELL) as the main trade, hedged by an option at the
-      opposite delta (PUT hedging a long future, CALL hedging a short
-      future).
+    - Naked directional option: CALL for BUY, PUT for SELL. Nothing hedges
+      it -- a bought option's risk is already capped at the premium paid,
+      so there's nothing to hedge.
+    - Futures position: long for BUY, short for SELL -- carries real
+      open-ended margin risk, so *this* is what gets hedged, by an option
+      at the opposite delta (PUT hedging a long future, CALL hedging a
+      short future), targeting ~2% OTM rather than ATM (see
+      _HEDGE_OTM_PCT's docstring for why).
 
     Any failure here is a side observation, not a dependency of the main
     signal/paper-trading flow, so this never raises into the caller.
@@ -616,7 +616,6 @@ async def _open_derivatives_shadow(
     option_type = "CE" if side == SignalSide.BUY else "PE"
     hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
     futures_side = "long" if side == SignalSide.BUY else "short"
-    hedge_futures_side = "short" if side == SignalSide.BUY else "long"
     # PE is OTM below spot, CE is OTM above spot -- see _HEDGE_OTM_PCT.
     hedge_strike_target = (
         market_price * (1 - _HEDGE_OTM_PCT)
@@ -625,24 +624,16 @@ async def _open_derivatives_shadow(
     )
     notes: list[str] = []
     try:
-        # Structure A: option primary, future as its hedge.
-        directional_note = None
+        # Naked directional option -- no hedge attached.
         if options_trade_repository is not None:
-            directional_note = await options_shadow.try_open_option_position(
+            note = await options_shadow.try_open_option_position(
                 symbol, option_type, "directional", entry_timestamp, market_price,
                 derivatives_chain, options_trade_repository,
-            )
-            if directional_note is not None:
-                notes.append(directional_note)
-        if directional_note is not None and futures_trade_repository is not None:
-            note = await futures_shadow.try_open_futures_position(
-                symbol, hedge_futures_side, entry_timestamp, market_price,
-                derivatives_chain, futures_trade_repository, purpose="hedge",
             )
             if note is not None:
                 notes.append(note)
 
-        # Structure B: future primary, option as its hedge.
+        # Futures position, hedged by an option.
         if futures_trade_repository is not None:
             note = await futures_shadow.try_open_futures_position(
                 symbol, futures_side, entry_timestamp, market_price,
@@ -675,17 +666,16 @@ async def _close_derivatives_shadow(
     options_trade_repository: TursoOptionsTradeRepository | None,
     futures_trade_repository: TursoFuturesTradeRepository | None,
 ) -> None:
-    """Best-effort close of whatever ``_open_derivatives_shadow`` opened
-    (both structures -- see that function's docstring). Logged, not
-    notified via Telegram -- these are analysis-only positions, see the
-    module docstring."""
+    """Best-effort close of whatever ``_open_derivatives_shadow`` opened --
+    see that function's docstring. Logged, not notified via Telegram --
+    these are analysis-only positions, see the module docstring."""
     if derivatives_chain is None:
         return
     option_type = "CE" if side == SignalSide.BUY else "PE"
     hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
     logger = logging.getLogger(__name__)
     try:
-        # Structure A: option primary, future hedge.
+        # Naked directional option -- no hedge attached.
         if options_trade_repository is not None:
             note = await options_shadow.close_option_position(
                 symbol, option_type, "directional", exit_timestamp, market_price,
@@ -693,14 +683,8 @@ async def _close_derivatives_shadow(
             )
             if note is not None:
                 logger.info(note)
-        if futures_trade_repository is not None:
-            note = await futures_shadow.close_futures_position(
-                symbol, exit_timestamp, market_price, futures_trade_repository, purpose="hedge",
-            )
-            if note is not None:
-                logger.info(note)
 
-        # Structure B: future primary, option hedge.
+        # Futures position, hedged by an option.
         if futures_trade_repository is not None:
             note = await futures_shadow.close_futures_position(
                 symbol, exit_timestamp, market_price, futures_trade_repository, purpose="primary",

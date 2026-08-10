@@ -82,7 +82,8 @@ async def _backtest_one_trade(
     notes: list[str] = []
     side = trade.side.value  # "BUY" | "SELL"
 
-    # Structure A: option primary, future as its hedge (opposite delta).
+    # Naked directional option -- no hedge attached, a bought option's risk
+    # is already capped at the premium paid.
     directional_type = "CE" if side == "BUY" else "PE"
     directional_note = await _backtest_option(
         trade.symbol, directional_type, "directional",
@@ -91,16 +92,8 @@ async def _backtest_one_trade(
     )
     if directional_note:
         notes.append(directional_note)
-        hedge_futures_side = "short" if side == "BUY" else "long"
-        note = await _backtest_future(
-            trade.symbol, hedge_futures_side, "hedge",
-            trade.entry_timestamp, trade.exit_timestamp,
-            derivatives_chain, futures_trade_repository,
-        )
-        if note:
-            notes.append(note)
 
-    # Structure B: future primary, option as its hedge (opposite delta).
+    # Futures position, hedged by an option (~2% OTM, see _HEDGE_OTM_PCT).
     futures_side = "long" if side == "BUY" else "short"
     future_note = await _backtest_future(
         trade.symbol, futures_side, "primary",
