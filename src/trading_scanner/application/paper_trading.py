@@ -37,15 +37,27 @@ week, each slot grows proportionally -- no manual re-tuning needed. A floor
 below that floor, flat fees start eating a disproportionate share of returns.
 """
 
+import os
 from datetime import datetime
 from decimal import Decimal
+
+from dotenv import load_dotenv
 
 from trading_scanner.domain.models import PaperPosition, SignalSide
 from trading_scanner.domain.ports import PaperAccountRepository, TradeRepository
 
-INITIAL_CAPITAL = Decimal("800000")
-TARGET_SLOTS = 32
-MIN_POSITION_SIZE = Decimal("25000")
+# Loaded here (not just in config/settings.py) because the constants below
+# are read from the environment at import time, which can happen before
+# signals.py's main() gets around to calling load_config(). Safe to call
+# more than once -- dotenv never overwrites an already-set env var.
+load_dotenv()
+
+# Overridable via .env so the dashboard's config editor can adjust sizing
+# without a code change/redeploy -- defaults match the Little's Law sizing
+# derived above (32 slots, Rs 8,00,000, Rs 25,000 floor).
+INITIAL_CAPITAL = Decimal(os.getenv("TRADING_SCANNER_PAPER_CAPITAL", "800000"))
+TARGET_SLOTS = int(os.getenv("TRADING_SCANNER_PAPER_SLOTS", "32"))
+MIN_POSITION_SIZE = Decimal(os.getenv("TRADING_SCANNER_PAPER_MIN_POSITION", "25000"))
 MIN_WIN_RATE = Decimal("55")
 MIN_CLOSED_TRADES = 5
 

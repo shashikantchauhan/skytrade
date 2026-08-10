@@ -133,7 +133,15 @@ class TursoCandleRepository:
     async def upsert_candles(
         self, symbol: str, interval: str, candles: Sequence[Candle]
     ) -> None:
-        """Insert new candles or refresh existing ones for the same bar."""
+        """Insert new candles or refresh existing ones for the same bar.
+
+        Timestamps are normalized to UTC here as a second line of defense
+        (callers should already do this -- see
+        ``signal_pipeline._dataframe_to_candles``) -- storing any other
+        offset produces a text timestamp that sorts incorrectly against
+        UTC-stored rows under this table's plain ``ORDER BY timestamp``,
+        scrambling chronological order for every downstream reader.
+        """
         if not candles:
             return
         statements = [
@@ -142,7 +150,7 @@ class TursoCandleRepository:
                 [
                     symbol,
                     interval,
-                    candle.timestamp.isoformat(),
+                    candle.timestamp.astimezone(UTC).isoformat(),
                     float(candle.open),
                     float(candle.high),
                     float(candle.low),

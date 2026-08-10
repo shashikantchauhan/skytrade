@@ -420,6 +420,37 @@ the pipeline just finds no new candle for every symbol and skips gracefully.
 Since this repository is public, GitHub Actions minutes are free regardless
 of run frequency or symbol count.
 
+## Web Dashboard
+
+`trading_scanner.webapp` is a small FastAPI app that reads live from the same
+Turso database the hourly pipeline writes to. It shows the paper account's
+cash balance, total equity, open positions, recent closed trades and
+buy-only win rate, and the pipeline's last-run status — and lets you trigger
+a manual pipeline run or edit the paper-trading capital/slots/min-position
+sizing, all from a browser instead of asking for a status update.
+
+Run it locally:
+
+```bash
+TRADING_SCANNER_DASHBOARD_PASSWORD=<pick-a-password> \
+PYTHONPATH=src python -m trading_scanner.webapp
+```
+
+Then open `http://localhost:8000` and log in with that password. Sessions
+are cookie-based (30 days), kept in memory — restarting the dashboard logs
+everyone out, which is fine for a single-user tool.
+
+On the VPS, `vps_setup.sh` installs it as a systemd service
+(`p-trade-dashboard`, auto-restarts, survives reboot) listening on port
+8000. Open that port in your VPS provider's firewall to reach it, and set a
+real `TRADING_SCANNER_DASHBOARD_PASSWORD` in `.env` before exposing it —
+there's no other access control.
+
+Editing capital/slots/min-position from the dashboard's Config panel
+rewrites `.env` directly; it takes effect on the *next* pipeline run (the
+already-running dashboard process keeps its own already-imported values
+until it's restarted too).
+
 ## Current Limitations
 
 The exported validation CSV is intended for manual bar-by-bar comparison

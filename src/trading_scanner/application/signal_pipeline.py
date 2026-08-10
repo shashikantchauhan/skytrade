@@ -484,11 +484,20 @@ def _market_price(candle: Candle) -> Decimal:
 
 
 def _dataframe_to_candles(symbol: str, data: pd.DataFrame) -> list[Candle]:
-    """Convert a downloaded OHLCV DataFrame into domain Candle objects."""
+    """Convert a downloaded OHLCV DataFrame into domain Candle objects.
+
+    Normalized to UTC here -- Yahoo returns NSE timestamps tz-aware in IST,
+    and storing that offset as-is produces an ISO string ("+05:30") that
+    sorts incorrectly against UTC-stored rows ("+00:00") under a plain text
+    ORDER BY, scrambling chronological order at every day boundary. Always
+    normalizing to UTC before it ever reaches the repository keeps every
+    row's timestamp column in the same offset, so text sort order matches
+    real chronological order.
+    """
     return [
         Candle(
             symbol=symbol,
-            timestamp=timestamp.to_pydatetime(),
+            timestamp=timestamp.to_pydatetime().astimezone(UTC),
             open=Decimal(str(row["Open"])),
             high=Decimal(str(row["High"])),
             low=Decimal(str(row["Low"])),

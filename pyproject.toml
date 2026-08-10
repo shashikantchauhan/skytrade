@@ -18,6 +18,8 @@ requests = "^2.32.3"
 python-dotenv = "^1.0.1"
 numpy = "^2.1.2"
 libsql-client = "^0.3.1"
+fastapi = "^0.115.0"
+uvicorn = "^0.31.0"
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^8.3.3"
@@ -27,6 +29,7 @@ ruff = "^0.6.9"
 [tool.poetry.scripts]
 trading-scanner = "trading_scanner.main:main"
 trading-scanner-signals = "trading_scanner.signals:main"
+trading-scanner-dashboard = "trading_scanner.webapp:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

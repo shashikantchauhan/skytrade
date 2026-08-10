@@ -1,11 +1,45 @@
 """Yahoo Finance market-data provider."""
 
+from collections.abc import Sequence
+
 import pandas as pd
 import yfinance as yf
 
 
 class YahooProvider:
     """Download historical OHLCV candles from Yahoo Finance."""
+
+    def get_last_prices(self, symbols: Sequence[str]) -> dict[str, float]:
+        """Return the most recent traded price for each symbol.
+
+        Used for mark-to-market display (dashboard unrealized P&L) only --
+        never fed into the strategy itself. Best-effort: a symbol Yahoo can't
+        currently price (delisted, momentarily unavailable) is simply left
+        out of the result rather than failing the whole batch.
+        """
+        symbols = list(dict.fromkeys(symbols))  # de-dupe, preserve order
+        if not symbols:
+            return {}
+        try:
+            data = yf.download(
+                tickers=symbols,
+                period="5d",
+                interval="1d",
+                auto_adjust=False,
+                progress=False,
+                group_by="ticker",
+            )
+        except Exception:
+            return {}
+        prices: dict[str, float] = {}
+        for symbol in symbols:
+            try:
+                column = data[symbol] if len(symbols) > 1 else data
+                last_close = column["Close"].dropna().iloc[-1]
+                prices[symbol] = float(last_close)
+            except Exception:
+                continue
+        return prices
 
     def get_history(self, symbol: str, interval: str, history: int) -> pd.DataFrame:
         """Return cleaned, chronological candles for one symbol.
