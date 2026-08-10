@@ -241,6 +241,36 @@ class KiteDerivativesChain:
         row = quote.get(exchange_tradingsymbol)
         return row["last_price"] if row else None
 
+    def historical_premium(self, instrument_token: int, when: datetime) -> float | None:
+        """Historical close nearest to ``when`` for one contract -- backs
+        the current-month backtest (``application/derivatives_backtest.py``)
+        rather than the live shadow-tracking flow, which always uses
+        ``ltp``. Only works for contracts whose ``instrument_token`` is
+        still resolvable today, i.e. not yet expired -- see this class's
+        docstring on why that limits backtesting to the current month.
+        None on any failure (unlisted token, no candles near that time,
+        Kite API hiccup) -- best-effort, matching the rest of this
+        feature's error handling.
+        """
+        window_start = when - timedelta(days=3)
+        window_end = when + timedelta(days=1)
+        try:
+            candles = self._kite.historical_data(
+                instrument_token, window_start, window_end, "60minute"
+            )
+        except Exception:
+            return None
+        if not candles:
+            return None
+        # Compare by epoch seconds, not naive datetime subtraction -- ``when``
+        # and Kite's candle timestamps may carry different (but both valid)
+        # tzinfo offsets, and this codebase has already been bitten once by
+        # comparing timestamps without normalizing them first (see
+        # ``turso.py``'s candle-timestamp corruption fix).
+        target = when.timestamp()
+        nearest = min(candles, key=lambda candle: abs(candle["date"].timestamp() - target))
+        return nearest["close"]
+
 
 def build_login_url(api_key: str) -> str:
     """The URL to send a user to for Kite's own login page (never our server)."""

@@ -120,7 +120,8 @@ CREATE TABLE IF NOT EXISTS options_trades (
     exit_premium REAL,
     pnl_amount REAL,
     pnl_percent REAL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    source TEXT NOT NULL DEFAULT 'live'
 )
 """
 
@@ -138,7 +139,8 @@ CREATE TABLE IF NOT EXISTS futures_trades (
     exit_price REAL,
     pnl_amount REAL,
     pnl_percent REAL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    source TEXT NOT NULL DEFAULT 'live'
 )
 """
 
@@ -158,6 +160,20 @@ SELECT timestamp, open, high, low, close, volume FROM candles
 WHERE symbol = ? AND interval = ?
 ORDER BY timestamp DESC
 """
+
+
+async def _add_column_if_missing(
+    client: libsql_client.Client, table: str, column: str, definition: str
+) -> None:
+    """Migrates an already-deployed table forward -- ``CREATE TABLE IF NOT
+    EXISTS`` only helps on a fresh database, it never alters an existing
+    one. Swallows the "duplicate column" error on every run after the
+    first; there's no portable ``ADD COLUMN IF NOT EXISTS`` in SQLite."""
+    try:
+        await client.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+    except Exception as error:
+        if "duplicate column" not in str(error).lower():
+            raise
 
 
 def create_turso_client(url: str, auth_token: str | None) -> libsql_client.Client:
@@ -589,6 +605,9 @@ class TursoOptionsTradeRepository:
 
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_OPTIONS_TRADES_TABLE)
+        await _add_column_if_missing(
+            self._client, "options_trades", "source", "TEXT NOT NULL DEFAULT 'live'"
+        )
 
     async def open_trade(self, trade: OptionsShadowTrade) -> None:
         await self._client.execute(
@@ -675,18 +694,66 @@ class TursoOptionsTradeRepository:
             ],
         )
 
-    async def get_trades(self, symbol: str | None = None) -> Sequence[OptionsShadowTrade]:
+    async def insert_backtest_trade(self, trade: OptionsShadowTrade) -> None:
+        """Inserts one already-closed row directly, source='backtest'.
+
+        Unlike ``open_trade``/``close_trade`` (a two-step open-then-later-
+        close flow scoped by the most recent open row for a key), a
+        backtest replay knows both entry and exit up front and runs as a
+        one-shot batch alongside the always-on live shadow-tracking flow --
+        writing the whole row atomically avoids racing live's own
+        open/close lookups for the same (symbol, option_type, purpose).
+        """
+        await self._client.execute(
+            """
+            INSERT INTO options_trades
+                (symbol, option_type, purpose, option_tradingsymbol, strike, expiry,
+                 lot_size, entry_timestamp, underlying_price_at_entry, entry_premium,
+                 exit_timestamp, underlying_price_at_exit, exit_premium,
+                 pnl_amount, pnl_percent, status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', 'backtest')
+            """,
+            [
+                trade.symbol,
+                trade.option_type,
+                trade.purpose,
+                trade.option_tradingsymbol,
+                float(trade.strike),
+                trade.expiry,
+                trade.lot_size,
+                trade.entry_timestamp.isoformat(),
+                float(trade.underlying_price_at_entry),
+                float(trade.entry_premium),
+                trade.exit_timestamp.isoformat() if trade.exit_timestamp else None,
+                float(trade.underlying_price_at_exit)
+                if trade.underlying_price_at_exit is not None
+                else None,
+                float(trade.exit_premium) if trade.exit_premium is not None else None,
+                float(trade.pnl_amount) if trade.pnl_amount is not None else None,
+                float(trade.pnl_percent) if trade.pnl_percent is not None else None,
+            ],
+        )
+
+    async def get_trades(
+        self, symbol: str | None = None, source: str | None = None
+    ) -> Sequence[OptionsShadowTrade]:
         query = """
             SELECT symbol, option_type, purpose, option_tradingsymbol, strike, expiry,
                    lot_size, entry_timestamp, underlying_price_at_entry, entry_premium,
                    exit_timestamp, underlying_price_at_exit, exit_premium,
-                   pnl_amount, pnl_percent, status
+                   pnl_amount, pnl_percent, status, source
             FROM options_trades
         """
+        clauses: list[str] = []
         parameters: list[str] = []
         if symbol is not None:
-            query += " WHERE symbol = ?"
+            clauses.append("symbol = ?")
             parameters.append(symbol)
+        if source is not None:
+            clauses.append("source = ?")
+            parameters.append(source)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY entry_timestamp DESC"
         result = await self._client.execute(query, parameters)
         return [
@@ -707,6 +774,7 @@ class TursoOptionsTradeRepository:
                 pnl_amount=Decimal(str(row[13])) if row[13] is not None else None,
                 pnl_percent=Decimal(str(row[14])) if row[14] is not None else None,
                 status=row[15],
+                source=row[16],
             )
             for row in result.rows
         ]
@@ -726,6 +794,9 @@ class TursoFuturesTradeRepository:
 
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_FUTURES_TRADES_TABLE)
+        await _add_column_if_missing(
+            self._client, "futures_trades", "source", "TEXT NOT NULL DEFAULT 'live'"
+        )
 
     async def open_trade(self, trade: FuturesShadowTrade) -> None:
         await self._client.execute(
@@ -797,17 +868,52 @@ class TursoFuturesTradeRepository:
             ],
         )
 
-    async def get_trades(self, symbol: str | None = None) -> Sequence[FuturesShadowTrade]:
+    async def insert_backtest_trade(self, trade: FuturesShadowTrade) -> None:
+        """Inserts one already-closed row directly, source='backtest' --
+        see ``TursoOptionsTradeRepository.insert_backtest_trade`` for why
+        this bypasses the open/close two-step."""
+        await self._client.execute(
+            """
+            INSERT INTO futures_trades
+                (symbol, side, futures_tradingsymbol, expiry, lot_size,
+                 entry_timestamp, entry_price, exit_timestamp, exit_price,
+                 pnl_amount, pnl_percent, status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', 'backtest')
+            """,
+            [
+                trade.symbol,
+                trade.side,
+                trade.futures_tradingsymbol,
+                trade.expiry,
+                trade.lot_size,
+                trade.entry_timestamp.isoformat(),
+                float(trade.entry_price),
+                trade.exit_timestamp.isoformat() if trade.exit_timestamp else None,
+                float(trade.exit_price) if trade.exit_price is not None else None,
+                float(trade.pnl_amount) if trade.pnl_amount is not None else None,
+                float(trade.pnl_percent) if trade.pnl_percent is not None else None,
+            ],
+        )
+
+    async def get_trades(
+        self, symbol: str | None = None, source: str | None = None
+    ) -> Sequence[FuturesShadowTrade]:
         query = """
             SELECT symbol, side, futures_tradingsymbol, expiry, lot_size,
                    entry_timestamp, entry_price, exit_timestamp, exit_price,
-                   pnl_amount, pnl_percent, status
+                   pnl_amount, pnl_percent, status, source
             FROM futures_trades
         """
+        clauses: list[str] = []
         parameters: list[str] = []
         if symbol is not None:
-            query += " WHERE symbol = ?"
+            clauses.append("symbol = ?")
             parameters.append(symbol)
+        if source is not None:
+            clauses.append("source = ?")
+            parameters.append(source)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY entry_timestamp DESC"
         result = await self._client.execute(query, parameters)
         return [
@@ -824,6 +930,7 @@ class TursoFuturesTradeRepository:
                 pnl_amount=Decimal(str(row[9])) if row[9] is not None else None,
                 pnl_percent=Decimal(str(row[10])) if row[10] is not None else None,
                 status=row[11],
+                source=row[12],
             )
             for row in result.rows
         ]

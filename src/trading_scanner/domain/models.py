@@ -114,6 +114,7 @@ class OptionsShadowTrade:
     pnl_amount: Decimal | None = None
     pnl_percent: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+    source: str = "live"  # "live" (forward shadow-tracking) | "backtest" (current-month replay)
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,3 +142,4 @@ class FuturesShadowTrade:
     pnl_amount: Decimal | None = None
     pnl_percent: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+    source: str = "live"  # "live" (forward shadow-tracking) | "backtest" (current-month replay)
