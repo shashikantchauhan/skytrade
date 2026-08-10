@@ -12,7 +12,14 @@ from decimal import Decimal
 
 import libsql_client
 
-from trading_scanner.domain.models import Candle, PaperPosition, SignalSide, Trade
+from trading_scanner.domain.models import (
+    Candle,
+    FuturesShadowTrade,
+    OptionsShadowTrade,
+    PaperPosition,
+    SignalSide,
+    Trade,
+)
 from trading_scanner.domain.ports import EngineState
 
 _CREATE_CANDLES_TABLE = """
@@ -92,6 +99,46 @@ CREATE TABLE IF NOT EXISTS kite_session (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     access_token TEXT NOT NULL,
     obtained_at TEXT NOT NULL
+)
+"""
+
+_CREATE_OPTIONS_TRADES_TABLE = """
+CREATE TABLE IF NOT EXISTS options_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    option_type TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    option_tradingsymbol TEXT NOT NULL,
+    strike REAL NOT NULL,
+    expiry TEXT NOT NULL,
+    lot_size INTEGER NOT NULL,
+    entry_timestamp TEXT NOT NULL,
+    underlying_price_at_entry REAL NOT NULL,
+    entry_premium REAL NOT NULL,
+    exit_timestamp TEXT,
+    underlying_price_at_exit REAL,
+    exit_premium REAL,
+    pnl_amount REAL,
+    pnl_percent REAL,
+    status TEXT NOT NULL DEFAULT 'open'
+)
+"""
+
+_CREATE_FUTURES_TRADES_TABLE = """
+CREATE TABLE IF NOT EXISTS futures_trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    futures_tradingsymbol TEXT NOT NULL,
+    expiry TEXT NOT NULL,
+    lot_size INTEGER NOT NULL,
+    entry_timestamp TEXT NOT NULL,
+    entry_price REAL NOT NULL,
+    exit_timestamp TEXT,
+    exit_price REAL,
+    pnl_amount REAL,
+    pnl_percent REAL,
+    status TEXT NOT NULL DEFAULT 'open'
 )
 """
 
@@ -524,3 +571,259 @@ class TursoKiteSessionRepository:
         if not result.rows:
             return None
         return result.rows[0][0], result.rows[0][1]
+
+
+class TursoOptionsTradeRepository:
+    """Tracks hypothetical options trades shadowing BUY/SELL signals.
+
+    A symbol can have up to two simultaneously open shadow option trades --
+    a "directional" one and a "hedge" one (see ``domain.models.
+    OptionsShadowTrade``) -- so every lookup/close is scoped by
+    ``(symbol, option_type, purpose)``, not just symbol. Analysis only --
+    see ``application/options_shadow.py``. Fully separate from the paper
+    account's capital and from ``trades``' own equity-side scoring.
+    """
+
+    def __init__(self, client: libsql_client.Client) -> None:
+        self._client = client
+
+    async def ensure_schema(self) -> None:
+        await self._client.execute(_CREATE_OPTIONS_TRADES_TABLE)
+
+    async def open_trade(self, trade: OptionsShadowTrade) -> None:
+        await self._client.execute(
+            """
+            INSERT INTO options_trades
+                (symbol, option_type, purpose, option_tradingsymbol, strike, expiry,
+                 lot_size, entry_timestamp, underlying_price_at_entry, entry_premium, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open')
+            """,
+            [
+                trade.symbol,
+                trade.option_type,
+                trade.purpose,
+                trade.option_tradingsymbol,
+                float(trade.strike),
+                trade.expiry,
+                trade.lot_size,
+                trade.entry_timestamp.isoformat(),
+                float(trade.underlying_price_at_entry),
+                float(trade.entry_premium),
+            ],
+        )
+
+    async def get_open_trade(
+        self, symbol: str, option_type: str, purpose: str
+    ) -> OptionsShadowTrade | None:
+        result = await self._client.execute(
+            """
+            SELECT symbol, option_type, purpose, option_tradingsymbol, strike, expiry,
+                   lot_size, entry_timestamp, underlying_price_at_entry, entry_premium
+            FROM options_trades
+            WHERE symbol = ? AND option_type = ? AND purpose = ? AND status = 'open'
+            ORDER BY entry_timestamp DESC LIMIT 1
+            """,
+            [symbol, option_type, purpose],
+        )
+        if not result.rows:
+            return None
+        row = result.rows[0]
+        return OptionsShadowTrade(
+            symbol=row[0],
+            option_type=row[1],
+            purpose=row[2],
+            option_tradingsymbol=row[3],
+            strike=Decimal(str(row[4])),
+            expiry=row[5],
+            lot_size=int(row[6]),
+            entry_timestamp=datetime.fromisoformat(row[7]),
+            underlying_price_at_entry=Decimal(str(row[8])),
+            entry_premium=Decimal(str(row[9])),
+        )
+
+    async def close_trade(
+        self,
+        symbol: str,
+        option_type: str,
+        purpose: str,
+        exit_timestamp: datetime,
+        underlying_price_at_exit: Decimal,
+        exit_premium: Decimal,
+        pnl_amount: Decimal,
+        pnl_percent: Decimal,
+    ) -> None:
+        await self._client.execute(
+            """
+            UPDATE options_trades SET
+                exit_timestamp = ?, underlying_price_at_exit = ?, exit_premium = ?,
+                pnl_amount = ?, pnl_percent = ?, status = 'closed'
+            WHERE id = (
+                SELECT id FROM options_trades
+                WHERE symbol = ? AND option_type = ? AND purpose = ? AND status = 'open'
+                ORDER BY entry_timestamp DESC LIMIT 1
+            )
+            """,
+            [
+                exit_timestamp.isoformat(),
+                float(underlying_price_at_exit),
+                float(exit_premium),
+                float(pnl_amount),
+                float(pnl_percent),
+                symbol,
+                option_type,
+                purpose,
+            ],
+        )
+
+    async def get_trades(self, symbol: str | None = None) -> Sequence[OptionsShadowTrade]:
+        query = """
+            SELECT symbol, option_type, purpose, option_tradingsymbol, strike, expiry,
+                   lot_size, entry_timestamp, underlying_price_at_entry, entry_premium,
+                   exit_timestamp, underlying_price_at_exit, exit_premium,
+                   pnl_amount, pnl_percent, status
+            FROM options_trades
+        """
+        parameters: list[str] = []
+        if symbol is not None:
+            query += " WHERE symbol = ?"
+            parameters.append(symbol)
+        query += " ORDER BY entry_timestamp DESC"
+        result = await self._client.execute(query, parameters)
+        return [
+            OptionsShadowTrade(
+                symbol=row[0],
+                option_type=row[1],
+                purpose=row[2],
+                option_tradingsymbol=row[3],
+                strike=Decimal(str(row[4])),
+                expiry=row[5],
+                lot_size=int(row[6]),
+                entry_timestamp=datetime.fromisoformat(row[7]),
+                underlying_price_at_entry=Decimal(str(row[8])),
+                entry_premium=Decimal(str(row[9])),
+                exit_timestamp=datetime.fromisoformat(row[10]) if row[10] else None,
+                underlying_price_at_exit=Decimal(str(row[11])) if row[11] is not None else None,
+                exit_premium=Decimal(str(row[12])) if row[12] is not None else None,
+                pnl_amount=Decimal(str(row[13])) if row[13] is not None else None,
+                pnl_percent=Decimal(str(row[14])) if row[14] is not None else None,
+                status=row[15],
+            )
+            for row in result.rows
+        ]
+
+
+class TursoFuturesTradeRepository:
+    """Tracks hypothetical futures trades shadowing BUY/SELL signals.
+
+    One open futures trade per symbol at a time (a real broker connection
+    would never hold both a long and short future on the same symbol
+    simultaneously). Analysis only -- see ``application/futures_shadow.py``.
+    Fully separate from the paper account's capital.
+    """
+
+    def __init__(self, client: libsql_client.Client) -> None:
+        self._client = client
+
+    async def ensure_schema(self) -> None:
+        await self._client.execute(_CREATE_FUTURES_TRADES_TABLE)
+
+    async def open_trade(self, trade: FuturesShadowTrade) -> None:
+        await self._client.execute(
+            """
+            INSERT INTO futures_trades
+                (symbol, side, futures_tradingsymbol, expiry, lot_size,
+                 entry_timestamp, entry_price, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open')
+            """,
+            [
+                trade.symbol,
+                trade.side,
+                trade.futures_tradingsymbol,
+                trade.expiry,
+                trade.lot_size,
+                trade.entry_timestamp.isoformat(),
+                float(trade.entry_price),
+            ],
+        )
+
+    async def get_open_trade(self, symbol: str) -> FuturesShadowTrade | None:
+        result = await self._client.execute(
+            """
+            SELECT symbol, side, futures_tradingsymbol, expiry, lot_size,
+                   entry_timestamp, entry_price
+            FROM futures_trades WHERE symbol = ? AND status = 'open'
+            ORDER BY entry_timestamp DESC LIMIT 1
+            """,
+            [symbol],
+        )
+        if not result.rows:
+            return None
+        row = result.rows[0]
+        return FuturesShadowTrade(
+            symbol=row[0],
+            side=row[1],
+            futures_tradingsymbol=row[2],
+            expiry=row[3],
+            lot_size=int(row[4]),
+            entry_timestamp=datetime.fromisoformat(row[5]),
+            entry_price=Decimal(str(row[6])),
+        )
+
+    async def close_trade(
+        self,
+        symbol: str,
+        exit_timestamp: datetime,
+        exit_price: Decimal,
+        pnl_amount: Decimal,
+        pnl_percent: Decimal,
+    ) -> None:
+        await self._client.execute(
+            """
+            UPDATE futures_trades SET
+                exit_timestamp = ?, exit_price = ?, pnl_amount = ?, pnl_percent = ?,
+                status = 'closed'
+            WHERE id = (
+                SELECT id FROM futures_trades
+                WHERE symbol = ? AND status = 'open'
+                ORDER BY entry_timestamp DESC LIMIT 1
+            )
+            """,
+            [
+                exit_timestamp.isoformat(),
+                float(exit_price),
+                float(pnl_amount),
+                float(pnl_percent),
+                symbol,
+            ],
+        )
+
+    async def get_trades(self, symbol: str | None = None) -> Sequence[FuturesShadowTrade]:
+        query = """
+            SELECT symbol, side, futures_tradingsymbol, expiry, lot_size,
+                   entry_timestamp, entry_price, exit_timestamp, exit_price,
+                   pnl_amount, pnl_percent, status
+            FROM futures_trades
+        """
+        parameters: list[str] = []
+        if symbol is not None:
+            query += " WHERE symbol = ?"
+            parameters.append(symbol)
+        query += " ORDER BY entry_timestamp DESC"
+        result = await self._client.execute(query, parameters)
+        return [
+            FuturesShadowTrade(
+                symbol=row[0],
+                side=row[1],
+                futures_tradingsymbol=row[2],
+                expiry=row[3],
+                lot_size=int(row[4]),
+                entry_timestamp=datetime.fromisoformat(row[5]),
+                entry_price=Decimal(str(row[6])),
+                exit_timestamp=datetime.fromisoformat(row[7]) if row[7] else None,
+                exit_price=Decimal(str(row[8])) if row[8] is not None else None,
+                pnl_amount=Decimal(str(row[9])) if row[9] is not None else None,
+                pnl_percent=Decimal(str(row[10])) if row[10] is not None else None,
+                status=row[11],
+            )
+            for row in result.rows
+        ]

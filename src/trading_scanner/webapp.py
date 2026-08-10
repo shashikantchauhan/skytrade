@@ -31,7 +31,9 @@ from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
 from trading_scanner.infrastructure.kite import build_login_url, exchange_request_token
 from trading_scanner.infrastructure.turso import (
+    TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
+    TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -363,6 +365,81 @@ async def trades(
         await client.close()
 
 
+@app.get("/api/derivatives-shadow")
+async def derivatives_shadow(symbol: str | None = None, _: None = Depends(_require_session)) -> JSONResponse:
+    """Options/futures shadow-tracking summary -- analysis only, never a
+    real order (see application/options_shadow.py, futures_shadow.py)."""
+    client, _config = _client()
+    try:
+        options_repository = TursoOptionsTradeRepository(client)
+        futures_repository = TursoFuturesTradeRepository(client)
+        options_trades = await options_repository.get_trades(symbol)
+        futures_trades = await futures_repository.get_trades(symbol)
+
+        def _options_summary(purpose: str) -> dict:
+            closed = [t for t in options_trades if t.purpose == purpose and t.status == "closed"]
+            wins = sum(1 for t in closed if t.pnl_percent is not None and t.pnl_percent > 0)
+            return {
+                "closed_count": len(closed),
+                "win_rate": _decimal(Decimal(100 * wins) / len(closed)) if closed else None,
+                "total_pnl": _decimal(sum((t.pnl_amount or Decimal("0") for t in closed), Decimal("0"))),
+            }
+
+        closed_futures = [t for t in futures_trades if t.status == "closed"]
+        futures_wins = sum(
+            1 for t in closed_futures if t.pnl_percent is not None and t.pnl_percent > 0
+        )
+
+        return JSONResponse(
+            {
+                "directional_options": _options_summary("directional"),
+                "hedge_options": _options_summary("hedge"),
+                "futures": {
+                    "closed_count": len(closed_futures),
+                    "win_rate": (
+                        _decimal(Decimal(100 * futures_wins) / len(closed_futures))
+                        if closed_futures
+                        else None
+                    ),
+                    "total_pnl": _decimal(
+                        sum((t.pnl_amount or Decimal("0") for t in closed_futures), Decimal("0"))
+                    ),
+                },
+                "recent_options": [
+                    {
+                        "symbol": t.symbol,
+                        "option_type": t.option_type,
+                        "purpose": t.purpose,
+                        "tradingsymbol": t.option_tradingsymbol,
+                        "entry_timestamp": t.entry_timestamp.isoformat(),
+                        "entry_premium": _decimal(t.entry_premium),
+                        "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
+                        "exit_premium": _decimal(t.exit_premium),
+                        "pnl_percent": _decimal(t.pnl_percent),
+                        "status": t.status,
+                    }
+                    for t in sorted(options_trades, key=lambda t: t.entry_timestamp, reverse=True)[:30]
+                ],
+                "recent_futures": [
+                    {
+                        "symbol": t.symbol,
+                        "side": t.side,
+                        "tradingsymbol": t.futures_tradingsymbol,
+                        "entry_timestamp": t.entry_timestamp.isoformat(),
+                        "entry_price": _decimal(t.entry_price),
+                        "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
+                        "exit_price": _decimal(t.exit_price),
+                        "pnl_percent": _decimal(t.pnl_percent),
+                        "status": t.status,
+                    }
+                    for t in sorted(futures_trades, key=lambda t: t.entry_timestamp, reverse=True)[:30]
+                ],
+            }
+        )
+    finally:
+        await client.close()
+
+
 class ConfigUpdate(BaseModel):
     capital: str | None = None
     slots: str | None = None
@@ -616,6 +693,21 @@ _PAGE = """<!doctype html>
 </section>
 
 <section>
+  <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
+  <div class="cards" id="derivatives-cards"></div>
+  <div class="row" style="margin-top: 0.8rem;">
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
+      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+</section>
+
+<section>
   <h2>Config</h2>
   <div class="panel row">
     <label class="field">Capital<input id="cfg-capital" /></label>
@@ -765,9 +857,29 @@ async function loadKiteStatus() {
   }
 }
 
+async function loadDerivativesShadow() {
+  const d = await api("/api/derivatives-shadow");
+  const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
+  document.getElementById("derivatives-cards").innerHTML = `
+    <div class="card"><div class="label">Directional options (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
+    <div class="card"><div class="label">Hedge options (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
+    <div class="card"><div class="label">Futures (${d.futures.closed_count} closed, ${fmt(d.futures.win_rate)}% win)</div><div class="value">${pnlPill(d.futures.total_pnl)}</div></div>
+  `;
+  document.querySelector("#options-shadow-table tbody").innerHTML = d.recent_options.map(o => {
+    const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
+    const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}%</span>`;
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=5>No options-shadow trades yet</td></tr>";
+  document.querySelector("#futures-shadow-table tbody").innerHTML = d.recent_futures.map(f => {
+    const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
+    const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}%</span>`;
+    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=4>No futures-shadow trades yet</td></tr>";
+}
+
 async function refreshAll() {
   if (!symbolsLoaded) await loadSymbols();
-  await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs(), loadKiteStatus()]);
+  await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs(), loadKiteStatus(), loadDerivativesShadow()]);
 }
 refreshAll();
 setInterval(refreshAll, 30000);

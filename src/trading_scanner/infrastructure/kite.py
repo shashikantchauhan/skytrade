@@ -14,7 +14,7 @@ touches this server; only the resulting access token is stored (in Turso,
 see ``TursoKiteSessionRepository``).
 """
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -173,6 +173,73 @@ class KiteProvider:
         )
         data = data.set_index("Datetime").sort_index()
         return data[["Open", "High", "Low", "Close", "Volume"]]
+
+
+class KiteDerivativesChain:
+    """Looks up the nearest at-the-money option contract or nearest-expiry
+    futures contract for a symbol, and fetches live premiums/prices --
+    backs the derivatives shadow-tracking feature (``application/
+    options_shadow.py``, ``application/futures_shadow.py``), never the live
+    pipeline's actual equity signal generation. Yahoo has no Indian
+    derivatives data, so this is only ever available when Kite is the
+    active data source.
+    """
+
+    def __init__(self, kite: KiteConnect) -> None:
+        self._kite = kite
+        self._nfo: list[dict] | None = None
+
+    def _ensure_loaded(self) -> None:
+        if self._nfo is None:
+            self._nfo = self._kite.instruments("NFO")
+
+    def nearest_atm_option(
+        self, symbol: str, option_type: str, underlying_price: float
+    ) -> dict | None:
+        """The nearest-expiry, nearest-strike contract of ``option_type``
+        ("CE" or "PE") for ``symbol`` (Yahoo-style, e.g. RELIANCE.NS), or
+        None if it has no listed options chain -- not every NSE stock does.
+        """
+        self._ensure_loaded()
+        name = symbol.removesuffix(".NS")
+        assert self._nfo is not None
+        today = date.today()
+        candidates = [
+            row
+            for row in self._nfo
+            if row["name"] == name
+            and row["instrument_type"] == option_type
+            and row["expiry"] >= today
+        ]
+        if not candidates:
+            return None
+        nearest_expiry = min(row["expiry"] for row in candidates)
+        same_expiry = [row for row in candidates if row["expiry"] == nearest_expiry]
+        return min(same_expiry, key=lambda row: abs(row["strike"] - underlying_price))
+
+    def nearest_future(self, symbol: str) -> dict | None:
+        """The nearest-expiry FUT contract for ``symbol``, or None if it has
+        no listed futures contract."""
+        self._ensure_loaded()
+        name = symbol.removesuffix(".NS")
+        assert self._nfo is not None
+        today = date.today()
+        candidates = [
+            row
+            for row in self._nfo
+            if row["name"] == name and row["instrument_type"] == "FUT" and row["expiry"] >= today
+        ]
+        if not candidates:
+            return None
+        return min(candidates, key=lambda row: row["expiry"])
+
+    def ltp(self, exchange_tradingsymbol: str) -> float | None:
+        """Live last-traded price for one contract, e.g.
+        'NFO:RELIANCE25AUG1400PE' or 'NFO:RELIANCE25AUGFUT'. None if Kite
+        has no quote for it."""
+        quote = self._kite.ltp([exchange_tradingsymbol])
+        row = quote.get(exchange_tradingsymbol)
+        return row["last_price"] if row else None
 
 
 def build_login_url(api_key: str) -> str:

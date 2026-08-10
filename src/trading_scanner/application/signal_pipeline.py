@@ -2,14 +2,14 @@
 
 import asyncio
 import logging
-from datetime import UTC
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pandas as pd
 from kiteconnect import KiteConnect
 
 from trading_scanner.alpha_engine import AlphaEngine
-from trading_scanner.application import paper_trading
+from trading_scanner.application import futures_shadow, options_shadow, paper_trading
 from trading_scanner.application.fast_predict import (
     ExitState,
     FastPredictResult,
@@ -28,8 +28,16 @@ from trading_scanner.domain.ports import (
     SignalRepository,
     TradeRepository,
 )
-from trading_scanner.infrastructure.kite import KiteInstrumentMap, KiteProvider
-from trading_scanner.infrastructure.turso import TursoKiteSessionRepository
+from trading_scanner.infrastructure.kite import (
+    KiteDerivativesChain,
+    KiteInstrumentMap,
+    KiteProvider,
+)
+from trading_scanner.infrastructure.turso import (
+    TursoFuturesTradeRepository,
+    TursoKiteSessionRepository,
+    TursoOptionsTradeRepository,
+)
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
 # Both providers implement the same duck-typed get_recent_history(symbol,
@@ -94,6 +102,8 @@ async def run_signal_pipeline(
     paper_account_repository: PaperAccountRepository,
     notifier: Notifier,
     kite_session_repository: TursoKiteSessionRepository | None = None,
+    options_trade_repository: TursoOptionsTradeRepository | None = None,
+    futures_trade_repository: TursoFuturesTradeRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -110,11 +120,21 @@ async def run_signal_pipeline(
     dashboard's ``/kite/login`` flow, not anything in this pipeline -- a
     stale/missing session here just means today's runs use Yahoo until the
     user logs in again.
+
+    When Kite is active and the shadow-trade repositories are provided,
+    every BUY/SELL entry-exit also shadow-tracks (analysis only, never a
+    real order, entirely separate from the paper account's capital):
+    a directional option (CALL for BUY, PUT for SELL -- see
+    ``application/options_shadow.py``), and a futures position (long for
+    BUY, short for SELL) with its own protective hedge option (PUT hedging
+    a long future, CALL hedging a short future -- see
+    ``application/futures_shadow.py``).
     """
     logger = logging.getLogger(__name__)
-    provider, provider_name = await _select_provider(config, kite_session_repository)
+    provider, provider_name, kite = await _select_provider(config, kite_session_repository)
     logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
+    derivatives_chain = KiteDerivativesChain(kite) if kite is not None else None
 
     index_result = None
     if config.index_symbol:
@@ -152,6 +172,9 @@ async def run_signal_pipeline(
                     notifier,
                     index_result,
                     paper_account_lock,
+                    derivatives_chain,
+                    options_trade_repository,
+                    futures_trade_repository,
                 )
             except Exception:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -161,7 +184,7 @@ async def run_signal_pipeline(
 
 async def _select_provider(
     config: AppConfig, kite_session_repository: TursoKiteSessionRepository | None
-) -> tuple[MarketDataProvider, str]:
+) -> tuple[MarketDataProvider, str, KiteConnect | None]:
     """Prefer Kite when a valid session exists; fall back to Yahoo otherwise.
 
     "Valid" is checked by actually calling Kite's instruments endpoint and
@@ -169,7 +192,10 @@ async def _select_provider(
     ``KiteInstrumentMap.validate_index_mapping``) rather than trusting a
     stored token blindly -- catches both an expired/revoked token and a
     stale index mapping in one check, and either failure just means this
-    run uses Yahoo instead of blocking the whole pipeline.
+    run uses Yahoo instead of blocking the whole pipeline. The raw Kite
+    client is returned too (None when Yahoo is used) so the caller can also
+    drive the options-shadow feature, which needs Kite specifically --
+    Yahoo has no Indian options data.
     """
     logger = logging.getLogger(__name__)
     if config.kite_api_key and kite_session_repository is not None:
@@ -181,14 +207,14 @@ async def _select_provider(
                 kite.set_access_token(access_token)
                 instrument_map = KiteInstrumentMap(kite)
                 await asyncio.to_thread(instrument_map.validate_index_mapping)
-                return KiteProvider(kite, instrument_map), "kite"
+                return KiteProvider(kite, instrument_map), "kite", kite
             except Exception:
                 logger.warning(
                     "Kite session unusable (obtained_at=%s); falling back to Yahoo for this run.",
                     obtained_at,
                     exc_info=True,
                 )
-    return YahooProvider(), "yahoo"
+    return YahooProvider(), "yahoo", None
 
 
 async def _evaluate_symbol(
@@ -282,6 +308,9 @@ async def _process_symbol(
     notifier: Notifier,
     index_result: FastPredictResult | None,
     paper_account_lock: asyncio.Lock,
+    derivatives_chain: KiteDerivativesChain | None = None,
+    options_trade_repository: TursoOptionsTradeRepository | None = None,
+    futures_trade_repository: TursoFuturesTradeRepository | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -298,6 +327,10 @@ async def _process_symbol(
     BUY-only win-rate track record and on the account having free capital.
     SELL signals never touch the paper account: NSE cash market doesn't
     allow short selling for multi-day holds, so they stay informational only.
+
+    When ``derivatives_chain`` is available (Kite active), every entry/exit
+    also shadow-tracks (analysis only, never a real order) a directional
+    option and a futures+hedge position -- see ``_open_derivatives_shadow``.
     """
     evaluated = await _evaluate_symbol(
         symbol, config, provider, engine, candle_repository, engine_state_repository
@@ -307,6 +340,7 @@ async def _process_symbol(
     result, newest_candle = evaluated
     market_price = _market_price(newest_candle)
     paper_note = None
+    derivatives_note = None
 
     if result.signal == "BUY":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.SELL)
@@ -325,6 +359,10 @@ async def _process_symbol(
             symbol, config, newest_candle.timestamp, market_price,
             trade_repository, paper_account_repository, paper_account_lock,
         )
+        derivatives_note = await _open_derivatives_shadow(
+            symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
+            derivatives_chain, options_trade_repository, futures_trade_repository,
+        )
     if result.end_long:
         await _notify_exit(
             symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
@@ -336,6 +374,10 @@ async def _process_symbol(
         await _close_paper_position(
             symbol, newest_candle.timestamp, market_price,
             paper_account_repository, signal_repository, notifier, paper_account_lock,
+        )
+        await _close_derivatives_shadow(
+            symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
+            derivatives_chain, options_trade_repository, futures_trade_repository,
         )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
@@ -350,6 +392,10 @@ async def _process_symbol(
                 is_early_signal_flip=result.is_early_signal_flip,
             ),
         )
+        derivatives_note = await _open_derivatives_shadow(
+            symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
+            derivatives_chain, options_trade_repository, futures_trade_repository,
+        )
     if result.end_short:
         await _notify_exit(
             symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
@@ -357,6 +403,10 @@ async def _process_symbol(
         )
         await trade_repository.close_open_trade(
             symbol, config.candle_interval, SignalSide.SELL, newest_candle.timestamp, market_price
+        )
+        await _close_derivatives_shadow(
+            symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
+            derivatives_chain, options_trade_repository, futures_trade_repository,
         )
 
     if result.signal not in ("BUY", "SELL"):
@@ -371,6 +421,8 @@ async def _process_symbol(
         rationale += "; informational only -- not tradeable in NSE cash market"
     elif paper_note is not None:
         rationale += f"; {paper_note}"
+    if derivatives_note is not None:
+        rationale += f"; {derivatives_note}"
     if index_result is not None:
         rationale += (
             f"; index({config.index_symbol})={index_result.signal},"
@@ -494,6 +546,103 @@ async def _close_paper_position(
         return
     await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
+
+
+async def _open_derivatives_shadow(
+    symbol: str,
+    side: SignalSide,
+    entry_timestamp: datetime,
+    market_price: Decimal,
+    derivatives_chain: KiteDerivativesChain | None,
+    options_trade_repository: TursoOptionsTradeRepository | None,
+    futures_trade_repository: TursoFuturesTradeRepository | None,
+) -> str | None:
+    """Best-effort: open a directional option (CALL for BUY, PUT for SELL)
+    and a futures position (long for BUY, short for SELL) with its own
+    protective hedge option (PUT hedging a long future, CALL hedging a
+    short future). Analysis only, never a real order -- any failure here is
+    a side observation, not a dependency of the main signal/paper-trading
+    flow, so this never raises into the caller.
+    """
+    if derivatives_chain is None:
+        return None
+    option_type = "CE" if side == SignalSide.BUY else "PE"
+    hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
+    futures_side = "long" if side == SignalSide.BUY else "short"
+    notes: list[str] = []
+    try:
+        if options_trade_repository is not None:
+            note = await options_shadow.try_open_option_position(
+                symbol, option_type, "directional", entry_timestamp, market_price,
+                derivatives_chain, options_trade_repository,
+            )
+            if note is not None:
+                notes.append(note)
+        if futures_trade_repository is not None:
+            note = await futures_shadow.try_open_futures_position(
+                symbol, futures_side, entry_timestamp, market_price,
+                derivatives_chain, futures_trade_repository,
+            )
+            if note is not None:
+                notes.append(note)
+            if options_trade_repository is not None:
+                hedge_note = await options_shadow.try_open_option_position(
+                    symbol, hedge_option_type, "hedge", entry_timestamp, market_price,
+                    derivatives_chain, options_trade_repository,
+                )
+                if hedge_note is not None:
+                    notes.append(hedge_note)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Derivatives shadow open failed for %s (%s) -- continuing without it.",
+            symbol, side, exc_info=True,
+        )
+    return "; ".join(notes) if notes else None
+
+
+async def _close_derivatives_shadow(
+    symbol: str,
+    side: SignalSide,
+    exit_timestamp: datetime,
+    market_price: Decimal,
+    derivatives_chain: KiteDerivativesChain | None,
+    options_trade_repository: TursoOptionsTradeRepository | None,
+    futures_trade_repository: TursoFuturesTradeRepository | None,
+) -> None:
+    """Best-effort close of whatever ``_open_derivatives_shadow`` opened.
+    Logged, not notified via Telegram -- these are analysis-only positions,
+    see the module docstring."""
+    if derivatives_chain is None:
+        return
+    option_type = "CE" if side == SignalSide.BUY else "PE"
+    hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
+    logger = logging.getLogger(__name__)
+    try:
+        if options_trade_repository is not None:
+            note = await options_shadow.close_option_position(
+                symbol, option_type, "directional", exit_timestamp, market_price,
+                derivatives_chain, options_trade_repository,
+            )
+            if note is not None:
+                logger.info(note)
+        if futures_trade_repository is not None:
+            note = await futures_shadow.close_futures_position(
+                symbol, exit_timestamp, market_price, futures_trade_repository,
+            )
+            if note is not None:
+                logger.info(note)
+        if options_trade_repository is not None:
+            note = await options_shadow.close_option_position(
+                symbol, hedge_option_type, "hedge", exit_timestamp, market_price,
+                derivatives_chain, options_trade_repository,
+            )
+            if note is not None:
+                logger.info(note)
+    except Exception:
+        logger.warning(
+            "Derivatives shadow close failed for %s (%s) -- continuing without it.",
+            symbol, side, exc_info=True,
+        )
 
 
 async def _win_rate_summary(
