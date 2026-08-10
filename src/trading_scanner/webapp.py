@@ -334,13 +334,21 @@ async def trades(
     try:
         repository = TursoTradeRepository(client)
         all_trades = await repository.get_trades(symbol, config.candle_interval)
+        # Win rate stays BUY-only -- matches the paper-trading eligibility
+        # gate exactly (see application/paper_trading.py). SELL trades are
+        # never tradeable in the NSE cash market, so folding them into this
+        # number would make it not match what eligibility actually uses.
         closed_buys = [
             t for t in all_trades if t.side.value == "buy" and t.status == "closed"
         ]
-        closed_buys.sort(key=lambda t: t.exit_timestamp or t.entry_timestamp, reverse=True)
+        # The visible table, though, shows both sides -- SELL rows are real
+        # backtest results too (see application/backtest.py), just never
+        # became real/paper positions; hiding them was the actual bug.
+        closed_all = [t for t in all_trades if t.status == "closed"]
+        closed_all.sort(key=lambda t: t.exit_timestamp or t.entry_timestamp, reverse=True)
         # A symbol-filtered view shows its full backtested history rather
         # than just the dashboard's default recent-N window.
-        recent = closed_buys if symbol else closed_buys[:limit]
+        recent = closed_all if symbol else closed_all[:limit]
         wins = sum(1 for t in closed_buys if t.pnl_percent is not None and t.pnl_percent > 0)
         return JSONResponse(
             {
@@ -351,6 +359,7 @@ async def trades(
                 "recent": [
                     {
                         "symbol": t.symbol,
+                        "side": t.side.value,
                         "entry_timestamp": t.entry_timestamp.isoformat(),
                         "entry_price": _decimal(t.entry_price),
                         "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
@@ -688,7 +697,7 @@ _PAGE = """<!doctype html>
     </label>
   </div>
   <div class="panel table-wrap">
-    <table id="trades-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+    <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL%</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
@@ -698,11 +707,11 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
-      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 </section>
@@ -806,8 +815,9 @@ async function loadTrades() {
   document.getElementById("win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
   document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
     const cls = r.pnl_percent >= 0 ? "green" : "red";
-    return `<tr><td>${r.symbol}</td><td>${fmtTime(r.entry_timestamp)}</td><td>${fmtTime(r.exit_timestamp)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
-  }).join("") || "<tr><td colspan=4>No closed trades yet</td></tr>";
+    const sideCls = r.side === "buy" ? "green" : "red";
+    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>${fmtTime(r.exit_timestamp)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
+  }).join("") || "<tr><td colspan=5>No closed trades yet</td></tr>";
 }
 
 async function loadConfig() {
@@ -868,13 +878,13 @@ async function loadDerivativesShadow() {
   document.querySelector("#options-shadow-table tbody").innerHTML = d.recent_options.map(o => {
     const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
     const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}%</span>`;
-    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=5>No options-shadow trades yet</td></tr>";
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=6>No options-shadow trades yet</td></tr>";
   document.querySelector("#futures-shadow-table tbody").innerHTML = d.recent_futures.map(f => {
     const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
     const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}%</span>`;
-    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=4>No futures-shadow trades yet</td></tr>";
+    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=5>No futures-shadow trades yet</td></tr>";
 }
 
 async function refreshAll() {
