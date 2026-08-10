@@ -69,6 +69,36 @@ INDEX_SYMBOL_MAP = {
 }
 
 
+def _to_kite_tradingsymbol(symbol: str) -> str:
+    """Yahoo-style symbol -> Kite tradingsymbol, without needing an
+    instrument token (``kite.ltp`` accepts ``"NSE:TRADINGSYMBOL"`` strings
+    directly) -- shared by ``get_last_prices`` below."""
+    if symbol in INDEX_SYMBOL_MAP:
+        return INDEX_SYMBOL_MAP[symbol]
+    return symbol.removesuffix(".NS")
+
+
+def get_last_prices(kite: KiteConnect, symbols: list[str]) -> dict[str, float]:
+    """Live last-traded prices for equities/indices via Kite -- for the
+    dashboard's mark-to-market display, which previously used
+    ``YahooProvider.get_last_prices``' daily-close download and could lag
+    the real intraday price by a full session. Best-effort: a symbol Kite
+    can't currently price is simply left out, matching Yahoo's version."""
+    if not symbols:
+        return {}
+    keys = {symbol: f"NSE:{_to_kite_tradingsymbol(symbol)}" for symbol in symbols}
+    try:
+        quote = kite.ltp(list(keys.values()))
+    except Exception:
+        return {}
+    prices: dict[str, float] = {}
+    for symbol, key in keys.items():
+        row = quote.get(key)
+        if row:
+            prices[symbol] = row["last_price"]
+    return prices
+
+
 class InstrumentLookupError(RuntimeError):
     """A symbol couldn't be confidently mapped to a Kite instrument token."""
 

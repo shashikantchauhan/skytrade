@@ -24,12 +24,19 @@ from pathlib import Path
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
+from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
 from trading_scanner.application import paper_trading
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
-from trading_scanner.infrastructure.kite import build_login_url, exchange_request_token
+from trading_scanner.infrastructure.kite import (
+    build_login_url,
+    exchange_request_token,
+)
+from trading_scanner.infrastructure.kite import (
+    get_last_prices as kite_get_last_prices,
+)
 from trading_scanner.infrastructure.turso import (
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
@@ -86,13 +93,30 @@ def _decimal(value: Decimal | None) -> float | None:
     return float(value) if value is not None else None
 
 
-async def _last_prices(positions: list[PaperPosition]) -> dict[str, float]:
-    """Fetch current market prices for open positions' symbols (blocking
-    yfinance call, so run off the event loop). Best-effort -- a symbol
-    Yahoo can't currently price is simply left out by ``get_last_prices``."""
+async def _last_prices(positions: list[PaperPosition], client, config) -> dict[str, float]:
+    """Fetch current market prices for open positions' symbols.
+
+    Prefers a live Kite quote when a session is active -- Yahoo's
+    ``get_last_prices`` downloads the last *daily close*, which during a
+    trading session can lag the real price by a full day (the bug reported
+    against the dashboard: showing yesterday's close while the live price
+    had already moved). Falls back to Yahoo if Kite isn't configured or has
+    no active session today. Both calls are blocking, so run off the event
+    loop."""
     symbols = [p.symbol for p in positions]
     if not symbols:
         return {}
+    if config.kite_api_key:
+        repository = TursoKiteSessionRepository(client)
+        await repository.ensure_schema()
+        token_row = await repository.get_token()
+        if token_row is not None:
+            access_token, _obtained_at = token_row
+            kite = KiteConnect(api_key=config.kite_api_key)
+            kite.set_access_token(access_token)
+            prices = await asyncio.to_thread(kite_get_last_prices, kite, symbols)
+            if prices:
+                return prices
     return await asyncio.to_thread(_yahoo.get_last_prices, symbols)
 
 
@@ -223,7 +247,7 @@ async def status(_: None = Depends(_require_session)) -> JSONResponse:
         )
         position_size = max(total_equity / paper_trading.TARGET_SLOTS, paper_trading.MIN_POSITION_SIZE)
 
-        last_prices = await _last_prices(list(open_positions))
+        last_prices = await _last_prices(list(open_positions), client, config)
         unrealized_total = sum(
             (
                 (Decimal(str(last_prices[p.symbol])) - p.entry_price) * p.quantity
@@ -277,11 +301,11 @@ async def status(_: None = Depends(_require_session)) -> JSONResponse:
 
 @app.get("/api/positions")
 async def positions(_: None = Depends(_require_session)) -> JSONResponse:
-    client, _config = _client()
+    client, config = _client()
     try:
         repository = TursoPaperAccountRepository(client, paper_trading.INITIAL_CAPITAL)
         open_positions = await repository.get_open_positions()
-        last_prices = await _last_prices(list(open_positions))
+        last_prices = await _last_prices(list(open_positions), client, config)
         return JSONResponse(
             [
                 {
