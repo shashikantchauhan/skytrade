@@ -29,7 +29,9 @@ from pydantic import BaseModel
 from trading_scanner.application import paper_trading
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
+from trading_scanner.infrastructure.kite import build_login_url, exchange_request_token
 from trading_scanner.infrastructure.turso import (
+    TursoKiteSessionRepository,
     TursoPaperAccountRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -143,6 +145,67 @@ async def logout(ptrade_session: str | None = Cookie(default=None)) -> JSONRespo
     response = JSONResponse({"ok": True})
     response.delete_cookie(_SESSION_COOKIE)
     return response
+
+
+@app.get("/kite/login")
+async def kite_login(_: None = Depends(_require_session)) -> RedirectResponse:
+    """Send the user to Kite's own login page -- their Zerodha password is
+    entered there, never on this server. Requires being logged into this
+    dashboard first (so a stranger can't hijack the Kite session)."""
+    config = load_config()
+    if not config.kite_api_key:
+        raise HTTPException(status_code=500, detail="TRADING_SCANNER_KITE_API_KEY is not set.")
+    return RedirectResponse(build_login_url(config.kite_api_key))
+
+
+@app.get("/kite/callback", response_class=HTMLResponse)
+async def kite_callback(request: Request) -> str:
+    """Kite redirects here after login with a one-time request_token, which
+    is exchanged immediately for the day's access token and stored. Not
+    behind _require_session -- Kite itself is the auth gate for this step,
+    and the request_token is single-use/short-lived, so there's nothing
+    sensitive to protect on this specific hop."""
+    request_token = request.query_params.get("request_token")
+    status_param = request.query_params.get("status")
+    if status_param != "success" or not request_token:
+        return "<p>Kite login failed or was cancelled. You can close this tab and try again.</p>"
+    config = load_config()
+    if not config.kite_api_key or not config.kite_api_secret:
+        return "<p>Kite API key/secret not configured on the server.</p>"
+    try:
+        access_token, obtained_at = exchange_request_token(
+            config.kite_api_key, config.kite_api_secret, request_token
+        )
+    except Exception as error:
+        return f"<p>Failed to exchange Kite token: {error}</p>"
+    client = create_turso_client(config.turso_database_url, config.turso_auth_token)
+    try:
+        repository = TursoKiteSessionRepository(client)
+        await repository.ensure_schema()
+        await repository.set_token(access_token, obtained_at)
+    finally:
+        await client.close()
+    return (
+        "<p>Kite login successful -- today's session is active. "
+        '<a href="/">Back to dashboard</a></p>'
+    )
+
+
+@app.get("/api/kite-status")
+async def kite_status(_: None = Depends(_require_session)) -> JSONResponse:
+    config = load_config()
+    if not config.kite_api_key:
+        return JSONResponse({"configured": False})
+    client = create_turso_client(config.turso_database_url, config.turso_auth_token)
+    try:
+        repository = TursoKiteSessionRepository(client)
+        await repository.ensure_schema()
+        token_row = await repository.get_token()
+    finally:
+        await client.close()
+    if token_row is None:
+        return JSONResponse({"configured": True, "logged_in": False})
+    return JSONResponse({"configured": True, "logged_in": True, "obtained_at": token_row[1]})
 
 
 @app.get("/api/status")
@@ -527,6 +590,7 @@ _PAGE = """<!doctype html>
   <div class="row">
     <button class="primary" onclick="trigger()">Run pipeline now</button>
     <span class="msg" id="trigger-msg"></span>
+    <span class="row" id="kite-status" style="margin-left: auto;"></span>
   </div>
 </section>
 
@@ -688,9 +752,22 @@ async function loadLogs() {
   document.getElementById("logs").textContent = l.lines.join("\\n");
 }
 
+async function loadKiteStatus() {
+  const k = await api("/api/kite-status");
+  const el = document.getElementById("kite-status");
+  if (!k.configured) { el.innerHTML = ""; return; }
+  if (k.logged_in) {
+    // obtained_at is already IST (Kite's own login_time), not UTC -- do not
+    // run it through fmtTime()'s UTC->IST conversion, that would shift it.
+    el.innerHTML = `<span class="pill green">Kite: logged in (${k.obtained_at})</span> <button onclick="window.location.href='/kite/login'">Re-login</button>`;
+  } else {
+    el.innerHTML = `<span class="pill red">Kite: not logged in (using Yahoo)</span> <button class="primary" onclick="window.location.href='/kite/login'">Login to Kite</button>`;
+  }
+}
+
 async function refreshAll() {
   if (!symbolsLoaded) await loadSymbols();
-  await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs()]);
+  await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs(), loadKiteStatus()]);
 }
 refreshAll();
 setInterval(refreshAll, 30000);

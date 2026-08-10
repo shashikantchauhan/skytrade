@@ -11,6 +11,7 @@ from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNot
 from trading_scanner.infrastructure.turso import (
     TursoCandleRepository,
     TursoEngineStateRepository,
+    TursoKiteSessionRepository,
     TursoPaperAccountRepository,
     TursoSignalRepository,
     TursoTradeRepository,
@@ -42,11 +43,13 @@ async def _run(config: AppConfig) -> None:
         engine_state_repository = TursoEngineStateRepository(client)
         trade_repository = TursoTradeRepository(client)
         paper_account_repository = TursoPaperAccountRepository(client, INITIAL_CAPITAL)
+        kite_session_repository = TursoKiteSessionRepository(client)
         await candle_repository.ensure_schema()
         await signal_repository.ensure_schema()
         await engine_state_repository.ensure_schema()
         await trade_repository.ensure_schema()
         await paper_account_repository.ensure_schema()
+        await kite_session_repository.ensure_schema()
 
         notifier = _build_notifier(config)
         await run_signal_pipeline(
@@ -58,6 +61,7 @@ async def _run(config: AppConfig) -> None:
             trade_repository,
             paper_account_repository,
             notifier,
+            kite_session_repository,
         )
     finally:
         await client.close()

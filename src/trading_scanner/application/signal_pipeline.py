@@ -6,6 +6,7 @@ from datetime import UTC
 from decimal import Decimal
 
 import pandas as pd
+from kiteconnect import KiteConnect
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import paper_trading
@@ -27,7 +28,14 @@ from trading_scanner.domain.ports import (
     SignalRepository,
     TradeRepository,
 )
+from trading_scanner.infrastructure.kite import KiteInstrumentMap, KiteProvider
+from trading_scanner.infrastructure.turso import TursoKiteSessionRepository
 from trading_scanner.infrastructure.yahoo import YahooProvider
+
+# Both providers implement the same duck-typed get_recent_history(symbol,
+# interval, days) -> pd.DataFrame interface; nothing below needs to know
+# which one it got.
+MarketDataProvider = YahooProvider | KiteProvider
 
 # AlphaEngine's regime filter needs ~200 bars of warm-up before predictions are
 # meaningful; below this the pipeline skips a symbol instead of notifying on
@@ -85,6 +93,7 @@ async def run_signal_pipeline(
     trade_repository: TradeRepository,
     paper_account_repository: PaperAccountRepository,
     notifier: Notifier,
+    kite_session_repository: TursoKiteSessionRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -93,9 +102,18 @@ async def run_signal_pipeline(
     attached to every stock signal's rationale -- purely informational, so
     you can judge whether a stock signal lines up with the broader market or
     looks like noise against it. It is never used to suppress a signal.
+
+    Data source: Kite Connect's Historical Data API when a valid session
+    exists (the same feed NSE brokers use -- see
+    ``infrastructure/kite.py``), falling back to Yahoo Finance automatically
+    otherwise. Kite sessions expire daily and are refreshed via the
+    dashboard's ``/kite/login`` flow, not anything in this pipeline -- a
+    stale/missing session here just means today's runs use Yahoo until the
+    user logs in again.
     """
     logger = logging.getLogger(__name__)
-    provider = YahooProvider()
+    provider, provider_name = await _select_provider(config, kite_session_repository)
+    logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
 
     index_result = None
@@ -141,10 +159,42 @@ async def run_signal_pipeline(
     await asyncio.gather(*(_process_with_limit(symbol) for symbol in symbols))
 
 
+async def _select_provider(
+    config: AppConfig, kite_session_repository: TursoKiteSessionRepository | None
+) -> tuple[MarketDataProvider, str]:
+    """Prefer Kite when a valid session exists; fall back to Yahoo otherwise.
+
+    "Valid" is checked by actually calling Kite's instruments endpoint and
+    confirming the hardcoded index mapping still resolves (see
+    ``KiteInstrumentMap.validate_index_mapping``) rather than trusting a
+    stored token blindly -- catches both an expired/revoked token and a
+    stale index mapping in one check, and either failure just means this
+    run uses Yahoo instead of blocking the whole pipeline.
+    """
+    logger = logging.getLogger(__name__)
+    if config.kite_api_key and kite_session_repository is not None:
+        token_row = await kite_session_repository.get_token()
+        if token_row is not None:
+            access_token, obtained_at = token_row
+            try:
+                kite = KiteConnect(api_key=config.kite_api_key)
+                kite.set_access_token(access_token)
+                instrument_map = KiteInstrumentMap(kite)
+                await asyncio.to_thread(instrument_map.validate_index_mapping)
+                return KiteProvider(kite, instrument_map), "kite"
+            except Exception:
+                logger.warning(
+                    "Kite session unusable (obtained_at=%s); falling back to Yahoo for this run.",
+                    obtained_at,
+                    exc_info=True,
+                )
+    return YahooProvider(), "yahoo"
+
+
 async def _evaluate_symbol(
     symbol: str,
     config: AppConfig,
-    provider: YahooProvider,
+    provider: MarketDataProvider,
     engine: AlphaEngine,
     candle_repository: CandleRepository,
     engine_state_repository: EngineStateRepository,
@@ -222,7 +272,7 @@ async def _evaluate_symbol(
 async def _process_symbol(
     symbol: str,
     config: AppConfig,
-    provider: YahooProvider,
+    provider: MarketDataProvider,
     engine: AlphaEngine,
     candle_repository: CandleRepository,
     signal_repository: SignalRepository,

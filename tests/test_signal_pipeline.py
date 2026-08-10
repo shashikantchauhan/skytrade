@@ -141,6 +141,8 @@ def _config() -> AppConfig:
         telegram_bot_token=None,
         telegram_chat_id=None,
         index_symbol=None,
+        kite_api_key=None,
+        kite_api_secret=None,
     )
 
 
@@ -1095,6 +1097,8 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         telegram_bot_token=None,
         telegram_chat_id=None,
         index_symbol="^NSEI",
+        kite_api_key=None,
+        kite_api_secret=None,
     )
     candle_repository = FakeCandleRepository()
     signal_repository = FakeSignalRepository()

@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS paper_positions (
 )
 """
 
+_CREATE_KITE_SESSION_TABLE = """
+CREATE TABLE IF NOT EXISTS kite_session (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    access_token TEXT NOT NULL,
+    obtained_at TEXT NOT NULL
+)
+"""
+
 _UPSERT_CANDLE = """
 INSERT INTO candles (symbol, interval, timestamp, open, high, low, close, volume)
 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -482,3 +490,37 @@ class TursoPaperAccountRepository:
             )
             for row in result.rows
         ]
+
+
+class TursoKiteSessionRepository:
+    """Persists the single day-long Kite Connect access token.
+
+    One session only -- the dashboard's ``/kite/callback`` route is the only
+    writer (see ``webapp.py``), the pipeline is a read-only consumer that
+    decides whether to use Kite or fall back to Yahoo based on this table.
+    """
+
+    def __init__(self, client: libsql_client.Client) -> None:
+        self._client = client
+
+    async def ensure_schema(self) -> None:
+        await self._client.execute(_CREATE_KITE_SESSION_TABLE)
+
+    async def set_token(self, access_token: str, obtained_at: str) -> None:
+        await self._client.execute(
+            """
+            INSERT INTO kite_session (id, access_token, obtained_at) VALUES (1, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET
+                access_token = excluded.access_token,
+                obtained_at = excluded.obtained_at
+            """,
+            [access_token, obtained_at],
+        )
+
+    async def get_token(self) -> tuple[str, str] | None:
+        result = await self._client.execute(
+            "SELECT access_token, obtained_at FROM kite_session WHERE id = 1"
+        )
+        if not result.rows:
+            return None
+        return result.rows[0][0], result.rows[0][1]

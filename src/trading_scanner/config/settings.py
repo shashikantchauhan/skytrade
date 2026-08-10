@@ -22,6 +22,8 @@ class AppConfig:
     telegram_bot_token: str | None
     telegram_chat_id: str | None
     index_symbol: str | None
+    kite_api_key: str | None
+    kite_api_secret: str | None
 
 
 def load_config() -> AppConfig:
@@ -42,6 +44,8 @@ def load_config() -> AppConfig:
         # can judge whether a signal lines up with the broader market or looks
         # like noise against it. Set to "" to disable index tracking entirely.
         index_symbol=os.getenv("TRADING_SCANNER_INDEX_SYMBOL", "^NSEI") or None,
+        kite_api_key=os.getenv("TRADING_SCANNER_KITE_API_KEY"),
+        kite_api_secret=os.getenv("TRADING_SCANNER_KITE_API_SECRET"),
     )
 
 
