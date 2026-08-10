@@ -8,3 +8,6 @@ data/*.json
 !data/.gitkeep
 validation/*.csv
 local.db*
+
+# Full project context/history -- local only, not for GitHub
+NOTES.md
