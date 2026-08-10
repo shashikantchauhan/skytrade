@@ -102,6 +102,17 @@ def _clean_data(data: pd.DataFrame, limit: int | None) -> pd.DataFrame:
     cleaned = data.copy()
     if isinstance(cleaned.columns, pd.MultiIndex):
         cleaned.columns = cleaned.columns.get_level_values(0)
+    # Collapsing a MultiIndex can produce duplicate column names if Yahoo's
+    # response shape ever includes more than one ticker's data under one
+    # symbol's download (seen intermittently under concurrent request load).
+    # A duplicate "Open" column makes row["Open"] a Series instead of a
+    # scalar downstream, which fails Decimal conversion with an opaque
+    # error -- deduplicate here so a malformed response is simply dropped
+    # per-column rather than corrupting every row that reaches it.
+    cleaned = cleaned.loc[:, ~cleaned.columns.duplicated()]
+    for column in ("Open", "High", "Low", "Close", "Volume"):
+        if column in cleaned.columns:
+            cleaned[column] = pd.to_numeric(cleaned[column], errors="coerce")
     cleaned = cleaned.sort_index().dropna()
     return cleaned.tail(limit) if limit is not None else cleaned
 
