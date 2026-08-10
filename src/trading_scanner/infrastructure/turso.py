@@ -141,7 +141,8 @@ CREATE TABLE IF NOT EXISTS futures_trades (
     pnl_amount REAL,
     pnl_percent REAL,
     status TEXT NOT NULL DEFAULT 'open',
-    source TEXT NOT NULL DEFAULT 'live'
+    source TEXT NOT NULL DEFAULT 'live',
+    purpose TEXT NOT NULL DEFAULT 'primary'
 )
 """
 
@@ -822,10 +823,12 @@ class TursoOptionsTradeRepository:
 class TursoFuturesTradeRepository:
     """Tracks hypothetical futures trades shadowing BUY/SELL signals.
 
-    One open futures trade per symbol at a time (a real broker connection
-    would never hold both a long and short future on the same symbol
-    simultaneously). Analysis only -- see ``application/futures_shadow.py``.
-    Fully separate from the paper account's capital.
+    Two purposes can be open per symbol at once -- ``purpose="primary"``
+    (the futures position is the trade) and ``purpose="hedge"`` (it hedges
+    a directional option instead, see ``domain.models.FuturesShadowTrade``)
+    -- so every lookup/close is scoped by ``(symbol, purpose)``, not just
+    symbol. Analysis only -- see ``application/futures_shadow.py``. Fully
+    separate from the paper account's capital.
     """
 
     def __init__(self, client: libsql_client.Client) -> None:
@@ -836,14 +839,17 @@ class TursoFuturesTradeRepository:
         await _add_column_if_missing(
             self._client, "futures_trades", "source", "TEXT NOT NULL DEFAULT 'live'"
         )
+        await _add_column_if_missing(
+            self._client, "futures_trades", "purpose", "TEXT NOT NULL DEFAULT 'primary'"
+        )
 
     async def open_trade(self, trade: FuturesShadowTrade) -> None:
         await self._client.execute(
             """
             INSERT INTO futures_trades
                 (symbol, side, futures_tradingsymbol, expiry, lot_size,
-                 entry_timestamp, entry_price, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'open')
+                 entry_timestamp, entry_price, purpose, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open')
             """,
             [
                 trade.symbol,
@@ -853,18 +859,21 @@ class TursoFuturesTradeRepository:
                 trade.lot_size,
                 trade.entry_timestamp.isoformat(),
                 float(trade.entry_price),
+                trade.purpose,
             ],
         )
 
-    async def get_open_trade(self, symbol: str) -> FuturesShadowTrade | None:
+    async def get_open_trade(
+        self, symbol: str, purpose: str = "primary"
+    ) -> FuturesShadowTrade | None:
         result = await self._client.execute(
             """
             SELECT symbol, side, futures_tradingsymbol, expiry, lot_size,
-                   entry_timestamp, entry_price
-            FROM futures_trades WHERE symbol = ? AND status = 'open'
+                   entry_timestamp, entry_price, purpose
+            FROM futures_trades WHERE symbol = ? AND purpose = ? AND status = 'open'
             ORDER BY entry_timestamp DESC LIMIT 1
             """,
-            [symbol],
+            [symbol, purpose],
         )
         if not result.rows:
             return None
@@ -877,6 +886,7 @@ class TursoFuturesTradeRepository:
             lot_size=int(row[4]),
             entry_timestamp=datetime.fromisoformat(row[5]),
             entry_price=Decimal(str(row[6])),
+            purpose=row[7],
         )
 
     async def close_trade(
@@ -886,6 +896,7 @@ class TursoFuturesTradeRepository:
         exit_price: Decimal,
         pnl_amount: Decimal,
         pnl_percent: Decimal,
+        purpose: str = "primary",
     ) -> None:
         await self._client.execute(
             """
@@ -894,7 +905,7 @@ class TursoFuturesTradeRepository:
                 status = 'closed'
             WHERE id = (
                 SELECT id FROM futures_trades
-                WHERE symbol = ? AND status = 'open'
+                WHERE symbol = ? AND purpose = ? AND status = 'open'
                 ORDER BY entry_timestamp DESC LIMIT 1
             )
             """,
@@ -904,6 +915,7 @@ class TursoFuturesTradeRepository:
                 float(pnl_amount),
                 float(pnl_percent),
                 symbol,
+                purpose,
             ],
         )
 
@@ -916,8 +928,8 @@ class TursoFuturesTradeRepository:
             INSERT INTO futures_trades
                 (symbol, side, futures_tradingsymbol, expiry, lot_size,
                  entry_timestamp, entry_price, exit_timestamp, exit_price,
-                 pnl_amount, pnl_percent, status, source)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', 'backtest')
+                 pnl_amount, pnl_percent, purpose, status, source)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'closed', 'backtest')
             """,
             [
                 trade.symbol,
@@ -931,16 +943,17 @@ class TursoFuturesTradeRepository:
                 float(trade.exit_price) if trade.exit_price is not None else None,
                 float(trade.pnl_amount) if trade.pnl_amount is not None else None,
                 float(trade.pnl_percent) if trade.pnl_percent is not None else None,
+                trade.purpose,
             ],
         )
 
     async def get_trades(
-        self, symbol: str | None = None, source: str | None = None
+        self, symbol: str | None = None, source: str | None = None, purpose: str | None = None
     ) -> Sequence[FuturesShadowTrade]:
         query = """
             SELECT symbol, side, futures_tradingsymbol, expiry, lot_size,
                    entry_timestamp, entry_price, exit_timestamp, exit_price,
-                   pnl_amount, pnl_percent, status, source
+                   pnl_amount, pnl_percent, status, source, purpose
             FROM futures_trades
         """
         clauses: list[str] = []
@@ -951,6 +964,9 @@ class TursoFuturesTradeRepository:
         if source is not None:
             clauses.append("source = ?")
             parameters.append(source)
+        if purpose is not None:
+            clauses.append("purpose = ?")
+            parameters.append(purpose)
         if clauses:
             query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY entry_timestamp DESC"
@@ -970,6 +986,7 @@ class TursoFuturesTradeRepository:
                 pnl_percent=Decimal(str(row[10])) if row[10] is not None else None,
                 status=row[11],
                 source=row[12],
+                purpose=row[13],
             )
             for row in result.rows
         ]

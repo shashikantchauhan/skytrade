@@ -31,6 +31,7 @@ from trading_scanner.application import paper_trading
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
 from trading_scanner.infrastructure.kite import (
+    KiteDerivativesChain,
     build_login_url,
     exchange_request_token,
 )
@@ -399,9 +400,30 @@ async def trades(
         await client.close()
 
 
+def _moneyness(option_type: str, strike: Decimal, underlying_price: Decimal) -> str:
+    """ATM/ITM/OTM label for display -- the strike chosen is always the
+    *nearest* one to the underlying's price at entry (see
+    ``KiteDerivativesChain.nearest_atm_option``), so it's close to ATM by
+    construction, but listed strikes are spaced in fixed increments (e.g.
+    every 50 or 100 rupees), so the nearest one can still land a step into
+    ITM or OTM territory -- this makes that visible instead of implying
+    every trade is exactly at-the-money."""
+    if strike == underlying_price:
+        return "ATM"
+    if option_type == "CE":
+        return "ITM" if strike < underlying_price else "OTM"
+    return "ITM" if strike > underlying_price else "OTM"
+
+
 def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> dict:
     """Shared by the live shadow-tracking endpoint and the current-month
-    backtest endpoint -- same shape, different ``source`` filter upstream."""
+    backtest endpoint -- same shape, different ``source`` filter upstream.
+
+    Two independent structures, tracked and reported side by side (see
+    ``application/signal_pipeline.py``'s ``_open_derivatives_shadow``):
+    Structure A (option primary, ``directional_options`` + ``hedge_futures``)
+    and Structure B (futures primary, ``primary_futures`` + ``hedge_options``).
+    """
 
     def _options_summary(purpose: str) -> dict:
         closed = [t for t in options_trades if t.purpose == purpose and t.status == "closed"]
@@ -412,23 +434,20 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
             "total_pnl": _decimal(sum((t.pnl_amount or Decimal("0") for t in closed), Decimal("0"))),
         }
 
-    closed_futures = [t for t in futures_trades if t.status == "closed"]
-    futures_wins = sum(1 for t in closed_futures if t.pnl_percent is not None and t.pnl_percent > 0)
+    def _futures_summary(purpose: str) -> dict:
+        closed = [t for t in futures_trades if t.purpose == purpose and t.status == "closed"]
+        wins = sum(1 for t in closed if t.pnl_percent is not None and t.pnl_percent > 0)
+        return {
+            "closed_count": len(closed),
+            "win_rate": _decimal(Decimal(100 * wins) / len(closed)) if closed else None,
+            "total_pnl": _decimal(sum((t.pnl_amount or Decimal("0") for t in closed), Decimal("0"))),
+        }
 
     return {
         "directional_options": _options_summary("directional"),
+        "hedge_futures": _futures_summary("hedge"),
+        "primary_futures": _futures_summary("primary"),
         "hedge_options": _options_summary("hedge"),
-        "futures": {
-            "closed_count": len(closed_futures),
-            "win_rate": (
-                _decimal(Decimal(100 * futures_wins) / len(closed_futures))
-                if closed_futures
-                else None
-            ),
-            "total_pnl": _decimal(
-                sum((t.pnl_amount or Decimal("0") for t in closed_futures), Decimal("0"))
-            ),
-        },
         "recent_options": [
             {
                 "symbol": t.symbol,
@@ -436,10 +455,15 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
                 "purpose": t.purpose,
                 "tradingsymbol": t.option_tradingsymbol,
                 "entry_timestamp": t.entry_timestamp.isoformat(),
+                "underlying_price_at_entry": _decimal(t.underlying_price_at_entry),
+                "moneyness": _moneyness(t.option_type, t.strike, t.underlying_price_at_entry),
+                "strike": _decimal(t.strike),
                 "entry_premium": _decimal(t.entry_premium),
                 "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
                 "exit_premium": _decimal(t.exit_premium),
+                "lot_size": t.lot_size,
                 "pnl_percent": _decimal(t.pnl_percent),
+                "pnl_amount": _decimal(t.pnl_amount),
                 "status": t.status,
             }
             for t in sorted(options_trades, key=lambda t: t.entry_timestamp, reverse=True)[:30]
@@ -448,12 +472,15 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
             {
                 "symbol": t.symbol,
                 "side": t.side,
+                "purpose": t.purpose,
                 "tradingsymbol": t.futures_tradingsymbol,
                 "entry_timestamp": t.entry_timestamp.isoformat(),
                 "entry_price": _decimal(t.entry_price),
                 "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
                 "exit_price": _decimal(t.exit_price),
+                "lot_size": t.lot_size,
                 "pnl_percent": _decimal(t.pnl_percent),
+                "pnl_amount": _decimal(t.pnl_amount),
                 "status": t.status,
             }
             for t in sorted(futures_trades, key=lambda t: t.entry_timestamp, reverse=True)[:30]
@@ -496,6 +523,58 @@ async def derivatives_backtest(
         await client.close()
 
 
+@app.get("/api/margin-benefit")
+async def margin_benefit(
+    symbol: str, _: None = Depends(_require_session)
+) -> JSONResponse:
+    """Live margin required for the symbol's open Structure B position
+    (primary future + hedge option) vs. holding the future alone, using
+    Kite's own basket-margin API -- not a guessed percentage (see
+    ``KiteDerivativesChain.margin_benefit``'s docstring for why the naive
+    version of this got the wrong answer at first). Requires an active
+    Kite session and an open primary-future position for the symbol."""
+    config = load_config()
+    if not config.kite_api_key:
+        raise HTTPException(status_code=400, detail="Kite is not configured.")
+    client = create_turso_client(config.turso_database_url, config.turso_auth_token)
+    try:
+        kite_session_repository = TursoKiteSessionRepository(client)
+        await kite_session_repository.ensure_schema()
+        token_row = await kite_session_repository.get_token()
+        if token_row is None:
+            raise HTTPException(status_code=400, detail="No active Kite session.")
+        access_token, _obtained_at = token_row
+
+        futures_repository = TursoFuturesTradeRepository(client)
+        options_repository = TursoOptionsTradeRepository(client)
+        await futures_repository.ensure_schema()
+        await options_repository.ensure_schema()
+        primary_future = await futures_repository.get_open_trade(symbol, purpose="primary")
+        if primary_future is None:
+            raise HTTPException(
+                status_code=404, detail=f"No open primary futures position for {symbol}."
+            )
+        hedge_option_type = "PE" if primary_future.side == "long" else "CE"
+        hedge_option = await options_repository.get_open_trade(symbol, hedge_option_type, "hedge")
+
+        kite = KiteConnect(api_key=config.kite_api_key)
+        kite.set_access_token(access_token)
+        derivatives_chain = KiteDerivativesChain(kite)
+        legs = [(primary_future.futures_tradingsymbol, "BUY", primary_future.lot_size)]
+        if hedge_option is not None:
+            legs.append((hedge_option.option_tradingsymbol, "BUY", hedge_option.lot_size))
+        result = await asyncio.to_thread(derivatives_chain.margin_benefit, legs)
+        if result is None:
+            raise HTTPException(status_code=502, detail="Kite margin lookup failed.")
+        return JSONResponse(
+            {
+                "symbol": symbol,
+                "has_hedge": hedge_option is not None,
+                **result,
+            }
+        )
+    finally:
+        await client.close()
 
 
 class ConfigUpdate(BaseModel):
@@ -771,14 +850,19 @@ _PAGE = """<!doctype html>
 <section>
   <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
   <div class="cards" id="derivatives-cards"></div>
+  <div class="panel row" style="margin-top: 0.8rem; align-items: flex-end;">
+    <label class="field">Symbol (e.g. RELIANCE.NS)<input id="margin-symbol" placeholder="RELIANCE.NS" /></label>
+    <button class="primary" onclick="checkMarginBenefit()">Check live margin benefit</button>
+    <span class="msg" id="margin-msg"></span>
+  </div>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
-      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 </section>
@@ -793,11 +877,11 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
-      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 </section>
@@ -960,31 +1044,32 @@ async function loadKiteStatus() {
 function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
   const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
   document.getElementById(cardsId).innerHTML = `
-    <div class="card"><div class="label">Directional options (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
-    <div class="card"><div class="label">Hedge options (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
-    <div class="card"><div class="label">Futures (${d.futures.closed_count} closed, ${fmt(d.futures.win_rate)}% win)</div><div class="value">${pnlPill(d.futures.total_pnl)}</div></div>
+    <div class="card"><div class="label">Structure A: directional options (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
+    <div class="card"><div class="label">Structure A: hedge futures (${d.hedge_futures.closed_count} closed, ${fmt(d.hedge_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_futures.total_pnl)}</div></div>
+    <div class="card"><div class="label">Structure B: primary futures (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
+    <div class="card"><div class="label">Structure B: hedge options (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
   `;
   document.querySelector(`#${optionsTableId} tbody`).innerHTML = d.recent_options.map(o => {
     const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
-    const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}%</span>`;
+    const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}% (₹${fmt(o.pnl_amount)})</span>`;
     const known = o.exit_premium !== null && o.exit_premium !== undefined;
     // Buying an option profits when its premium rises, whether it's a
     // CALL or a PUT -- see options_shadow.py's own pnl_amount comment.
     const diff = known ? `₹${fmt(o.exit_premium - o.entry_premium)}` : "-";
     const exitCell = known ? `₹${fmt(o.exit_premium)}` : "-";
-    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=8>No trades yet</td></tr>";
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${o.moneyness} (strike ₹${fmt(o.strike)}, spot ₹${fmt(o.underlying_price_at_entry)})</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=9>No trades yet</td></tr>";
   document.querySelector(`#${futuresTableId} tbody`).innerHTML = d.recent_futures.map(f => {
     const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
-    const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}%</span>`;
+    const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}% (₹${fmt(f.pnl_amount)})</span>`;
     const known = f.exit_price !== null && f.exit_price !== undefined;
     // long profits when price rises (exit - entry), short profits when it
     // falls (entry - exit) -- same convention as futures_shadow.py.
     const rawDiff = known ? (f.side === "long" ? f.exit_price - f.entry_price : f.entry_price - f.exit_price) : null;
     const diff = known ? `₹${fmt(rawDiff)}` : "-";
     const exitCell = known ? `₹${fmt(f.exit_price)}` : "-";
-    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=7>No trades yet</td></tr>";
+    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${f.purpose}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=8>No trades yet</td></tr>";
 }
 
 async function loadDerivativesShadow() {
@@ -1005,6 +1090,24 @@ async function runBacktest() {
     await loadDerivativesBacktest();
     el.textContent = "Done -- refresh in a few seconds if you triggered it just now and don't see results yet.";
   }, 5000);
+}
+
+async function checkMarginBenefit() {
+  const symbol = document.getElementById("margin-symbol").value.trim();
+  const el = document.getElementById("margin-msg");
+  if (!symbol) { el.textContent = "Enter a symbol first."; return; }
+  el.textContent = "Checking live margin via Kite...";
+  try {
+    const r = await api(`/api/margin-benefit?symbol=${encodeURIComponent(symbol)}`);
+    if (!r.has_hedge) {
+      el.textContent = `${symbol}: primary future open, no hedge option open yet -- margin ₹${fmt(r.primary_only_margin)}.`;
+      return;
+    }
+    el.innerHTML = `${symbol}: future alone ₹${fmt(r.primary_only_margin)} &rarr; with hedge ₹${fmt(r.combined_margin)} ` +
+      `(<span class="pill ${r.margin_benefit >= 0 ? "green" : "red"}">benefit ₹${fmt(r.margin_benefit)}</span>)`;
+  } catch (e) {
+    el.textContent = `Couldn't check: ${e.message}`;
+  }
 }
 
 async function refreshAll() {

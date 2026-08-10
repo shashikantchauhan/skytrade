@@ -28,8 +28,16 @@ async def try_open_futures_position(
     entry_price: Decimal,
     derivatives_chain: KiteDerivativesChain,
     futures_trade_repository: TursoFuturesTradeRepository,
+    purpose: str = "primary",
 ) -> str | None:
-    """Record a hypothetical futures entry at the nearest expiry."""
+    """Record a hypothetical futures entry at the nearest expiry.
+
+    ``purpose="primary"`` (default): this future is the trade itself.
+    ``purpose="hedge"``: this future hedges a directional option instead
+    (see ``options_shadow.py``) -- ``side`` is then the opposite-delta
+    side (short hedges a bought CALL, long hedges a bought PUT), decided
+    by the caller (``signal_pipeline.py``), not by this function.
+    """
     contract = derivatives_chain.nearest_future(symbol)
     if contract is None:
         return None
@@ -41,9 +49,10 @@ async def try_open_futures_position(
         lot_size=int(contract["lot_size"]),
         entry_timestamp=entry_timestamp,
         entry_price=entry_price,
+        purpose=purpose,
     )
     await futures_trade_repository.open_trade(trade)
-    return f"futures-shadow: opened {side} {contract['tradingsymbol']} @ {entry_price}"
+    return f"futures-shadow({purpose}): opened {side} {contract['tradingsymbol']} @ {entry_price}"
 
 
 async def close_futures_position(
@@ -51,9 +60,10 @@ async def close_futures_position(
     exit_timestamp: datetime,
     exit_price: Decimal,
     futures_trade_repository: TursoFuturesTradeRepository,
+    purpose: str = "primary",
 ) -> str | None:
     """Close the matching open shadow futures position, if one exists."""
-    open_trade = await futures_trade_repository.get_open_trade(symbol)
+    open_trade = await futures_trade_repository.get_open_trade(symbol, purpose)
     if open_trade is None:
         return None
     if open_trade.side == "long":
@@ -62,9 +72,9 @@ async def close_futures_position(
         pnl_amount = (open_trade.entry_price - exit_price) * open_trade.lot_size
     pnl_percent = pnl_amount / (open_trade.entry_price * open_trade.lot_size) * 100
     await futures_trade_repository.close_trade(
-        symbol, exit_timestamp, exit_price, pnl_amount, pnl_percent
+        symbol, exit_timestamp, exit_price, pnl_amount, pnl_percent, purpose
     )
     return (
-        f"futures-shadow: closed {open_trade.side} {open_trade.futures_tradingsymbol} "
+        f"futures-shadow({purpose}): closed {open_trade.side} {open_trade.futures_tradingsymbol} "
         f"@ {exit_price} pnl={pnl_percent:.2f}%"
     )

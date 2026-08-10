@@ -39,6 +39,12 @@ from trading_scanner.infrastructure.turso import (
 
 logger = logging.getLogger(__name__)
 
+# Mirrors signal_pipeline.py's _HEDGE_OTM_PCT -- the hedge option leg
+# targets a strike this far OTM instead of ATM, so it doesn't cancel out
+# most of the primary position's profit (see that constant's docstring for
+# the full reasoning, confirmed against Kite's own margin-benefit numbers).
+_HEDGE_OTM_PCT = Decimal("0.02")
+
 
 async def run_current_month_backtest(
     trade_repository: TursoTradeRepository,
@@ -76,32 +82,48 @@ async def _backtest_one_trade(
     notes: list[str] = []
     side = trade.side.value  # "BUY" | "SELL"
 
+    # Structure A: option primary, future as its hedge (opposite delta).
     directional_type = "CE" if side == "BUY" else "PE"
-    note = await _backtest_option(
+    directional_note = await _backtest_option(
         trade.symbol, directional_type, "directional",
         trade.entry_timestamp, trade.entry_price, trade.exit_timestamp, trade.exit_price,
         derivatives_chain, options_trade_repository,
     )
-    if note:
-        notes.append(note)
+    if directional_note:
+        notes.append(directional_note)
+        hedge_futures_side = "short" if side == "BUY" else "long"
+        note = await _backtest_future(
+            trade.symbol, hedge_futures_side, "hedge",
+            trade.entry_timestamp, trade.exit_timestamp,
+            derivatives_chain, futures_trade_repository,
+        )
+        if note:
+            notes.append(note)
 
+    # Structure B: future primary, option as its hedge (opposite delta).
     futures_side = "long" if side == "BUY" else "short"
     future_note = await _backtest_future(
-        trade.symbol, futures_side, trade.entry_timestamp, trade.exit_timestamp,
+        trade.symbol, futures_side, "primary",
+        trade.entry_timestamp, trade.exit_timestamp,
         derivatives_chain, futures_trade_repository,
     )
-    if future_note is None:
-        return notes
-    notes.append(future_note)
-
-    hedge_type = "PE" if futures_side == "long" else "CE"
-    hedge_note = await _backtest_option(
-        trade.symbol, hedge_type, "hedge",
-        trade.entry_timestamp, trade.entry_price, trade.exit_timestamp, trade.exit_price,
-        derivatives_chain, options_trade_repository,
-    )
-    if hedge_note:
-        notes.append(hedge_note)
+    if future_note is not None:
+        notes.append(future_note)
+        hedge_type = "PE" if futures_side == "long" else "CE"
+        # PE is OTM below spot, CE is OTM above spot -- see _HEDGE_OTM_PCT.
+        hedge_strike_target = (
+            trade.entry_price * (1 - _HEDGE_OTM_PCT)
+            if futures_side == "long"
+            else trade.entry_price * (1 + _HEDGE_OTM_PCT)
+        )
+        hedge_note = await _backtest_option(
+            trade.symbol, hedge_type, "hedge",
+            trade.entry_timestamp, trade.entry_price, trade.exit_timestamp, trade.exit_price,
+            derivatives_chain, options_trade_repository,
+            strike_target_price=hedge_strike_target,
+        )
+        if hedge_note:
+            notes.append(hedge_note)
     return notes
 
 
@@ -115,11 +137,11 @@ async def _backtest_option(
     exit_underlying: Decimal,
     derivatives_chain: KiteDerivativesChain,
     options_trade_repository: TursoOptionsTradeRepository,
+    strike_target_price: Decimal | None = None,
 ) -> str | None:
     try:
-        contract = derivatives_chain.nearest_atm_option(
-            symbol, option_type, float(entry_underlying)
-        )
+        target = strike_target_price if strike_target_price is not None else entry_underlying
+        contract = derivatives_chain.nearest_atm_option(symbol, option_type, float(target))
         if contract is None:
             return None
         entry_premium = derivatives_chain.historical_premium(
@@ -167,6 +189,7 @@ async def _backtest_option(
 async def _backtest_future(
     symbol: str,
     side: str,
+    purpose: str,
     entry_timestamp: datetime,
     exit_timestamp: datetime,
     derivatives_chain: KiteDerivativesChain,
@@ -210,10 +233,12 @@ async def _backtest_future(
             pnl_percent=pnl_percent,
             status="closed",
             source="backtest",
+            purpose=purpose,
         )
         await futures_trade_repository.insert_backtest_trade(trade)
         return (
-            f"backtest futures: {side} {contract['tradingsymbol']} pnl={pnl_percent:.2f}%"
+            f"backtest futures({purpose}): {side} {contract['tradingsymbol']} "
+            f"pnl={pnl_percent:.2f}%"
         )
     except Exception:
         logger.exception("Backtest futures leg failed for %s (%s)", symbol, side)

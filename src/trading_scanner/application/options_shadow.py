@@ -34,9 +34,28 @@ async def try_open_option_position(
     underlying_price: Decimal,
     derivatives_chain: KiteDerivativesChain,
     options_trade_repository: TursoOptionsTradeRepository,
+    strike_target_price: Decimal | None = None,
 ) -> str | None:
-    """Record a hypothetical option entry at the nearest ATM strike/expiry."""
-    contract = derivatives_chain.nearest_atm_option(symbol, option_type, float(underlying_price))
+    """Record a hypothetical option entry at the nearest strike/expiry to
+    ``strike_target_price`` (defaults to ``underlying_price``, i.e. ATM).
+
+    The hedge leg intentionally overrides ``strike_target_price`` to a
+    level offset from the real spot (see ``application/
+    signal_pipeline.py``'s ``_HEDGE_OTM_PCT``): an ATM hedge has delta near
+    -1/+1, so it moves almost 1-for-1 against the primary position and
+    cancels out most of its profit when the trade is right, not just its
+    loss when it's wrong. A further-OTM strike has much lower delta, so it
+    still caps the catastrophic case and keeps a real (if smaller) margin
+    benefit, without eating the primary position's upside. Confirmed
+    against Kite's own margin-benefit numbers before choosing this, not
+    guessed -- see the derivatives-shadow dashboard section's commentary.
+
+    ``underlying_price_at_entry`` always records the *real* spot price
+    regardless of ``strike_target_price``, so the dashboard's price display
+    is never distorted by this targeting.
+    """
+    target = strike_target_price if strike_target_price is not None else underlying_price
+    contract = derivatives_chain.nearest_atm_option(symbol, option_type, float(target))
     if contract is None:
         return None
     premium = derivatives_chain.ltp(f"NFO:{contract['tradingsymbol']}")

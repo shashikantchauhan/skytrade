@@ -121,13 +121,23 @@ class OptionsShadowTrade:
 class FuturesShadowTrade:
     """A hypothetical futures trade shadowing a BUY/SELL signal.
 
-    ``side="long"`` for a BUY signal, ``side="short"`` for a SELL signal --
-    the real short mechanism a real broker connection would use, unlike
-    equity (NSE cash market has no short selling). Always paired with an
-    ``OptionsShadowTrade`` hedge (``purpose="hedge"``) opened at the same
-    time: a PUT for a long future, a CALL for a short future. Analysis
-    only, entirely separate from the paper account's capital, never a real
-    order.
+    Two distinct purposes, two independent strategies tracked side by side
+    for comparison (never a real order, both analysis-only):
+
+    - ``purpose="primary"``: the futures position *is* the trade --
+      ``side="long"`` for a BUY signal, ``side="short"`` for a SELL signal
+      (the real short mechanism a real broker connection would use, unlike
+      equity, where the NSE cash market has no short selling). Paired with
+      an ``OptionsShadowTrade`` hedge (``purpose="hedge"``) opened at the
+      same time: a PUT for a long future, a CALL for a short future.
+    - ``purpose="hedge"``: the reverse structure -- the directional option
+      (``OptionsShadowTrade``, ``purpose="directional"``) is the trade, and
+      *this* future is what hedges it, opposite-delta to the option: a
+      short future hedging a bought CALL, a long future hedging a bought
+      PUT.
+
+    Both purposes can be open for the same symbol at once, hence every
+    lookup/close is scoped by ``(symbol, purpose)``, not just symbol.
     """
 
     symbol: str
@@ -137,6 +147,7 @@ class FuturesShadowTrade:
     lot_size: int
     entry_timestamp: datetime
     entry_price: Decimal
+    purpose: str = "primary"  # "primary" | "hedge"
     exit_timestamp: datetime | None = None
     exit_price: Decimal | None = None
     pnl_amount: Decimal | None = None

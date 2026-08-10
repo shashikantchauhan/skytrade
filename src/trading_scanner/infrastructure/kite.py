@@ -271,6 +271,63 @@ class KiteDerivativesChain:
         row = quote.get(exchange_tradingsymbol)
         return row["last_price"] if row else None
 
+    def margin_benefit(
+        self, hedged_tradingsymbols: list[tuple[str, str, int]]
+    ) -> dict | None:
+        """Live margin required for a combo of legs vs. holding the first
+        leg alone, using Kite's own basket-margin API (the same SPAN/hedge
+        netting the actual Kite app's basket screen shows) -- not a guessed
+        percentage.
+
+        ``hedged_tradingsymbols`` is ``[(tradingsymbol, transaction_type,
+        quantity), ...]``, first leg is the "primary" position the rest are
+        hedging.
+
+        The API returns two totals per basket: ``initial`` (gross, before
+        any hedge/combo netting) and ``final`` (what's actually blocked
+        after netting) -- the real benefit only shows up in ``final``;
+        ``initial`` looks identical whether or not a hedge helps, which is
+        the mistake this function exists to not repeat (see this project's
+        own history: a naive first pass compared ``initial`` totals and
+        wrongly concluded hedging never reduces margin here).
+
+        ``consider_positions=True`` (Kite's default) so the calculation
+        reflects real portfolio netting against the account's existing
+        positions, not just this basket in isolation. None on any failure.
+        """
+        if not hedged_tradingsymbols:
+            return None
+
+        def _leg(tradingsymbol: str, transaction_type: str, quantity: int) -> dict:
+            return {
+                "exchange": "NFO",
+                "tradingsymbol": tradingsymbol,
+                "transaction_type": transaction_type,
+                "variety": "regular",
+                "product": "NRML",
+                "order_type": "MARKET",
+                "quantity": quantity,
+            }
+
+        try:
+            primary_symbol, primary_txn, primary_qty = hedged_tradingsymbols[0]
+            primary_only = self._kite.basket_order_margins(
+                [_leg(primary_symbol, primary_txn, primary_qty)], consider_positions=True
+            )
+            combined = self._kite.basket_order_margins(
+                [_leg(sym, txn, qty) for sym, txn, qty in hedged_tradingsymbols],
+                consider_positions=True,
+            )
+        except Exception:
+            return None
+        primary_only_margin = primary_only["final"]["total"]
+        combined_margin = combined["final"]["total"]
+        return {
+            "primary_only_margin": primary_only_margin,
+            "combined_margin": combined_margin,
+            "margin_benefit": primary_only_margin - combined_margin,
+        }
+
     def historical_premium(self, instrument_token: int, when: datetime) -> float | None:
         """Historical close nearest to ``when`` for one contract -- backs
         the current-month backtest (``application/derivatives_backtest.py``)
