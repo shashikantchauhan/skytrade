@@ -582,6 +582,17 @@ async function logout() {
 
 function fmt(n) { return n === null || n === undefined ? "-" : Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
 
+// Every timestamp from the API is UTC ISO -- displayed in IST throughout
+// this dashboard since that's the timezone the strategy/market actually
+// operates in, to avoid the exact confusion UTC timestamps caused before.
+function fmtTime(iso) {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+}
+
 async function loadStatus() {
   const s = await api("/api/status");
   const pnlClass = s.pnl_since_start >= 0 ? "green" : "red";
@@ -611,7 +622,7 @@ async function loadPositions() {
       ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
       : `<td>-</td>`;
     const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    return `<tr><td>${p.symbol}</td><td>${p.entry_timestamp.slice(0,16)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td>${pnlCell}</tr>`;
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td>${pnlCell}</tr>`;
   }).join("") || "<tr><td colspan=6>No open positions</td></tr>";
 }
 
@@ -639,7 +650,7 @@ async function loadTrades() {
   document.getElementById("win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
   document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
     const cls = r.pnl_percent >= 0 ? "green" : "red";
-    return `<tr><td>${r.symbol}</td><td>${r.entry_timestamp.slice(0,16)}</td><td>${r.exit_timestamp ? r.exit_timestamp.slice(0,16) : "-"}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
+    return `<tr><td>${r.symbol}</td><td>${fmtTime(r.entry_timestamp)}</td><td>${fmtTime(r.exit_timestamp)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
   }).join("") || "<tr><td colspan=4>No closed trades yet</td></tr>";
 }
 
