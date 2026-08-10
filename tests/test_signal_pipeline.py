@@ -124,9 +124,13 @@ class FakePaperAccountRepository:
 class FakeNotifier:
     def __init__(self) -> None:
         self.sent = []
+        self.texts = []
 
     async def send_signal(self, signal) -> None:
         self.sent.append(signal)
+
+    async def send_text(self, message: str) -> None:
+        self.texts.append(message)
 
 
 def _config() -> AppConfig:

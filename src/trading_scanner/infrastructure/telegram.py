@@ -19,6 +19,12 @@ class TelegramNotifier:
             f"{action} {signal.symbol} at {signal.price}\n"
             f"Strategy: {signal.strategy}\nReason: {signal.rationale}"
         )
+        await self.send_text(message)
+
+    async def send_text(self, message: str) -> None:
+        """Free-form notification, e.g. the Kite-session-expired alert (see
+        ``application/signal_pipeline.py``'s ``_select_provider``) -- not
+        every notification is a trade signal."""
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 self._url, json={"chat_id": self._chat_id, "text": message}
@@ -29,3 +35,6 @@ class TelegramNotifier:
 class LoggingNotifier:
     async def send_signal(self, signal: Signal) -> None:
         logging.getLogger(__name__).info("Signal: %s", signal)
+
+    async def send_text(self, message: str) -> None:
+        logging.getLogger(__name__).info("Notification: %s", message)

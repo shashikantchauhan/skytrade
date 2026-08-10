@@ -2,7 +2,7 @@
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pandas as pd
@@ -131,7 +131,9 @@ async def run_signal_pipeline(
     ``application/futures_shadow.py``).
     """
     logger = logging.getLogger(__name__)
-    provider, provider_name, kite = await _select_provider(config, kite_session_repository)
+    provider, provider_name, kite = await _select_provider(
+        config, kite_session_repository, notifier
+    )
     logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
     derivatives_chain = KiteDerivativesChain(kite) if kite is not None else None
@@ -183,7 +185,9 @@ async def run_signal_pipeline(
 
 
 async def _select_provider(
-    config: AppConfig, kite_session_repository: TursoKiteSessionRepository | None
+    config: AppConfig,
+    kite_session_repository: TursoKiteSessionRepository | None,
+    notifier: Notifier | None = None,
 ) -> tuple[MarketDataProvider, str, KiteConnect | None]:
     """Prefer Kite when a valid session exists; fall back to Yahoo otherwise.
 
@@ -196,6 +200,13 @@ async def _select_provider(
     client is returned too (None when Yahoo is used) so the caller can also
     drive the options-shadow feature, which needs Kite specifically --
     Yahoo has no Indian options data.
+
+    Falling back also sends one "please log in again" notification per
+    calendar day (deduped via ``kite_session_repository``'s
+    ``expiry_notified_date``, see ``TursoKiteSessionRepository``) -- Kite
+    tokens expire daily with no documented exact time, so this piggybacks
+    on the pipeline's own hourly cron rather than needing separate
+    infrastructure to detect expiry.
     """
     logger = logging.getLogger(__name__)
     if config.kite_api_key and kite_session_repository is not None:
@@ -214,7 +225,27 @@ async def _select_provider(
                     obtained_at,
                     exc_info=True,
                 )
+        await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
     return YahooProvider(), "yahoo", None
+
+
+async def _notify_kite_expired_once_per_day(
+    kite_session_repository: TursoKiteSessionRepository, notifier: Notifier | None
+) -> None:
+    if notifier is None:
+        return
+    today = date.today().isoformat()
+    try:
+        last_notified = await kite_session_repository.get_expiry_notified_date()
+        if last_notified == today:
+            return
+        await notifier.send_text(
+            "SkyTrade: Kite session expired/missing -- today's runs are using Yahoo. "
+            "Log in again at https://skytrade.oneatem.com/kite/login"
+        )
+        await kite_session_repository.set_expiry_notified_date(today)
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to send Kite-expiry notification")
 
 
 async def _evaluate_symbol(
