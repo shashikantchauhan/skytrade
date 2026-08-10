@@ -413,13 +413,23 @@ async def _close_paper_position(
 async def _win_rate_summary(
     symbol: str, config: AppConfig, trade_repository: TradeRepository
 ) -> str | None:
-    """Summarize this symbol's historical closed-trade win rate for a notification.
+    """Summarize this symbol's historical closed BUY-trade win rate for a notification.
 
-    Returns None if there's no closed-trade history yet (a brand-new symbol,
-    or one whose only trades are still open) -- nothing meaningful to show.
+    BUY-only, matching ``paper_trading._buy_only_win_rate`` exactly -- this is
+    the same number the paper account's eligibility gate actually uses, so a
+    signal tagged "not eligible yet" is never paired with a rationale showing
+    a healthier combined BUY+SELL number that would make the rejection look
+    wrong. SELL trades are excluded even for a SELL-signal notification since
+    they can never affect the (BUY-only) paper account either way.
+
+    Returns None if there's no closed BUY-trade history yet (a brand-new
+    symbol, or one whose only trades are still open) -- nothing meaningful to
+    show.
     """
     trades = await trade_repository.get_trades(symbol, config.candle_interval)
-    closed = [trade for trade in trades if trade.status == "closed"]
+    closed = [
+        trade for trade in trades if trade.side == SignalSide.BUY and trade.status == "closed"
+    ]
     if not closed:
         return None
     wins = sum(1 for trade in closed if trade.pnl_percent is not None and trade.pnl_percent > 0)

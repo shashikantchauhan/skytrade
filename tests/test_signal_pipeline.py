@@ -584,7 +584,12 @@ async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None
 async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None:
     """Prior closed trades for this symbol must be summarized in the
     notification's rationale, so a signal is never sent without context on
-    how this symbol has actually performed historically."""
+    how this symbol has actually performed historically.
+
+    BUY-only, matching the paper account's eligibility gate exactly -- a
+    seeded SELL-side loss must not drag the shown number away from what
+    eligibility actually used, or the rationale would misrepresent why a
+    signal was (or wasn't) paper-traded."""
     monkeypatch.setattr(
         YahooProvider,
         "get_recent_history",
@@ -647,7 +652,9 @@ async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None
     )
 
     assert notifier.sent
-    assert "win_rate=66.7%(2W/1L)" in notifier.sent[0].rationale
+    # BUY-only: the two seeded BUY trades (+10%, +8%) are both wins; the
+    # seeded SELL loss is excluded, matching paper_trading's eligibility gate.
+    assert "win_rate=100.0%(2W/0L)" in notifier.sent[0].rationale
 
 
 @pytest.mark.asyncio
