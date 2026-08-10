@@ -713,8 +713,10 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
     assert len(paper_account_repository.opened) == 1
     position = paper_account_repository.opened[0]
     assert position.symbol == "AARTIIND.NS"
-    assert position.quantity == 750  # POSITION_SIZE(75000) / entry_price(100)
-    assert "paper: opened 750 qty" in notifier.sent[0].rationale
+    # total_equity(500000, no open positions)/TARGET_SLOTS(32) = 15625, floored
+    # to MIN_POSITION_SIZE(25000) -> quantity = 25000/entry_price(100) = 250.
+    assert position.quantity == 250
+    assert "paper: opened 250 qty" in notifier.sent[0].rationale
 
 
 @pytest.mark.asyncio

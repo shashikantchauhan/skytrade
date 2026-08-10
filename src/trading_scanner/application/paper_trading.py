@@ -16,16 +16,25 @@ Two gates decide whether a BUY entry actually becomes a paper position:
    A symbol with no track record yet, or a poor one, is skipped -- still
    notified, just tagged as not paper-traded.
 2. **Capacity**: the account only has ``INITIAL_CAPITAL`` to work with, split
-   into fixed-size slots (``POSITION_SIZE``). If the cash balance can't cover
-   one more slot, the entry is skipped and tagged accordingly rather than
-   silently dropped.
+   into ``TARGET_SLOTS`` dynamically-sized slots. If the cash balance can't
+   cover one more slot, the entry is skipped and tagged accordingly rather
+   than silently dropped.
 
-``POSITION_SIZE`` (₹75,000) is chosen from the target average win of
-₹2,000-3,000/trade: this strategy's BUY-only average winning trade is ~3.34%,
-and 3.34% of ₹75,000 is ~₹2,500 -- squarely in that target range. ₹5,00,000 /
-₹75,000 gives ~6-7 concurrent positions, matching the earlier capacity
-analysis (average concurrent positions ≈ entries/day × average holding
-period, via Little's Law).
+``TARGET_SLOTS`` (32) matches real signal demand: Little's Law
+(concurrent positions needed ~= entries/day x average holding period),
+computed only over symbols that actually clear the eligibility bar above
+(ineligible symbols never reach ``try_open_position`` at all, so they don't
+count toward real capacity demand). ``INITIAL_CAPITAL`` (Rs 8,00,000) is
+sized so 32 slots at the resulting ~Rs 25,000/slot fully covers that demand
+with no capital-driven skips under normal conditions.
+
+Slot size is **dynamic**, not fixed: every entry recomputes
+``total_equity / TARGET_SLOTS``, where total_equity is cash plus all open
+positions' allocated capital. As the account compounds profit week over
+week, each slot grows proportionally -- no manual re-tuning needed. A floor
+(``MIN_POSITION_SIZE``, Rs 25,000) keeps the flat per-trade DP charge
+(~Rs 18, sell-side only) under ~5% of an average winning trade's profit;
+below that floor, flat fees start eating a disproportionate share of returns.
 """
 
 from datetime import datetime
@@ -34,8 +43,9 @@ from decimal import Decimal
 from trading_scanner.domain.models import PaperPosition, SignalSide
 from trading_scanner.domain.ports import PaperAccountRepository, TradeRepository
 
-INITIAL_CAPITAL = Decimal("500000")
-POSITION_SIZE = Decimal("75000")
+INITIAL_CAPITAL = Decimal("800000")
+TARGET_SLOTS = 32
+MIN_POSITION_SIZE = Decimal("25000")
 MIN_WIN_RATE = Decimal("55")
 MIN_CLOSED_TRADES = 5
 
@@ -56,16 +66,26 @@ async def try_open_position(
     entry_price: Decimal,
     paper_account_repository: PaperAccountRepository,
 ) -> PaperPosition | None:
-    """Open a paper position sized at POSITION_SIZE if capital allows.
+    """Open a paper position sized off current total equity if capital allows.
 
-    Returns None (no position opened) if the remaining cash balance can't
-    cover one more slot -- the caller is responsible for notifying that the
-    signal was skipped for lack of capital, not silently dropping it.
+    Slot size is recomputed fresh on every call from total_equity /
+    TARGET_SLOTS (floored at MIN_POSITION_SIZE) so the account scales
+    proportionally as profit compounds in, without a hardcoded slot size
+    going stale. Returns None (no position opened) if the remaining cash
+    balance can't cover one more slot -- the caller is responsible for
+    notifying that the signal was skipped for lack of capital, not silently
+    dropping it.
     """
     cash_balance = await paper_account_repository.get_cash_balance()
-    if cash_balance < POSITION_SIZE:
+    open_positions = await paper_account_repository.get_open_positions()
+    total_equity = cash_balance + sum(
+        (position.capital_allocated for position in open_positions), start=Decimal("0")
+    )
+    position_size = max(total_equity / TARGET_SLOTS, MIN_POSITION_SIZE)
+
+    if cash_balance < position_size:
         return None
-    quantity = int(POSITION_SIZE / entry_price)
+    quantity = int(position_size / entry_price)
     if quantity < 1:
         return None
     position = PaperPosition(

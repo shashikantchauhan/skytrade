@@ -15,8 +15,9 @@ strategy (`strategy/lorentzian.pine`, `strategy/MLExtensions_v2.pine`), run
 hourly against ~220 NSE F&O stocks + sector indices, that:
 1. Generates BUY/SELL signals matching the TradingView chart bar-for-bar.
 2. Tracks every entry/exit as a `Trade` for real win-rate statistics.
-3. Runs a simulated (paper) ₹5,00,000 trading account on top of that,
-   long-only, gated by each symbol's own track record and available capital.
+3. Runs a simulated (paper) ₹8,00,000 trading account on top of that,
+   long-only, gated by each symbol's own track record and available capital,
+   with dynamically-sized position slots that scale as the account compounds.
 4. Notifies everything via Telegram.
 
 The end goal (not yet reached) is: validate the paper account is actually
@@ -67,12 +68,20 @@ live trading with real accounting.
   for implausible >40% single-bar jumps), the fix is the same: wipe
   `candles`/`engine_state`/`trades` for the affected symbol(s) and
   re-download fresh in one call (self-consistent split adjustment).
-- **Paper-trading sizing rationale**: ₹75,000/position was chosen (not an
-  arbitrary round number) because the BUY-only average winning trade is
-  ~3.34%, and 3.34% of ₹75,000 ≈ ₹2,500 — squarely in the user's explicitly
-  requested target of ₹2,000-3,000 average win per trade. ₹5,00,000 /
-  ₹75,000 ≈ 6-7 concurrent slots, derived via Little's Law (concurrent
-  positions ≈ entries/day × average holding period).
+- **Paper-trading sizing rationale (updated after the full 220-symbol
+  backtest)**: real concurrent-position demand, via Little's Law (concurrent
+  positions ≈ entries/day × average holding period) computed only over
+  symbols that actually clear the 55% eligibility bar (ineligible symbols
+  never reach `try_open_position`), works out to **~32 concurrent slots** —
+  not the ~6-7 an earlier, much smaller partial-data estimate suggested.
+  `INITIAL_CAPITAL` is now ₹8,00,000 and `TARGET_SLOTS` is 32, giving a
+  starting slot size of ~₹25,000. **Slot size is dynamic**, not fixed:
+  every entry recomputes `total_equity / TARGET_SLOTS` (floored at
+  `MIN_POSITION_SIZE`, ₹25,000), so slots grow automatically as the account
+  compounds profit — no manual re-tuning needed. The ₹25,000 floor keeps the
+  flat per-trade DP charge (~₹18, sell-side only) under ~5% of an average
+  winning trade's profit; below that, flat fees start eating a
+  disproportionate share of returns.
 
 ### Current status (last touched)
 
@@ -326,7 +335,7 @@ the realized `pnl_percent`.
 
 ### Paper trading account
 
-`application/paper_trading.py` simulates a real-money account (₹5,00,000
+`application/paper_trading.py` simulates a real-money account (₹8,00,000
 starting capital) alongside the strategy's own signals — long-only, since
 NSE cash market doesn't allow short selling for multi-day (delivery) holds
 and this strategy's average holding period is ~3.5 days. Every BUY entry is
@@ -334,15 +343,20 @@ gated on two checks before it becomes a real paper position:
 
 1. **Eligibility**: the symbol needs at least 5 closed BUY-only trades and a
    BUY-only win rate of at least 55% (computed from the same `trades` table
-   the win-rate notification summary uses). A symbol with no track record
-   yet, or a weak one, still notifies — just tagged
-   `paper: not eligible yet`.
-2. **Capacity**: positions are sized at a fixed ₹75,000 (chosen so the
-   BUY-only average winning trade, ~3.34%, nets ~₹2,500 — the target
-   average win). ₹5,00,000 / ₹75,000 gives ~6-7 concurrent slots. Once the
-   account's cash balance can't cover one more slot, the entry is skipped
-   and tagged `paper: SKIPPED (no capital available)` rather than silently
-   dropped.
+   the win-rate notification summary uses — both now filter to BUY-only
+   consistently, so the number shown in a notification always matches the
+   number eligibility actually used). A symbol with no track record yet, or
+   a weak one, still notifies — just tagged `paper: not eligible yet`.
+2. **Capacity**: positions are sized **dynamically** — every entry
+   recomputes `total_equity / TARGET_SLOTS` (32 slots, floored at
+   `MIN_POSITION_SIZE` ₹25,000), where total_equity is cash plus all open
+   positions' allocated capital. Starting slot size is ~₹25,000; slots grow
+   automatically as the account compounds profit, no manual re-tuning
+   needed. `TARGET_SLOTS` (32) matches real signal demand computed via
+   Little's Law over eligible symbols only, after the full 220-symbol
+   backtest completed. Once the account's cash balance can't cover one more
+   slot, the entry is skipped and tagged `paper: SKIPPED (no capital
+   available)` rather than silently dropped.
 
 SELL signals never touch the paper account — they still notify, tagged
 `informational only — not tradeable in NSE cash market`, since they can't be
