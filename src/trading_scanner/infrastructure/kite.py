@@ -29,6 +29,23 @@ _INTERVAL_MAP = {
     "30m": "30minute",
 }
 
+# Kite's Historical Data API caps how many days can be requested in a single
+# call, and the cap depends on the interval -- exceeding it raises
+# InputException("interval exceeds max limit"). This deployment's backfill
+# window (729 days, for a symbol with no accumulated history yet) exceeds
+# 60minute's limit, so requests wider than this are split into chunks and
+# concatenated rather than sent as one call.
+_MAX_DAYS_PER_REQUEST = {
+    "minute": 60,
+    "3minute": 100,
+    "5minute": 100,
+    "10minute": 100,
+    "15minute": 200,
+    "30minute": 200,
+    "60minute": 400,
+    "day": 2000,
+}
+
 # Manually curated -- Kite's NSE:INDICES segment uses different trading
 # symbols than Yahoo Finance's index tickers (e.g. "NIFTY BANK" vs
 # "^NSEBANK"), and there's no reliable automatic way to derive one from the
@@ -120,15 +137,30 @@ class KiteProvider:
         if kite_interval is None:
             raise ValueError(f"Unsupported interval for Kite: {interval!r}")
         token = self._instrument_map.resolve(symbol)
-        to_date = datetime.now()
-        from_date = to_date - timedelta(days=days)
+        max_days = _MAX_DAYS_PER_REQUEST.get(kite_interval, days)
+
+        rows: list[dict] = []
+        window_end = datetime.now()
+        remaining_days = days
         try:
-            rows = self._kite.historical_data(token, from_date, to_date, kite_interval)
+            # Walk backwards in max_days-sized windows until the full
+            # requested range is covered -- Kite has no built-in pagination
+            # for this, chunking client-side is the documented workaround.
+            while remaining_days > 0:
+                chunk_days = min(remaining_days, max_days)
+                window_start = window_end - timedelta(days=chunk_days)
+                rows = (
+                    self._kite.historical_data(token, window_start, window_end, kite_interval)
+                    + rows
+                )
+                window_end = window_start
+                remaining_days -= chunk_days
         except Exception as error:
             raise RuntimeError(f"Failed to download Kite history for {symbol}: {error}") from error
         if not rows:
             raise RuntimeError(f"No usable history returned for {symbol}.")
         data = pd.DataFrame(rows)
+        data = data.drop_duplicates(subset="date")
         data = data.rename(
             columns={
                 "date": "Datetime",
