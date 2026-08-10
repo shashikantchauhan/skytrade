@@ -726,7 +726,7 @@ _PAGE = """<!doctype html>
 <section>
   <h2>Open positions</h2>
   <div class="panel table-wrap">
-    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Price diff</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
@@ -740,7 +740,7 @@ _PAGE = """<!doctype html>
     </label>
   </div>
   <div class="panel table-wrap">
-    <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry</th><th>Exit</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+    <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
@@ -750,11 +750,11 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
-      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 </section>
@@ -769,11 +769,11 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
-      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Buy price</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
     </div>
   </div>
 </section>
@@ -849,8 +849,9 @@ async function loadPositions() {
       ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
       : `<td>-</td>`;
     const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td>${pnlCell}</tr>`;
-  }).join("") || "<tr><td colspan=6>No open positions</td></tr>";
+    const diffCell = known ? `₹${fmt(p.current_price - p.entry_price)}` : "-";
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td><td>${diffCell}</td>${pnlCell}</tr>`;
+  }).join("") || "<tr><td colspan=8>No open positions</td></tr>";
 }
 
 let symbolsLoaded = false;
@@ -878,8 +879,11 @@ async function loadTrades() {
   document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
     const cls = r.pnl_percent >= 0 ? "green" : "red";
     const sideCls = r.side === "buy" ? "green" : "red";
-    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>${fmtTime(r.exit_timestamp)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
-  }).join("") || "<tr><td colspan=5>No closed trades yet</td></tr>";
+    // BUY profits when price rises (exit - entry), SELL profits when price
+    // falls (entry - exit) -- same convention as domain.models.Trade.
+    const diff = r.side === "buy" ? r.exit_price - r.entry_price : r.entry_price - r.exit_price;
+    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>₹${fmt(r.entry_price)}</td><td>${fmtTime(r.exit_timestamp)}</td><td>₹${fmt(r.exit_price)}</td><td>₹${fmt(diff)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
+  }).join("") || "<tr><td colspan=8>No closed trades yet</td></tr>";
 }
 
 async function loadConfig() {
@@ -939,13 +943,24 @@ function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
   document.querySelector(`#${optionsTableId} tbody`).innerHTML = d.recent_options.map(o => {
     const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
     const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}%</span>`;
-    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=6>No trades yet</td></tr>";
+    const known = o.exit_premium !== null && o.exit_premium !== undefined;
+    // Buying an option profits when its premium rises, whether it's a
+    // CALL or a PUT -- see options_shadow.py's own pnl_amount comment.
+    const diff = known ? `₹${fmt(o.exit_premium - o.entry_premium)}` : "-";
+    const exitCell = known ? `₹${fmt(o.exit_premium)}` : "-";
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=8>No trades yet</td></tr>";
   document.querySelector(`#${futuresTableId} tbody`).innerHTML = d.recent_futures.map(f => {
     const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
     const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}%</span>`;
-    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=5>No trades yet</td></tr>";
+    const known = f.exit_price !== null && f.exit_price !== undefined;
+    // long profits when price rises (exit - entry), short profits when it
+    // falls (entry - exit) -- same convention as futures_shadow.py.
+    const rawDiff = known ? (f.side === "long" ? f.exit_price - f.entry_price : f.entry_price - f.exit_price) : null;
+    const diff = known ? `₹${fmt(rawDiff)}` : "-";
+    const exitCell = known ? `₹${fmt(f.exit_price)}` : "-";
+    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=7>No trades yet</td></tr>";
 }
 
 async function loadDerivativesShadow() {
