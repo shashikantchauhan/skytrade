@@ -233,17 +233,49 @@ async def positions(_: None = Depends(_require_session)) -> JSONResponse:
         await client.close()
 
 
-@app.get("/api/trades")
-async def trades(limit: int = 50, _: None = Depends(_require_session)) -> JSONResponse:
+@app.get("/api/symbols")
+async def symbols(_: None = Depends(_require_session)) -> JSONResponse:
+    """Symbols with at least one closed BUY trade, for the dashboard's filter
+    dropdown -- alongside each one's own win rate/trade count so the dropdown
+    can show something useful without a second round trip per symbol."""
     client, config = _client()
     try:
         repository = TursoTradeRepository(client)
         all_trades = await repository.get_trades(None, config.candle_interval)
+        by_symbol: dict[str, list] = {}
+        for t in all_trades:
+            if t.side.value == "buy" and t.status == "closed":
+                by_symbol.setdefault(t.symbol, []).append(t)
+        rows = []
+        for symbol, trades_ in sorted(by_symbol.items()):
+            wins = sum(1 for t in trades_ if t.pnl_percent is not None and t.pnl_percent > 0)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "trade_count": len(trades_),
+                    "win_rate": _decimal(Decimal(100 * wins) / len(trades_)),
+                }
+            )
+        return JSONResponse(rows)
+    finally:
+        await client.close()
+
+
+@app.get("/api/trades")
+async def trades(
+    limit: int = 50, symbol: str | None = None, _: None = Depends(_require_session)
+) -> JSONResponse:
+    client, config = _client()
+    try:
+        repository = TursoTradeRepository(client)
+        all_trades = await repository.get_trades(symbol, config.candle_interval)
         closed_buys = [
             t for t in all_trades if t.side.value == "buy" and t.status == "closed"
         ]
         closed_buys.sort(key=lambda t: t.exit_timestamp or t.entry_timestamp, reverse=True)
-        recent = closed_buys[:limit]
+        # A symbol-filtered view shows its full backtested history rather
+        # than just the dashboard's default recent-N window.
+        recent = closed_buys if symbol else closed_buys[:limit]
         wins = sum(1 for t in closed_buys if t.pnl_percent is not None and t.pnl_percent > 0)
         return JSONResponse(
             {
@@ -377,26 +409,113 @@ _PAGE = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>p-trade dashboard</title>
 <style>
-  :root { color-scheme: light dark; }
-  body { font-family: -apple-system, system-ui, sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
-  h1 { font-size: 1.3rem; }
-  .cards { display: flex; gap: 1rem; flex-wrap: wrap; margin: 1rem 0; }
-  .card { border: 1px solid #8884; border-radius: 10px; padding: 0.8rem 1.2rem; min-width: 140px; }
-  .card .label { font-size: 0.75rem; opacity: 0.7; }
-  .card .value { font-size: 1.4rem; font-weight: 600; }
-  .green { color: #1a9c4c; } .red { color: #d33; }
-  table { border-collapse: collapse; width: 100%; margin: 1rem 0; font-size: 0.9rem; }
-  th, td { text-align: left; padding: 0.35rem 0.6rem; border-bottom: 1px solid #8882; }
-  button { padding: 0.4rem 0.9rem; border-radius: 6px; border: 1px solid #8884; cursor: pointer; background: transparent; }
-  input { padding: 0.3rem; border-radius: 6px; border: 1px solid #8884; width: 100px; }
-  section { margin-bottom: 2rem; }
-  pre { background: #8881; padding: 0.6rem; border-radius: 8px; max-height: 300px; overflow: auto; font-size: 0.75rem; }
-  .row { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --border: #e2e4e9;
+    --text: #14161a;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: #eaf0fe;
+    --green: #0f9d58;
+    --green-soft: #e6f7ee;
+    --red: #d93025;
+    --red-soft: #fdeceb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --surface: #191b20;
+      --border: #2b2e35;
+      --text: #eceef1;
+      --muted: #9aa1ac;
+      --accent: #5b8def;
+      --accent-soft: #1c2740;
+      --green: #35c07a;
+      --green-soft: #103524;
+      --red: #f0685f;
+      --red-soft: #3a1a19;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 2px 6px rgba(0,0,0,0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 4rem;
+  }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.75rem; }
+  .topbar h1 { font-size: 1.15rem; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .topbar .sub { color: var(--muted); font-size: 0.8rem; margin-top: 0.15rem; }
+  h2 { font-size: 0.95rem; font-weight: 650; margin: 0 0 0.75rem 0; letter-spacing: -0.01em; }
+  section { margin-bottom: 1.75rem; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.1rem 1.2rem;
+    box-shadow: var(--shadow);
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.7rem; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem 1rem;
+    box-shadow: var(--shadow);
+  }
+  .card .label { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.3rem; font-weight: 500; }
+  .card .value { font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
+  .green { color: var(--green); } .red { color: var(--red); }
+  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+  .pill.green { background: var(--green-soft); color: var(--green); }
+  .pill.red { background: var(--red-soft); color: var(--red); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th {
+    text-align: left; padding: 0.5rem 0.7rem; color: var(--muted); font-weight: 600;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--accent-soft); }
+  tbody tr:last-child td { border-bottom: none; }
+  .table-wrap { overflow-x: auto; }
+  button {
+    padding: 0.45rem 0.95rem; border-radius: 8px; border: 1px solid var(--border);
+    cursor: pointer; background: var(--surface); color: var(--text); font-size: 0.85rem; font-weight: 550;
+    transition: background 0.15s;
+  }
+  button:hover { background: var(--accent-soft); border-color: var(--accent); }
+  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  button.primary:hover { opacity: 0.9; }
+  input, select {
+    padding: 0.4rem 0.6rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 0.85rem;
+  }
+  input { width: 110px; }
+  select { min-width: 220px; }
+  label.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+  pre {
+    background: var(--bg); border: 1px solid var(--border); padding: 0.75rem;
+    border-radius: 10px; max-height: 300px; overflow: auto; font-size: 0.72rem; line-height: 1.5;
+  }
+  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .row.between { justify-content: space-between; }
+  .msg { font-size: 0.8rem; color: var(--muted); }
 </style>
 </head>
 <body>
-<div class="row" style="justify-content: space-between;">
-  <h1>p-trade &mdash; paper trading dashboard</h1>
+<div class="topbar">
+  <div>
+    <h1>p-trade</h1>
+    <div class="sub">Paper trading dashboard</div>
+  </div>
   <button onclick="logout()">Log out</button>
 </div>
 
@@ -406,27 +525,40 @@ _PAGE = """<!doctype html>
 
 <section>
   <div class="row">
-    <button onclick="trigger()">Run pipeline now</button>
-    <span id="trigger-msg"></span>
+    <button class="primary" onclick="trigger()">Run pipeline now</button>
+    <span class="msg" id="trigger-msg"></span>
   </div>
 </section>
 
 <section>
   <h2>Open positions</h2>
-  <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+  <div class="panel table-wrap">
+    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <section>
-  <h2>Recent closed trades (buy-only win rate: <span id="win-rate">-</span>)</h2>
-  <table id="trades-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+  <div class="row between">
+    <h2><span id="trades-title">Closed trades (buy-only win rate</span>: <span id="win-rate">-</span>)</h2>
+    <label class="field">Filter by symbol
+      <select id="symbol-filter" onchange="loadTrades()">
+        <option value="">All symbols (recent 30)</option>
+      </select>
+    </label>
+  </div>
+  <div class="panel table-wrap">
+    <table id="trades-table"><thead><tr><th>Symbol</th><th>Entry</th><th>Exit</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+  </div>
 </section>
 
 <section>
   <h2>Config</h2>
-  <div class="row">
-    Capital <input id="cfg-capital" /> Slots <input id="cfg-slots" /> Min position <input id="cfg-min" />
-    <button onclick="saveConfig()">Save</button>
-    <span id="config-msg"></span>
+  <div class="panel row">
+    <label class="field">Capital<input id="cfg-capital" /></label>
+    <label class="field">Slots<input id="cfg-slots" /></label>
+    <label class="field">Min position<input id="cfg-min" /></label>
+    <button class="primary" onclick="saveConfig()" style="align-self: flex-end;">Save</button>
+    <span class="msg" id="config-msg"></span>
   </div>
 </section>
 
@@ -483,12 +615,31 @@ async function loadPositions() {
   }).join("") || "<tr><td colspan=6>No open positions</td></tr>";
 }
 
+let symbolsLoaded = false;
+
+async function loadSymbols() {
+  const rows = await api("/api/symbols");
+  const select = document.getElementById("symbol-filter");
+  const current = select.value;
+  select.innerHTML = '<option value="">All symbols (recent 30)</option>' + rows.map(r =>
+    `<option value="${r.symbol}">${r.symbol} (${r.trade_count} trades, ${fmt(r.win_rate)}% win)</option>`
+  ).join("");
+  select.value = current;
+  symbolsLoaded = true;
+}
+
 async function loadTrades() {
-  const t = await api("/api/trades?limit=30");
+  const select = document.getElementById("symbol-filter");
+  const symbol = select.value;
+  const query = symbol ? `symbol=${encodeURIComponent(symbol)}` : "limit=30";
+  const t = await api(`/api/trades?${query}`);
+  document.getElementById("trades-title").textContent = symbol
+    ? `${symbol} trades (win rate`
+    : "Closed trades (buy-only win rate";
   document.getElementById("win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
   document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
     const cls = r.pnl_percent >= 0 ? "green" : "red";
-    return `<tr><td>${r.symbol}</td><td>${r.entry_timestamp.slice(0,16)}</td><td>${r.exit_timestamp ? r.exit_timestamp.slice(0,16) : "-"}</td><td class="${cls}">${fmt(r.pnl_percent)}%</td></tr>`;
+    return `<tr><td>${r.symbol}</td><td>${r.entry_timestamp.slice(0,16)}</td><td>${r.exit_timestamp ? r.exit_timestamp.slice(0,16) : "-"}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
   }).join("") || "<tr><td colspan=4>No closed trades yet</td></tr>";
 }
 
@@ -527,6 +678,7 @@ async function loadLogs() {
 }
 
 async function refreshAll() {
+  if (!symbolsLoaded) await loadSymbols();
   await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs()]);
 }
 refreshAll();
