@@ -168,13 +168,23 @@ async def _add_column_if_missing(
 ) -> None:
     """Migrates an already-deployed table forward -- ``CREATE TABLE IF NOT
     EXISTS`` only helps on a fresh database, it never alters an existing
-    one. Swallows the "duplicate column" error on every run after the
-    first; there's no portable ``ADD COLUMN IF NOT EXISTS`` in SQLite."""
-    try:
-        await client.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
-    except Exception as error:
-        if "duplicate column" not in str(error).lower():
-            raise
+    one.
+
+    Checks ``PRAGMA table_info`` first rather than blind-ALTER-and-swallow
+    the "duplicate column" error: over Turso's HTTP transport, an ALTER
+    against an already-existing column doesn't come back as a normal
+    exception with that text in it -- ``libsql_client``'s HTTP backend
+    raises a raw ``KeyError('result')`` while parsing the error response,
+    which silently killed every caller of this function (the derivatives
+    backtest CLI, in particular, crashed before doing any work, so
+    triggering it from the dashboard looked like a no-op with zero
+    feedback). Checking first sidesteps relying on that error shape at all.
+    """
+    result = await client.execute(f"PRAGMA table_info({table})")
+    existing_columns = {row[1] for row in result.rows}  # row[1] is the column name
+    if column in existing_columns:
+        return
+    await client.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
 def create_turso_client(url: str, auth_token: str | None) -> libsql_client.Client:
