@@ -1,9 +1,13 @@
 [tool.poetry]
-name = "trading-scanner"
+name = "skytrade"
 version = "0.1.0"
-description = "A modular, configuration-driven trading signal scanner."
-authors = ["Trading Scanner Team <team@example.com>"]
+description = "SkyTrade: an NSE F&O trading-signal scanner and paper-trading engine."
+authors = ["Shashikant Chauhan <hardrock.chauhan@gmail.com>"]
 readme = "README.md"
+# Internal package/module path stays "trading_scanner" -- renaming it would
+# touch every import across the codebase plus the live VPS deployment paths
+# (systemd service, crontab) for no functional benefit; only the outward
+# product identity (repo name, this metadata, dashboard UI) is "SkyTrade".
 packages = [{ include = "trading_scanner", from = "src" }]
 
 [tool.poetry.dependencies]

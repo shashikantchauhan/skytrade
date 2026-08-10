@@ -1,4 +1,4 @@
-# Trading Scanner
+# SkyTrade
 
 This project downloads and validates market candles so that a strategy can be
 added in a later milestone.

@@ -46,7 +46,7 @@ _LOG_PATH = Path(os.getenv("TRADING_SCANNER_LOG_PATH", "/var/log/p-trade/signals
 _SESSION_COOKIE = "ptrade_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
-app = FastAPI(title="p-trade dashboard")
+app = FastAPI(title="SkyTrade dashboard")
 
 # token -> expiry (unix time). In-memory: fine for a single-process personal
 # tool; a restart just means logging in again.
@@ -407,7 +407,7 @@ _PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>p-trade dashboard</title>
+<title>SkyTrade dashboard</title>
 <style>
   :root {
     color-scheme: light dark;
@@ -513,8 +513,8 @@ _PAGE = """<!doctype html>
 <body>
 <div class="topbar">
   <div>
-    <h1>p-trade</h1>
-    <div class="sub">Paper trading dashboard</div>
+    <h1>SkyTrade</h1>
+    <div class="sub">NSE signal scanner &amp; paper trading dashboard</div>
   </div>
   <button onclick="logout()">Log out</button>
 </div>
@@ -704,7 +704,7 @@ _LOGIN_PAGE = """<!doctype html>
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>p-trade dashboard &mdash; log in</title>
+<title>SkyTrade dashboard &mdash; log in</title>
 <style>
   :root { color-scheme: light dark; }
   body { font-family: -apple-system, system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
@@ -717,7 +717,7 @@ _LOGIN_PAGE = """<!doctype html>
 </head>
 <body>
 <form id="login-form">
-  <h1>p-trade dashboard</h1>
+  <h1>SkyTrade dashboard</h1>
   <input id="password" type="password" placeholder="Password" autofocus required />
   <button type="submit">Log in</button>
   <div id="error"></div>
