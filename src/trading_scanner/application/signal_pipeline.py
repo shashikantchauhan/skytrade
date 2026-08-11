@@ -442,10 +442,24 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
         )
     if result.end_long:
-        await _notify_exit(
-            symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
-            trade_repository, signal_repository, notifier,
-        )
+        # Notification failures (e.g. a Telegram network timeout) must never
+        # block actually recording the close -- this was a real bug: a
+        # ConnectTimeout here used to propagate up through _process_symbol's
+        # caller and skip close_open_trade entirely, leaving the position
+        # stuck open in the database even though the strategy had already
+        # decided to exit. _notify_exit still has to run *before* the close
+        # below (it reads the still-open entry price), just no longer
+        # allowed to prevent the close from happening.
+        try:
+            await _notify_exit(
+                symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
+                trade_repository, signal_repository, notifier,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Exit notification failed for %s (BUY) -- closing the trade anyway.",
+                symbol, exc_info=True,
+            )
         await trade_repository.close_open_trade(
             symbol, config.candle_interval, SignalSide.BUY, newest_candle.timestamp, market_price
         )
@@ -475,10 +489,18 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
         )
     if result.end_short:
-        await _notify_exit(
-            symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
-            trade_repository, signal_repository, notifier,
-        )
+        # See the end_long branch above for why this is wrapped -- a
+        # notification failure must never block recording the actual close.
+        try:
+            await _notify_exit(
+                symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
+                trade_repository, signal_repository, notifier,
+            )
+        except Exception:
+            logging.getLogger(__name__).warning(
+                "Exit notification failed for %s (SELL) -- closing the trade anyway.",
+                symbol, exc_info=True,
+            )
         await trade_repository.close_open_trade(
             symbol, config.candle_interval, SignalSide.SELL, newest_candle.timestamp, market_price
         )
