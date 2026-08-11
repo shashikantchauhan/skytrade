@@ -287,8 +287,9 @@ async def _notify_kite_expired_once_per_day(
         if last_notified == today:
             return
         await notifier.send_text(
-            "SkyTrade: Kite session expired/missing -- today's runs are using Yahoo. "
-            "Log in again at https://skytrade.oneatem.com/kite/login"
+            "⚠️ <b>SYSTEM ALERT</b>\n"
+            "Kite session expired/missing -- today's runs are using Yahoo (delayed) data.\n"
+            "Log in again: https://skytrade.oneatem.com/kite/login"
         )
         await kite_session_repository.set_expiry_notified_date(today)
     except Exception:
@@ -491,10 +492,13 @@ async def _process_symbol(
         # decided to exit. _notify_exit still has to run *before* the close
         # below (it reads the still-open entry price), just no longer
         # allowed to prevent the close from happening.
+        open_paper_positions = await paper_account_repository.get_open_positions()
+        has_open_paper_position = any(p.symbol == symbol for p in open_paper_positions)
         try:
             await _notify_exit(
                 symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
                 trade_repository, signal_repository, notifier,
+                suppress_telegram=has_open_paper_position,
             )
         except Exception:
             logging.getLogger(__name__).warning(
@@ -576,6 +580,7 @@ async def _process_symbol(
         timestamp=newest_candle.timestamp,
         price=newest_candle.close,
         rationale=rationale,
+        category="entry",
     )
     if await signal_repository.contains(signal.fingerprint):
         return
@@ -592,6 +597,7 @@ async def _notify_exit(
     trade_repository: TradeRepository,
     signal_repository: SignalRepository,
     notifier: Notifier,
+    suppress_telegram: bool = False,
 ) -> None:
     """Notify that an open position closed, with its realized pnl_percent.
 
@@ -599,6 +605,14 @@ async def _notify_exit(
     called, so this must run first. A distinct ``strategy`` tag keeps this
     signal's fingerprint from ever colliding with an entry notification at
     the same symbol/side/timestamp (see Signal.fingerprint).
+
+    ``suppress_telegram``: when a real paper position is about to close for
+    this same symbol/exit (see the ``end_long`` branch in ``_process_symbol``),
+    that closure sends its own, more detailed "PAPER TRADE CLOSED" message
+    with quantity and ₹ P&L -- sending this raw strategy-exit message too
+    used to mean two Telegram messages for the same event, which is exactly
+    the "which one matters" confusion reported. The fingerprint is still
+    recorded either way, so dedup/backfill behavior is unchanged.
     """
     trades = await trade_repository.get_trades(symbol, config.candle_interval)
     open_trade = next(
@@ -621,10 +635,12 @@ async def _notify_exit(
         rationale=(
             f"exit; entry={open_trade.entry_price}, exit={exit_price}, pnl={pnl_percent:.2f}%"
         ),
+        category="exit",
     )
     if await signal_repository.contains(signal.fingerprint):
         return
-    await notifier.send_signal(signal)
+    if not suppress_telegram:
+        await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
@@ -672,6 +688,7 @@ async def _close_paper_position(
         closed = await paper_account_repository.close_position(symbol, exit_timestamp, exit_price)
     if closed is None:
         return  # Nothing was ever opened for this symbol (not eligible / no capacity).
+    pnl_percent = (exit_price - closed.entry_price) / closed.entry_price * 100
     signal = Signal(
         symbol=symbol,
         side=SignalSide.BUY,
@@ -680,8 +697,9 @@ async def _close_paper_position(
         price=exit_price,
         rationale=(
             f"paper CLOSE {closed.quantity} qty; entry={closed.entry_price}, "
-            f"exit={exit_price}, pnl=₹{closed.pnl_amount:.0f}"
+            f"exit={exit_price}, pnl=₹{closed.pnl_amount:.0f} ({pnl_percent:.2f}%)"
         ),
+        category="paper_exit",
     )
     if await signal_repository.contains(signal.fingerprint):
         return

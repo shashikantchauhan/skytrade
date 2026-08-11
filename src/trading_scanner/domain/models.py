@@ -28,6 +28,15 @@ class Signal:
     timestamp: datetime
     price: Decimal
     rationale: str
+    # Drives Telegram formatting only (see infrastructure/telegram.py) --
+    # not persisted, not used for fingerprint/dedup, purely "which kind of
+    # message is this so the notifier can header/emoji it distinctly":
+    #   "entry"      -- a fresh BUY/SELL strategy signal
+    #   "exit"       -- the strategy itself closing a position (informational
+    #                    only when no paper position was open for it)
+    #   "paper_exit" -- an actual simulated-capital paper position closing,
+    #                    the one with real P&L
+    category: str = "entry"
 
     @property
     def fingerprint(self) -> str:
