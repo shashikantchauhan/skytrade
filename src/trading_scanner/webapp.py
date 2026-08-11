@@ -28,6 +28,7 @@ from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
 from trading_scanner.application import paper_trading
+from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
 from trading_scanner.infrastructure.kite import (
@@ -476,6 +477,35 @@ def _moneyness(option_type: str, strike: Decimal, underlying_price: Decimal) -> 
     return "ITM" if strike > underlying_price else "OTM"
 
 
+def _options_greeks_payload(trade) -> dict | None:
+    """Implied volatility + delta/theta/gamma/vega at entry (and exit, if
+    closed) for one options trade -- see ``application/
+    options_analytics.py``. None if the underlying computation couldn't
+    resolve (e.g. a stale/implausible stored premium) -- the row still
+    renders, just without this extra detail, rather than breaking the
+    whole derivatives tab over one bad historical row.
+    """
+    try:
+        result = enrich_trade(
+            trade.option_type,
+            trade.strike,
+            trade.expiry,
+            trade.entry_timestamp,
+            trade.underlying_price_at_entry,
+            trade.entry_premium,
+            trade.exit_timestamp,
+            trade.underlying_price_at_exit,
+            trade.exit_premium,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Greeks computation failed for %s -- omitting from this row.",
+            trade.option_tradingsymbol, exc_info=True,
+        )
+        return None
+    return result
+
+
 def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> dict:
     """Shared by the live shadow-tracking endpoint and the current-month
     backtest endpoint -- same shape, different ``source`` filter upstream.
@@ -531,6 +561,7 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
                 "pnl_percent": _decimal(t.pnl_percent),
                 "pnl_amount": _decimal(t.pnl_amount),
                 "status": t.status,
+                "greeks": _options_greeks_payload(t),
             }
             for t in sorted(options_trades, key=lambda t: t.entry_timestamp, reverse=True)[:30]
         ],
@@ -942,7 +973,7 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
-      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
@@ -959,7 +990,7 @@ _PAGE = """<!doctype html>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
-      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
+      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
@@ -1001,6 +1032,22 @@ async function logout() {
 }
 
 function fmt(n) { return n === null || n === undefined ? "-" : Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
+
+// One side (entry or exit) of a greeks snapshot -- null means the
+// Black-Scholes computation couldn't resolve for that row (see
+// application/options_analytics.py), shown as "-" rather than hidden so
+// it's clear the column was checked, not skipped.
+function formatGreeksSide(g) {
+  if (!g) return "-";
+  return `IV ${fmt(g.implied_volatility)}% · Δ ${fmt(g.delta)} · Θ ${fmt(g.theta)}/day`;
+}
+
+function formatGreeksCell(greeks) {
+  if (!greeks) return "-";
+  const entry = formatGreeksSide(greeks.entry);
+  if (!greeks.exit) return entry;
+  return `${entry} → ${formatGreeksSide(greeks.exit)}`;
+}
 
 // Every timestamp from the API is UTC ISO -- displayed in IST throughout
 // this dashboard since that's the timezone the strategy/market actually
@@ -1140,8 +1187,9 @@ function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
     // CALL or a PUT -- see options_shadow.py's own pnl_amount comment.
     const diff = known ? `₹${fmt(o.exit_premium - o.entry_premium)}` : "-";
     const exitCell = known ? `₹${fmt(o.exit_premium)}` : "-";
-    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${o.moneyness} (strike ₹${fmt(o.strike)}, spot ₹${fmt(o.underlying_price_at_entry)})</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=9>No trades yet</td></tr>";
+    const greeksCell = formatGreeksCell(o.greeks);
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${o.moneyness} (strike ₹${fmt(o.strike)}, spot ₹${fmt(o.underlying_price_at_entry)})</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td><td>${greeksCell}</td></tr>`;
+  }).join("") || "<tr><td colspan=10>No trades yet</td></tr>";
   document.querySelector(`#${futuresTableId} tbody`).innerHTML = d.recent_futures.map(f => {
     const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
     const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}% (₹${fmt(f.pnl_amount)})</span>`;
