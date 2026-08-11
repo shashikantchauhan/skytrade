@@ -1,0 +1,411 @@
+"""Always-on live pipeline: builds candles from Kite's WebSocket tick feed
+and evaluates signals the moment each hourly bar closes, replacing the
+hourly-cron/Historical-Data-API pipeline (``signals.py``) as the source of
+truth during market hours.
+
+Why this exists: Zerodha's own guidance (confirmed live and via their dev
+forum, see ``application/signal_pipeline.py``'s ``_evaluate_symbol``
+docstring) is that the Historical Data API isn't meant for live signals --
+it can lag the current session's candles by hours. Their documented fix:
+build your own candles from the WebSocket tick feed. That's what this
+module does. ``signals.py``'s download-based pipeline still exists, for
+backfill, catch-up after downtime, and the dashboard's manual trigger --
+just no longer the thing driving live trading during market hours.
+
+Run as a systemd service (``p-trade-live``), not cron -- it needs to stay
+connected continuously through the trading session, not spin up once an
+hour. See ``deploy/p-trade-live.service``.
+
+KiteTicker (pykiteconnect) is not asyncio-native -- it runs its own
+Tornado-based event loop in a background thread (``connect(threaded=True)``)
+and delivers ticks via a callback on that thread. The bridge to this
+module's asyncio code is a plain ``queue.Queue``: the tick callback just
+enqueues (cheap, thread-safe), and an asyncio task drains it.
+"""
+
+import asyncio
+import logging
+import queue
+from datetime import UTC, datetime
+from decimal import Decimal
+
+from kiteconnect import KiteConnect, KiteTicker
+
+from trading_scanner.alpha_engine import AlphaEngine
+from trading_scanner.application.paper_trading import INITIAL_CAPITAL
+from trading_scanner.application.signal_pipeline import (
+    _ENGINE_SETTINGS,
+    _evaluate_from_stored_candles,
+    _process_symbol,
+)
+from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
+from trading_scanner.config.settings import AppConfig, load_config
+from trading_scanner.domain.models import Candle
+from trading_scanner.infrastructure.kite import KiteDerivativesChain, KiteInstrumentMap
+from trading_scanner.infrastructure.kite_ticker import (
+    CandleAggregator,
+    bucket_start,
+    is_market_hours,
+)
+from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
+from trading_scanner.infrastructure.turso import (
+    TursoCandleRepository,
+    TursoEngineStateRepository,
+    TursoFuturesTradeRepository,
+    TursoKiteSessionRepository,
+    TursoOptionsTradeRepository,
+    TursoPaperAccountRepository,
+    TursoSignalRepository,
+    TursoTradeRepository,
+    create_turso_client,
+)
+
+logger = logging.getLogger(__name__)
+
+# How often the boundary-check loop wakes up to see whether the current
+# hourly bucket has closed. 10s is frequent enough that a bar is finalized
+# within seconds of closing, not expensive enough to matter against an
+# hour-long bucket.
+_BOUNDARY_CHECK_SECONDS = 10
+
+# How often to check whether a newer Kite access token has appeared (e.g.
+# the admin re-logged in after a token expired) -- lets this long-running
+# process pick up a fresh login without a manual restart.
+_TOKEN_REFRESH_CHECK_SECONDS = 120
+
+# Symbols processed concurrently when a bucket closes -- mirrors
+# signal_pipeline.py's own concurrency bound for the same reason (network/
+# DB I/O bound, not CPU bound).
+_MAX_CONCURRENT_SYMBOLS = 12
+
+
+def _build_notifier(config: AppConfig):
+    if config.telegram_bot_token and config.telegram_chat_id:
+        return TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+    return LoggingNotifier()
+
+
+class LiveTickerPipeline:
+    """Owns the KiteTicker connection, tick-to-candle aggregation, and
+    firing signal evaluation on each bucket close. One instance per
+    process; ``run_forever()`` is the entry point and does not return under
+    normal operation."""
+
+    def __init__(self, config: AppConfig, symbols: list[str]) -> None:
+        self._config = config
+        self._symbols = symbols
+        self._engine = AlphaEngine(**_ENGINE_SETTINGS)
+        self._tick_queue: queue.Queue = queue.Queue()
+        self._aggregators: dict[int, CandleAggregator] = {}
+        self._token_to_symbol: dict[int, str] = {}
+        self._current_bucket: datetime | None = None
+        self._ticker: KiteTicker | None = None
+        self._access_token: str | None = None
+        self._paper_account_lock = asyncio.Lock()
+        self._client = None
+        self._repos: dict = {}
+        self._notifier = None
+
+    async def _setup_repositories(self) -> None:
+        if not self._config.turso_database_url:
+            raise RuntimeError("TRADING_SCANNER_TURSO_URL is required.")
+        self._client = create_turso_client(
+            self._config.turso_database_url, self._config.turso_auth_token
+        )
+        self._repos = {
+            "candle": TursoCandleRepository(self._client),
+            "signal": TursoSignalRepository(self._client),
+            "engine_state": TursoEngineStateRepository(self._client),
+            "trade": TursoTradeRepository(self._client),
+            "paper_account": TursoPaperAccountRepository(self._client, INITIAL_CAPITAL),
+            "kite_session": TursoKiteSessionRepository(self._client),
+            "options_trade": TursoOptionsTradeRepository(self._client),
+            "futures_trade": TursoFuturesTradeRepository(self._client),
+        }
+        for repo in self._repos.values():
+            await repo.ensure_schema()
+        self._notifier = _build_notifier(self._config)
+
+    async def _resolve_instrument_tokens(self, kite: KiteConnect) -> None:
+        instrument_map = KiteInstrumentMap(kite)
+        self._token_to_symbol = {}
+        for symbol in self._symbols:
+            try:
+                token = await asyncio.to_thread(instrument_map.resolve, symbol)
+                self._token_to_symbol[token] = symbol
+                self._aggregators[token] = CandleAggregator()
+            except Exception:
+                logger.warning("Could not resolve instrument token for %s -- skipping.", symbol)
+        logger.info(
+            "Resolved %d/%d symbols to instrument tokens.",
+            len(self._token_to_symbol), len(self._symbols),
+        )
+
+    async def _get_access_token(self) -> str | None:
+        token_row = await self._repos["kite_session"].get_token()
+        return token_row[0] if token_row else None
+
+    def _on_ticks(self, ws, ticks) -> None:  # noqa: ANN001 -- kiteconnect's own callback signature
+        self._tick_queue.put(ticks)
+
+    def _on_connect(self, ws, response) -> None:  # noqa: ANN001
+        tokens = list(self._token_to_symbol.keys())
+        logger.info("KiteTicker connected -- subscribing to %d instruments.", len(tokens))
+        ws.subscribe(tokens)
+        ws.set_mode(ws.MODE_FULL, tokens)
+
+    def _on_close(self, ws, code, reason) -> None:  # noqa: ANN001
+        logger.warning("KiteTicker closed: %s %s", code, reason)
+
+    def _on_error(self, ws, code, reason) -> None:  # noqa: ANN001
+        logger.error("KiteTicker error: %s %s", code, reason)
+
+    def _on_reconnect(self, ws, attempts_count) -> None:  # noqa: ANN001
+        logger.warning("KiteTicker reconnecting (attempt %d)...", attempts_count)
+
+    def _on_noreconnect(self, ws) -> None:  # noqa: ANN001
+        logger.error("KiteTicker exhausted reconnect attempts -- supervisor will recreate it.")
+
+    def _connect_ticker(self, access_token: str) -> None:
+        self._access_token = access_token
+        ticker = KiteTicker(api_key=self._config.kite_api_key, access_token=access_token)
+        ticker.on_ticks = self._on_ticks
+        ticker.on_connect = self._on_connect
+        ticker.on_close = self._on_close
+        ticker.on_error = self._on_error
+        ticker.on_reconnect = self._on_reconnect
+        ticker.on_noreconnect = self._on_noreconnect
+        ticker.connect(threaded=True)
+        self._ticker = ticker
+
+    def _disconnect_ticker(self) -> None:
+        if self._ticker is not None:
+            try:
+                self._ticker.close()
+            except Exception:
+                logger.warning("Error closing KiteTicker (ignoring, moving on).", exc_info=True)
+            self._ticker = None
+
+    async def _drain_ticks_loop(self) -> None:
+        """Consumes ticks pushed by the (threaded) KiteTicker callback and
+        feeds them into the right symbol's aggregator. ``queue.Queue.get``
+        is blocking, so it runs via ``asyncio.to_thread`` rather than
+        polling/spinning."""
+        while True:
+            ticks = await asyncio.to_thread(self._tick_queue.get)
+            for tick in ticks:
+                token = tick.get("instrument_token")
+                aggregator = self._aggregators.get(token)
+                if aggregator is None:
+                    continue
+                price = tick.get("last_price")
+                if price is None:
+                    continue
+                volume = tick.get("volume_traded", 0) or 0
+                aggregator.add_tick(datetime.now(UTC), Decimal(str(price)), int(volume))
+
+    async def _boundary_loop(self) -> None:
+        """Wakes up periodically; when the current hourly bucket has
+        rolled over, finalizes it into real Candle rows and fires signal
+        evaluation for every symbol that had ticks."""
+        while True:
+            await asyncio.sleep(_BOUNDARY_CHECK_SECONDS)
+            now = datetime.now(UTC)
+            new_bucket = bucket_start(now)
+            if self._current_bucket is None:
+                self._current_bucket = new_bucket
+                for aggregator in self._aggregators.values():
+                    aggregator.start(new_bucket)
+                continue
+            if new_bucket > self._current_bucket:
+                closed_bucket = self._current_bucket
+                await self._finalize_bucket(closed_bucket)
+                self._current_bucket = new_bucket
+                for aggregator in self._aggregators.values():
+                    aggregator.start(new_bucket)
+
+    async def _finalize_bucket(self, bucket: datetime) -> None:
+        candles: dict[str, Candle] = {}
+        for token, aggregator in self._aggregators.items():
+            ohlcv = aggregator.finalize()
+            if ohlcv is None:
+                continue
+            symbol = self._token_to_symbol[token]
+            open_, high, low, close, volume = ohlcv
+            candles[symbol] = Candle(
+                symbol=symbol, timestamp=bucket,
+                open=open_, high=high, low=low, close=close, volume=volume,
+            )
+        if not candles:
+            logger.info(
+                "Bucket %s closed with no ticks for any symbol -- nothing to evaluate.", bucket
+            )
+            return
+        logger.info(
+            "Bucket %s closed: %d/%d symbols had ticks. Evaluating...",
+            bucket, len(candles), len(self._aggregators),
+        )
+        await self._process_closed_candles(candles)
+
+    async def _process_closed_candles(self, candles: dict[str, Candle]) -> None:
+        kite = KiteConnect(api_key=self._config.kite_api_key)
+        kite.set_access_token(self._access_token)
+        derivatives_chain = KiteDerivativesChain(kite)
+
+        index_result = None
+        if self._config.index_symbol and self._config.index_symbol in candles:
+            index_candle = candles[self._config.index_symbol]
+            await self._repos["candle"].upsert_candles(
+                self._config.index_symbol, self._config.candle_interval, [index_candle]
+            )
+            evaluated = await _evaluate_from_stored_candles(
+                self._config.index_symbol, self._config, self._engine,
+                self._repos["candle"], self._repos["engine_state"],
+            )
+            index_result = evaluated[0] if evaluated is not None else None
+
+        semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SYMBOLS)
+
+        async def _process_one(symbol: str, candle: Candle) -> None:
+            async with semaphore:
+                try:
+                    await self._repos["candle"].upsert_candles(
+                        symbol, self._config.candle_interval, [candle]
+                    )
+                    evaluated = await _evaluate_from_stored_candles(
+                        symbol, self._config, self._engine,
+                        self._repos["candle"], self._repos["engine_state"],
+                    )
+                    if evaluated is None:
+                        return
+                    await _process_symbol(
+                        symbol, self._config, None, self._engine,
+                        self._repos["candle"], self._repos["signal"], self._repos["engine_state"],
+                        self._repos["trade"], self._repos["paper_account"], self._notifier,
+                        index_result, self._paper_account_lock,
+                        derivatives_chain,
+                        self._repos["options_trade"], self._repos["futures_trade"],
+                        precomputed_evaluation=evaluated,
+                    )
+                except Exception:
+                    logger.exception("Unexpected exception processing closed candle for %s", symbol)
+
+        await asyncio.gather(*(
+            _process_one(symbol, candle)
+            for symbol, candle in candles.items()
+            if symbol != self._config.index_symbol
+        ))
+
+    async def _token_refresh_loop(self) -> None:
+        """Detects a newer Kite login (the admin re-logging in via the
+        dashboard) and reconnects the ticker with it, so this long-running
+        process never needs a manual restart to pick up the daily token."""
+        while True:
+            await asyncio.sleep(_TOKEN_REFRESH_CHECK_SECONDS)
+            try:
+                token = await self._get_access_token()
+            except Exception:
+                logger.warning(
+                    "Token refresh check failed (Turso hiccup?) -- will retry.", exc_info=True
+                )
+                continue
+            if token and token != self._access_token:
+                logger.info("Detected a new Kite access token -- reconnecting ticker.")
+                self._disconnect_ticker()
+                self._connect_ticker(token)
+
+    async def run_forever(self) -> None:
+        await self._setup_repositories()
+        try:
+            while True:
+                now = datetime.now(UTC)
+                if not is_market_hours(now):
+                    logger.info("Outside market hours -- sleeping.")
+                    await asyncio.sleep(60)
+                    continue
+
+                access_token = await self._get_access_token()
+                if not access_token:
+                    logger.warning("No Kite session yet -- waiting for admin login.")
+                    await asyncio.sleep(60)
+                    continue
+
+                kite = KiteConnect(api_key=self._config.kite_api_key)
+                kite.set_access_token(access_token)
+                try:
+                    await self._resolve_instrument_tokens(kite)
+                except Exception:
+                    logger.exception("Failed to resolve instrument tokens -- retrying shortly.")
+                    await asyncio.sleep(60)
+                    continue
+                if not self._token_to_symbol:
+                    logger.error(
+                        "No symbols resolved to instrument tokens -- nothing to trade. "
+                        "Retrying shortly."
+                    )
+                    await asyncio.sleep(60)
+                    continue
+
+                self._connect_ticker(access_token)
+                self._current_bucket = None
+                try:
+                    await asyncio.gather(
+                        self._drain_ticks_loop(),
+                        self._boundary_loop(),
+                        self._token_refresh_loop(),
+                        self._run_until_market_close(),
+                    )
+                finally:
+                    self._disconnect_ticker()
+        finally:
+            if self._client is not None:
+                await self._client.close()
+
+    async def _run_until_market_close(self) -> None:
+        """Sleeps until market close, then raises to unwind the other
+        loops (gather) cleanly and let ``run_forever``'s outer loop go back
+        to sleeping until tomorrow's open."""
+        while is_market_hours(datetime.now(UTC)):
+            await asyncio.sleep(30)
+        raise _MarketClosed
+
+
+class _MarketClosed(Exception):
+    """Internal control-flow signal -- market hours ended, unwind this
+    session's loops and let run_forever's outer loop take over."""
+
+
+async def _run(config: AppConfig) -> None:
+    symbols = SymbolLoader().load(config.symbols_file)
+    logger.info("Loaded %d symbols for live ticker pipeline", len(symbols))
+    pipeline = LiveTickerPipeline(config, symbols)
+    while True:
+        try:
+            await pipeline.run_forever()
+        except _MarketClosed:
+            logger.info("Market closed -- pipeline will resume tomorrow.")
+            await asyncio.sleep(60)
+        except Exception:
+            logger.exception("Live pipeline crashed -- restarting in 30s.")
+            await asyncio.sleep(30)
+
+
+def main() -> None:
+    config = load_config()
+    logging.basicConfig(level=config.logging_level, format="%(asctime)s %(levelname)s: %(message)s")
+    if not config.kite_api_key:
+        logger.error("TRADING_SCANNER_KITE_API_KEY is required for the live ticker pipeline.")
+        return
+    logger.info("Live ticker pipeline starting")
+    try:
+        asyncio.run(_run(config))
+    except SymbolLoadError as error:
+        logger.error("%s", error)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        logger.info("Live ticker pipeline stopped")
+
+
+if __name__ == "__main__":
+    main()

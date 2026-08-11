@@ -1,0 +1,18 @@
+[Unit]
+Description=SkyTrade live-ticker pipeline (WebSocket candles, replaces hourly cron)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/p-trade
+EnvironmentFile=/opt/p-trade/.env
+Environment=PYTHONPATH=/opt/p-trade/src
+ExecStart=/opt/p-trade/.venv/bin/python -m trading_scanner.live_pipeline
+Restart=on-failure
+RestartSec=10
+User=root
+StandardOutput=append:/var/log/p-trade/live.log
+StandardError=append:/var/log/p-trade/live.log
+
+[Install]
+WantedBy=multi-user.target

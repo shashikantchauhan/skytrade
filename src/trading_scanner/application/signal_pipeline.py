@@ -303,10 +303,19 @@ async def _evaluate_symbol(
     candle_repository: CandleRepository,
     engine_state_repository: EngineStateRepository,
 ) -> tuple[FastPredictResult, Candle] | None:
-    """Download, store, and evaluate the newest bar for one symbol.
+    """Download, store, and evaluate the newest bar for one symbol -- the
+    polling/historical-API path (cron, manual dashboard trigger, backfill).
 
     Returns None if the symbol is still warming up (<200 candles) or if no
     new candle has arrived since the last run (nothing new to evaluate).
+
+    Zerodha's own guidance is that the Historical Data API is for backfill/
+    backtesting, not live signals (it can lag the current session's candles
+    by hours -- confirmed live and via Kite's dev forum). The live-ticker
+    path (``infrastructure/kite_ticker.py`` -> ``live_pipeline.py``) is the
+    real-time replacement for market hours; this function's download step
+    stays around for backfill, catch-up after downtime, and the dashboard's
+    manual "run pipeline now" button.
     """
     logger = logging.getLogger(__name__)
     existing = await candle_repository.get_candles(
@@ -326,7 +335,27 @@ async def _evaluate_symbol(
     await candle_repository.upsert_candles(
         symbol, config.candle_interval, _dataframe_to_candles(symbol, downloaded)
     )
+    return await _evaluate_from_stored_candles(
+        symbol, config, engine, candle_repository, engine_state_repository
+    )
 
+
+async def _evaluate_from_stored_candles(
+    symbol: str,
+    config: AppConfig,
+    engine: AlphaEngine,
+    candle_repository: CandleRepository,
+    engine_state_repository: EngineStateRepository,
+) -> tuple[FastPredictResult, Candle] | None:
+    """Evaluate the newest already-*stored* bar for one symbol -- shared by
+    both the download-based path above (which upserts before calling this)
+    and the live-ticker path (``live_pipeline.py``, which upserts one
+    freshly-closed candle from aggregated ticks before calling this).
+
+    Returns None if the symbol is still warming up (<200 candles) or if no
+    new candle has arrived since the last run (nothing new to evaluate).
+    """
+    logger = logging.getLogger(__name__)
     accumulated = await candle_repository.get_candles(
         symbol, config.candle_interval, limit=_FULL_HISTORY
     )
@@ -389,6 +418,7 @@ async def _process_symbol(
     derivatives_chain: KiteDerivativesChain | None = None,
     options_trade_repository: TursoOptionsTradeRepository | None = None,
     futures_trade_repository: TursoFuturesTradeRepository | None = None,
+    precomputed_evaluation: tuple[FastPredictResult, Candle] | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -409,10 +439,21 @@ async def _process_symbol(
     When ``derivatives_chain`` is available (Kite active), every entry/exit
     also shadow-tracks (analysis only, never a real order) a directional
     option and a futures+hedge position -- see ``_open_derivatives_shadow``.
+
+    ``precomputed_evaluation``, when given, skips calling ``_evaluate_symbol``
+    (the download-based path) entirely and uses this instead -- the live-
+    ticker path (``live_pipeline.py``) already has a freshly-closed candle
+    from aggregated ticks and has already called
+    ``_evaluate_from_stored_candles`` itself; this lets it reuse every bit of
+    the trade/paper/derivatives/notification logic below unchanged, rather
+    than duplicating it.
     """
-    evaluated = await _evaluate_symbol(
-        symbol, config, provider, engine, candle_repository, engine_state_repository
-    )
+    if precomputed_evaluation is not None:
+        evaluated = precomputed_evaluation
+    else:
+        evaluated = await _evaluate_symbol(
+            symbol, config, provider, engine, candle_repository, engine_state_repository
+        )
     if evaluated is None:
         return
     result, newest_candle = evaluated
