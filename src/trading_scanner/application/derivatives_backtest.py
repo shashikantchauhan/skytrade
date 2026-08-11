@@ -19,10 +19,10 @@ mixes into the forward shadow-tracking win-rate stats
 ``signal_pipeline.py`` accumulates live (``source="live"``).
 
 Same entry rules and PnL math as ``options_shadow.py``/``futures_shadow.py``
-(CALL for BUY, PUT for SELL, futures long/short with an options hedge),
-deliberately not imported from there -- this replays whole already-closed
-trades in one shot rather than reacting to one signal at a time, so the
-two don't share a code path.
+(futures long/short, hedged by an option at the opposite delta), deliberately
+not imported from there -- this replays whole already-closed trades in one
+shot rather than reacting to one signal at a time, so the two don't share a
+code path.
 """
 
 import logging
@@ -91,18 +91,8 @@ async def _backtest_one_trade(
     notes: list[str] = []
     side = trade.side.value  # "BUY" | "SELL"
 
-    # Naked directional option -- no hedge attached, a bought option's risk
-    # is already capped at the premium paid.
-    directional_type = "CE" if side == "BUY" else "PE"
-    directional_note = await _backtest_option(
-        trade.symbol, directional_type, "directional",
-        trade.entry_timestamp, trade.entry_price, trade.exit_timestamp, trade.exit_price,
-        derivatives_chain, options_trade_repository,
-    )
-    if directional_note:
-        notes.append(directional_note)
-
     # Futures position, hedged by an option (~2% OTM, see _HEDGE_OTM_PCT).
+    # No standalone naked-option leg -- dropped after review.
     futures_side = "long" if side == "BUY" else "short"
     future_note = await _backtest_future(
         trade.symbol, futures_side, "primary",

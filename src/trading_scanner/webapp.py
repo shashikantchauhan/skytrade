@@ -480,15 +480,15 @@ def _derivatives_summary_payload(options_trades: list, futures_trades: list) -> 
     """Shared by the live shadow-tracking endpoint and the current-month
     backtest endpoint -- same shape, different ``source`` filter upstream.
 
-    Two independent, unrelated legs per signal (see ``application/
-    signal_pipeline.py``'s ``_open_derivatives_shadow``): a naked
-    directional option (``directional_options``, no hedge -- a bought
-    option's risk is already capped at the premium) and a futures position
-    hedged by an option (``primary_futures`` + ``hedge_options``).
-    ``hedge_futures`` is legacy/always empty going forward -- an earlier
-    version of this feature mistakenly hedged the option leg with a future
-    too; kept here only so any rows already written under that scheme
-    don't silently vanish from the API shape.
+    One leg per signal (see ``application/signal_pipeline.py``'s
+    ``_open_derivatives_shadow``): a futures position hedged by an option
+    at the opposite delta (``primary_futures`` + ``hedge_options``).
+    ``directional_options`` and ``hedge_futures`` are legacy/always empty
+    going forward -- earlier versions of this feature also tracked a naked
+    directional option (dropped after review) and, briefly, hedged that
+    option with a future too (a mistake, reverted). Kept here only so any
+    rows already written under those schemes don't silently vanish from the
+    API shape.
     """
 
     def _options_summary(purpose: str) -> dict:
@@ -941,7 +941,7 @@ _PAGE = """<!doctype html>
   </div>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
       <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
@@ -958,7 +958,7 @@ _PAGE = """<!doctype html>
   <div class="cards" id="backtest-cards"></div>
   <div class="row" style="margin-top: 0.8rem;">
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Options (directional + hedge)</div>
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
       <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
     <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
@@ -1129,7 +1129,6 @@ async function loadKiteStatus() {
 function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
   const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
   document.getElementById(cardsId).innerHTML = `
-    <div class="card"><div class="label">Naked options -- no hedge (${d.directional_options.closed_count} closed, ${fmt(d.directional_options.win_rate)}% win)</div><div class="value">${pnlPill(d.directional_options.total_pnl)}</div></div>
     <div class="card"><div class="label">Futures -- the trade (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
     <div class="card"><div class="label">Hedge option on the future (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
   `;
