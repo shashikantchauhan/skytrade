@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pandas as pd
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import futures_shadow, options_shadow, paper_trading
@@ -166,7 +167,21 @@ async def run_signal_pipeline(
     # is fully independent across symbols and safe to run in parallel.
     paper_account_lock = asyncio.Lock()
 
+    # _select_provider only validates Kite once, at the start of the run --
+    # the token can still go invalid partway through (observed live: a run
+    # validated fine, then every symbol still queued after that point failed
+    # with TokenException, with no alert sent at all, since _select_provider
+    # never saw it). This guard fires the same day-deduped notification the
+    # moment any symbol's download hits that specific error mid-run, so a
+    # mid-run expiry is never silent again. mid_run_notify_lock exists only
+    # to stop N concurrently-failing symbols from sending N Telegram
+    # messages -- the per-day dedup in the notification itself still applies
+    # across separate runs.
+    mid_run_notified = False
+    mid_run_notify_lock = asyncio.Lock()
+
     async def _process_with_limit(symbol: str) -> None:
+        nonlocal mid_run_notified
         async with semaphore:
             try:
                 await _process_symbol(
@@ -186,10 +201,34 @@ async def run_signal_pipeline(
                     options_trade_repository,
                     futures_trade_repository,
                 )
-            except Exception:
+            except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
+                if (
+                    kite_session_repository is not None
+                    and not mid_run_notified
+                    and _is_kite_token_error(error)
+                ):
+                    async with mid_run_notify_lock:
+                        if not mid_run_notified:
+                            mid_run_notified = True
+                            await _notify_kite_expired_once_per_day(
+                                kite_session_repository, notifier
+                            )
 
     await asyncio.gather(*(_process_with_limit(symbol) for symbol in symbols))
+
+
+def _is_kite_token_error(error: BaseException) -> bool:
+    """Walks the exception chain -- ``KiteProvider.get_recent_history``
+    wraps the underlying ``TokenException`` in a ``RuntimeError`` (see
+    ``infrastructure/kite.py``), so a plain ``isinstance`` check on the
+    caught exception alone would miss it."""
+    current: BaseException | None = error
+    while current is not None:
+        if isinstance(current, KiteTokenException):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 async def _select_provider(

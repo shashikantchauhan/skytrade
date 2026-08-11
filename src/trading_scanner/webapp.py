@@ -61,9 +61,9 @@ _SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 app = FastAPI(title="SkyTrade dashboard")
 
-# token -> expiry (unix time). In-memory: fine for a single-process personal
-# tool; a restart just means logging in again.
-_sessions: dict[str, float] = {}
+# token -> {expiry, role, name}. In-memory: fine for a single-process
+# personal tool; a restart just means logging in again.
+_sessions: dict[str, dict] = {}
 
 
 def _dashboard_password() -> str:
@@ -76,11 +76,58 @@ def _dashboard_password() -> str:
     return password
 
 
+def _viewer_credentials() -> dict[str, str]:
+    """Named view-only logins, e.g. for a spouse/friend who should see the
+    dashboard but never touch Kite login or trigger a pipeline run.
+
+    ``TRADING_SCANNER_VIEWER_LOGINS="wife:somepassword,friend:otherpassword"``
+    -- each name gets its own password so access can be revoked individually
+    later without changing the admin password everyone else still uses.
+    """
+    raw = os.getenv("TRADING_SCANNER_VIEWER_LOGINS", "")
+    result: dict[str, str] = {}
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry or ":" not in entry:
+            continue
+        name, password = entry.split(":", 1)
+        if name.strip() and password:
+            result[name.strip()] = password
+    return result
+
+
+def _authenticate(password: str) -> tuple[str, str] | None:
+    """Returns (role, name) on a password match, checking the admin
+    password first, then each named viewer -- None if it matches nothing."""
+    if secrets.compare_digest(password, _dashboard_password()):
+        return "admin", "admin"
+    for name, viewer_password in _viewer_credentials().items():
+        if secrets.compare_digest(password, viewer_password):
+            return "viewer", name
+    return None
+
+
 def _require_session(ptrade_session: str | None = Cookie(default=None)) -> None:
-    """API-route auth: 401 JSON if the session cookie is missing/expired."""
-    expiry = _sessions.get(ptrade_session or "")
-    if expiry is None or expiry < time.time():
+    """API-route auth: 401 JSON if the session cookie is missing/expired.
+    Allows both admin and viewer roles -- use ``_require_admin`` for routes
+    that touch Kite or trigger the pipeline."""
+    session = _sessions.get(ptrade_session or "")
+    if session is None or session["expiry"] < time.time():
         raise HTTPException(status_code=401, detail="Not logged in.")
+
+
+def _require_admin(ptrade_session: str | None = Cookie(default=None)) -> None:
+    """Admin-only routes: Kite login/status, triggering the pipeline or a
+    backtest, and config changes -- a viewer (e.g. a spouse checking in on
+    the numbers) should never be able to touch any of these, both to keep
+    Kite credentials private and because a second person clicking 'Kite
+    login' can stomp the one active session the pipeline depends on (this
+    happened once -- see the commit that added this check)."""
+    session = _sessions.get(ptrade_session or "")
+    if session is None or session["expiry"] < time.time():
+        raise HTTPException(status_code=401, detail="Not logged in.")
+    if session["role"] != "admin":
+        raise HTTPException(status_code=403, detail="Admin only.")
 
 
 def _client():
@@ -135,8 +182,8 @@ def _unrealized_pnl(position: PaperPosition, last_prices: dict[str, float]) -> d
 
 @app.get("/", response_model=None)
 async def index(request: Request) -> HTMLResponse | RedirectResponse:
-    expiry = _sessions.get(request.cookies.get(_SESSION_COOKIE, ""))
-    if expiry is None or expiry < time.time():
+    session = _sessions.get(request.cookies.get(_SESSION_COOKIE, ""))
+    if session is None or session["expiry"] < time.time():
         return RedirectResponse("/login")
     return HTMLResponse(_PAGE)
 
@@ -152,11 +199,13 @@ class LoginRequest(BaseModel):
 
 @app.post("/login")
 async def login(body: LoginRequest) -> JSONResponse:
-    if not secrets.compare_digest(body.password, _dashboard_password()):
+    authenticated = _authenticate(body.password)
+    if authenticated is None:
         raise HTTPException(status_code=401, detail="Wrong password.")
+    role, name = authenticated
     token = secrets.token_urlsafe(32)
-    _sessions[token] = time.time() + _SESSION_TTL_SECONDS
-    response = JSONResponse({"ok": True})
+    _sessions[token] = {"expiry": time.time() + _SESSION_TTL_SECONDS, "role": role, "name": name}
+    response = JSONResponse({"ok": True, "role": role})
     response.set_cookie(
         _SESSION_COOKIE,
         token,
@@ -165,6 +214,18 @@ async def login(body: LoginRequest) -> JSONResponse:
         samesite="lax",
     )
     return response
+
+
+@app.get("/api/me")
+async def me(
+    ptrade_session: str | None = Cookie(default=None), _: None = Depends(_require_session)
+) -> JSONResponse:
+    """Lets the dashboard's own JS know whether to show admin-only controls
+    (Kite login/status, pipeline trigger, backtest trigger, config) --
+    those routes are enforced server-side too via ``_require_admin``, this
+    is just so a viewer's UI doesn't show buttons that would 403."""
+    session = _sessions[ptrade_session]
+    return JSONResponse({"role": session["role"], "name": session["name"]})
 
 
 @app.post("/logout")
@@ -176,7 +237,7 @@ async def logout(ptrade_session: str | None = Cookie(default=None)) -> JSONRespo
 
 
 @app.get("/kite/login")
-async def kite_login(_: None = Depends(_require_session)) -> RedirectResponse:
+async def kite_login(_: None = Depends(_require_admin)) -> RedirectResponse:
     """Send the user to Kite's own login page -- their Zerodha password is
     entered there, never on this server. Requires being logged into this
     dashboard first (so a stranger can't hijack the Kite session)."""
@@ -220,7 +281,7 @@ async def kite_callback(request: Request) -> str:
 
 
 @app.get("/api/kite-status")
-async def kite_status(_: None = Depends(_require_session)) -> JSONResponse:
+async def kite_status(_: None = Depends(_require_admin)) -> JSONResponse:
     config = load_config()
     if not config.kite_api_key:
         return JSONResponse({"configured": False})
@@ -530,7 +591,7 @@ async def derivatives_backtest(
 
 @app.get("/api/margin-benefit")
 async def margin_benefit(
-    symbol: str, _: None = Depends(_require_session)
+    symbol: str, _: None = Depends(_require_admin)
 ) -> JSONResponse:
     """Live margin required for the symbol's open futures position + its
     hedge option vs. holding the future alone, using Kite's own
@@ -589,7 +650,7 @@ class ConfigUpdate(BaseModel):
 
 
 @app.get("/api/config")
-async def get_config(_: None = Depends(_require_session)) -> JSONResponse:
+async def get_config(_: None = Depends(_require_admin)) -> JSONResponse:
     return JSONResponse(
         {
             "capital": str(paper_trading.INITIAL_CAPITAL),
@@ -600,7 +661,7 @@ async def get_config(_: None = Depends(_require_session)) -> JSONResponse:
 
 
 @app.post("/api/config")
-async def update_config(update: ConfigUpdate, _: None = Depends(_require_session)) -> JSONResponse:
+async def update_config(update: ConfigUpdate, _: None = Depends(_require_admin)) -> JSONResponse:
     """Rewrite the relevant lines in .env. Takes effect on the *next* pipeline
     run/dashboard restart -- this process's own already-imported constants
     are not changed live, since paper_trading.py reads them once at import."""
@@ -626,7 +687,7 @@ async def update_config(update: ConfigUpdate, _: None = Depends(_require_session
 
 
 @app.post("/api/trigger")
-async def trigger(_: None = Depends(_require_session)) -> JSONResponse:
+async def trigger(_: None = Depends(_require_admin)) -> JSONResponse:
     """Kick off one manual pipeline run in the background, same command cron uses."""
     _LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     log_file = _LOG_PATH.open("a")
@@ -642,7 +703,7 @@ async def trigger(_: None = Depends(_require_session)) -> JSONResponse:
 
 
 @app.post("/api/trigger-backtest")
-async def trigger_backtest(_: None = Depends(_require_session)) -> JSONResponse:
+async def trigger_backtest(_: None = Depends(_require_admin)) -> JSONResponse:
     """Kick off one manual current-month derivatives backtest in the
     background (see application/derivatives_backtest.py). Requires an
     active Kite session (uses historical data, not live LTP)."""
@@ -818,6 +879,7 @@ _PAGE = """<!doctype html>
   }
   .tab-btn:hover { color: var(--text); background: none; }
   .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .admin-only.viewer-hidden { display: none; }
 </style>
 </head>
 <body>
@@ -833,7 +895,7 @@ _PAGE = """<!doctype html>
   <div class="cards" id="status-cards">Loading...</div>
 </section>
 
-<section>
+<section class="admin-only">
   <div class="row">
     <button class="primary" onclick="trigger()">Run pipeline now</button>
     <span class="msg" id="trigger-msg"></span>
@@ -872,7 +934,7 @@ _PAGE = """<!doctype html>
 <section class="tab-panel" data-tab="derivatives" hidden>
   <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
   <div class="cards" id="derivatives-cards"></div>
-  <div class="panel row" style="margin-top: 0.8rem; align-items: flex-end;">
+  <div class="panel row admin-only" style="margin-top: 0.8rem; align-items: flex-end;">
     <label class="field">Symbol (e.g. RELIANCE.NS)<input id="margin-symbol" placeholder="RELIANCE.NS" /></label>
     <button class="primary" onclick="checkMarginBenefit()">Check live margin benefit</button>
     <span class="msg" id="margin-msg"></span>
@@ -889,7 +951,7 @@ _PAGE = """<!doctype html>
   </div>
 
   <h2 style="margin-top: 1.5rem;">Current-month derivatives backtest <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(replays this month's closed trades against Kite historical data -- expired contracts can't be reached, so only the current month works)</span></h2>
-  <div class="panel row" style="margin-bottom: 0.8rem;">
+  <div class="panel row admin-only" style="margin-bottom: 0.8rem;">
     <button class="primary" onclick="runBacktest()">Run backtest</button>
     <span class="msg" id="backtest-msg"></span>
   </div>
@@ -908,7 +970,7 @@ _PAGE = """<!doctype html>
 
 <section class="tab-panel" data-tab="settings" hidden>
   <h2>Config</h2>
-  <div class="panel row">
+  <div class="panel row admin-only">
     <label class="field">Capital<input id="cfg-capital" /></label>
     <label class="field">Slots<input id="cfg-slots" /></label>
     <label class="field">Min position<input id="cfg-min" /></label>
@@ -1132,9 +1194,28 @@ async function checkMarginBenefit() {
   }
 }
 
+let myRole = null;
+
+async function applyRole() {
+  // Server-side _require_admin is what actually enforces this (see
+  // webapp.py) -- this is purely so a viewer's screen doesn't show buttons
+  // that would just 403, e.g. after a spouse/friend's Kite login attempt
+  // once stomped the one active session the pipeline depends on.
+  const me = await api("/api/me");
+  myRole = me.role;
+  if (myRole !== "admin") {
+    document.querySelectorAll(".admin-only").forEach(el => el.classList.add("viewer-hidden"));
+  }
+}
+
 async function refreshAll() {
+  if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  await Promise.all([loadStatus(), loadPositions(), loadTrades(), loadConfig(), loadLogs(), loadKiteStatus(), loadDerivativesShadow(), loadDerivativesBacktest()]);
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadDerivativesShadow(), loadDerivativesBacktest()];
+  if (myRole === "admin") {
+    loaders.push(loadConfig(), loadKiteStatus());
+  }
+  await Promise.all(loaders);
 }
 refreshAll();
 setInterval(refreshAll, 30000);
