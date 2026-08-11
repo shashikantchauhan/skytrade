@@ -57,7 +57,16 @@ async def run_current_month_backtest(
     calendar month. Returns one human-readable note per simulated leg
     written (best-effort -- a missing contract or missing historical
     premium silently skips that leg, matching the live shadow-tracking
-    functions' own error handling)."""
+    functions' own error handling).
+
+    Clears every previous source='backtest' row first -- this is a full
+    replay, not an incremental update, and without clearing first, running
+    it more than once (or after the shadow-tracking logic changes) just
+    keeps appending on top of stale rows, mixing old and new results with
+    no way to tell them apart.
+    """
+    await options_trade_repository.delete_backtest_trades()
+    await futures_trade_repository.delete_backtest_trades()
     month_start = date.today().replace(day=1)
     trades = await trade_repository.get_trades(None, interval)
     notes: list[str] = []

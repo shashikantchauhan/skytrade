@@ -734,6 +734,15 @@ class TursoOptionsTradeRepository:
             ],
         )
 
+    async def delete_backtest_trades(self) -> None:
+        """Clears every previous source='backtest' row before a fresh
+        backtest run writes new ones -- without this, re-running the
+        backtest (or running it again after logic changes) just appends on
+        top of stale rows forever, silently mixing old and new results
+        under the same label with no way to tell them apart (this is what
+        was actually behind a "derivatives data looks wrong" report)."""
+        await self._client.execute("DELETE FROM options_trades WHERE source = 'backtest'")
+
     async def insert_backtest_trade(self, trade: OptionsShadowTrade) -> None:
         """Inserts one already-closed row directly, source='backtest'.
 
@@ -918,6 +927,11 @@ class TursoFuturesTradeRepository:
                 purpose,
             ],
         )
+
+    async def delete_backtest_trades(self) -> None:
+        """Clears every previous source='backtest' row -- see
+        ``TursoOptionsTradeRepository.delete_backtest_trades``."""
+        await self._client.execute("DELETE FROM futures_trades WHERE source = 'backtest'")
 
     async def insert_backtest_trade(self, trade: FuturesShadowTrade) -> None:
         """Inserts one already-closed row directly, source='backtest' --
