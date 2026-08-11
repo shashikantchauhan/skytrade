@@ -20,8 +20,12 @@ class TelegramNotifier:
     """
 
     def __init__(self, bot_token: str, chat_id: str) -> None:
+        """``chat_id``: one Telegram chat ID, or several comma-separated
+        (e.g. "1152740946,8834658819") to fan the same message out to
+        multiple people -- each person only needs to message the bot once,
+        ever, to get a chat ID; after that they're just another entry here."""
         self._url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-        self._chat_id = chat_id
+        self._chat_ids = [c.strip() for c in chat_id.split(",") if c.strip()]
 
     async def send_signal(self, signal: Signal) -> None:
         message = _format_signal(signal)
@@ -33,13 +37,21 @@ class TelegramNotifier:
         every notification is a trade signal. HTML parse mode so callers can
         bold/italic without hand-escaping every message; plain text still
         renders fine under HTML mode as long as it has no bare ``<``/``&``.
+
+        Sent to every configured chat ID independently -- one recipient's
+        failure (e.g. they blocked the bot) is logged but never blocks
+        delivery to the others.
         """
         async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.post(
-                self._url,
-                json={"chat_id": self._chat_id, "text": message, "parse_mode": "HTML"},
-            )
-            response.raise_for_status()
+            for chat_id in self._chat_ids:
+                try:
+                    response = await client.post(
+                        self._url,
+                        json={"chat_id": chat_id, "text": message, "parse_mode": "HTML"},
+                    )
+                    response.raise_for_status()
+                except Exception:
+                    logger.warning("Telegram send failed for chat_id=%s", chat_id, exc_info=True)
 
 
 def _format_signal(signal: Signal) -> str:
