@@ -163,3 +163,31 @@ class FuturesShadowTrade:
     pnl_percent: Decimal | None = None
     status: str = "open"  # "open" | "closed"
     source: str = "live"  # "live" (forward shadow-tracking) | "backtest" (current-month replay)
+
+
+@dataclass(frozen=True, slots=True)
+class LiveOrderLeg:
+    """One real order placed on Zerodha -- see ``application/
+    live_execution.py`` for the full basket-entry/exit flow this is a
+    record of. Distinct from ``OptionsShadowTrade``/``FuturesShadowTrade``
+    (which are always hypothetical, ``source`` never real) -- every row
+    here corresponds to an actual ``place_order`` call and a real fill (or
+    a real rejection/cancellation).
+
+    ``basket_id`` groups the legs of one entry/exit together (e.g. the
+    option leg and the futures leg of one hedged-futures basket) so a
+    partial failure -- one leg filled, the other didn't -- is queryable as
+    a single unit instead of two unrelated rows.
+    """
+
+    basket_id: str
+    symbol: str
+    purpose: str  # "primary" (the futures leg) | "hedge" (the option leg)
+    tradingsymbol: str
+    transaction_type: str  # "BUY" | "SELL"
+    quantity: int
+    order_id: str
+    status: str  # Kite's own order status: "COMPLETE" | "REJECTED" | "CANCELLED" | ...
+    placed_at: datetime
+    average_price: Decimal | None = None
+    rejection_reason: str | None = None

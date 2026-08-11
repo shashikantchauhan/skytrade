@@ -10,7 +10,12 @@ from kiteconnect import KiteConnect
 from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
-from trading_scanner.application import futures_shadow, options_shadow, paper_trading
+from trading_scanner.application import (
+    futures_shadow,
+    live_execution,
+    options_shadow,
+    paper_trading,
+)
 from trading_scanner.application.fast_predict import (
     ExitState,
     FastPredictResult,
@@ -32,11 +37,14 @@ from trading_scanner.domain.ports import (
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
     KiteInstrumentMap,
+    KiteOrderExecutor,
     KiteProvider,
 )
+from trading_scanner.infrastructure.telegram import LoggingNotifier
 from trading_scanner.infrastructure.turso import (
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
+    TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
 )
 from trading_scanner.infrastructure.yahoo import YahooProvider
@@ -113,6 +121,7 @@ async def run_signal_pipeline(
     kite_session_repository: TursoKiteSessionRepository | None = None,
     options_trade_repository: TursoOptionsTradeRepository | None = None,
     futures_trade_repository: TursoFuturesTradeRepository | None = None,
+    live_order_repository: TursoLiveOrderRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -146,6 +155,12 @@ async def run_signal_pipeline(
     logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
     derivatives_chain = KiteDerivativesChain(kite) if kite is not None else None
+    # Real order placement, if the kill switch is on -- see config/
+    # settings.py and application/live_execution.py. None whenever kite is
+    # None (no valid session, e.g. Yahoo fallback) since there's nothing to
+    # place orders through; _open_derivatives_shadow/_close_derivatives_
+    # shadow already no-op on a None order_executor regardless of the flag.
+    order_executor = KiteOrderExecutor(kite) if kite is not None else None
 
     index_result = None
     if config.index_symbol:
@@ -200,6 +215,9 @@ async def run_signal_pipeline(
                     derivatives_chain,
                     options_trade_repository,
                     futures_trade_repository,
+                    None,
+                    order_executor,
+                    live_order_repository,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -420,6 +438,8 @@ async def _process_symbol(
     options_trade_repository: TursoOptionsTradeRepository | None = None,
     futures_trade_repository: TursoFuturesTradeRepository | None = None,
     precomputed_evaluation: tuple[FastPredictResult, Candle] | None = None,
+    order_executor: KiteOrderExecutor | None = None,
+    live_order_repository: TursoLiveOrderRepository | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -482,6 +502,7 @@ async def _process_symbol(
         derivatives_note = await _open_derivatives_shadow(
             symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
             derivatives_chain, options_trade_repository, futures_trade_repository,
+            config, order_executor, live_order_repository, notifier,
         )
     if result.end_long:
         # Notification failures (e.g. a Telegram network timeout) must never
@@ -515,6 +536,7 @@ async def _process_symbol(
         await _close_derivatives_shadow(
             symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
             derivatives_chain, options_trade_repository, futures_trade_repository,
+            config, order_executor, live_order_repository, notifier,
         )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
@@ -532,6 +554,7 @@ async def _process_symbol(
         derivatives_note = await _open_derivatives_shadow(
             symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
             derivatives_chain, options_trade_repository, futures_trade_repository,
+            config, order_executor, live_order_repository, notifier,
         )
     if result.end_short:
         # See the end_long branch above for why this is wrapped -- a
@@ -552,6 +575,7 @@ async def _process_symbol(
         await _close_derivatives_shadow(
             symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
             derivatives_chain, options_trade_repository, futures_trade_repository,
+            config, order_executor, live_order_repository, notifier,
         )
 
     if result.signal not in ("BUY", "SELL"):
@@ -715,14 +739,27 @@ async def _open_derivatives_shadow(
     derivatives_chain: KiteDerivativesChain | None,
     options_trade_repository: TursoOptionsTradeRepository | None,
     futures_trade_repository: TursoFuturesTradeRepository | None,
+    config: AppConfig | None = None,
+    order_executor: KiteOrderExecutor | None = None,
+    live_order_repository: TursoLiveOrderRepository | None = None,
+    notifier: Notifier | None = None,
 ) -> str | None:
-    """Best-effort: one leg per signal, never a real order -- a futures
-    position (long for BUY, short for SELL, carries real open-ended margin
-    risk) hedged by an option at the opposite delta (PUT hedging a long
-    future, CALL hedging a short future), targeting ~2% OTM rather than ATM
-    (see _HEDGE_OTM_PCT's docstring for why). No standalone naked-option
-    leg -- dropped after review; if you want a pure directional option bet
-    tracked again, that's a separate decision, not implied by this one.
+    """Best-effort: one leg per signal, never a real order by default -- a
+    futures position (long for BUY, short for SELL, carries real open-ended
+    margin risk) hedged by an option at the opposite delta (PUT hedging a
+    long future, CALL hedging a short future), targeting ~2% OTM rather
+    than ATM (see _HEDGE_OTM_PCT's docstring for why). No standalone
+    naked-option leg -- dropped after review; if you want a pure
+    directional option bet tracked again, that's a separate decision, not
+    implied by this one.
+
+    When ``config.live_trading_enabled`` is set (see ``config/
+    settings.py``'s kill switch) and ``symbol`` is on the allowlist, this
+    *additionally* places a real basket via ``live_execution.
+    execute_basket_entry`` -- see that module's docstring for the
+    option-first-then-futures sequencing and rollback behavior. The shadow
+    trade above always runs regardless, so the dashboard's analysis view
+    stays consistent whether or not real money followed it.
 
     Any failure here is a side observation, not a dependency of the main
     signal/paper-trading flow, so this never raises into the caller.
@@ -760,6 +797,18 @@ async def _open_derivatives_shadow(
             "Derivatives shadow open failed for %s (%s) -- continuing without it.",
             symbol, side, exc_info=True,
         )
+    if config is not None and order_executor is not None and live_order_repository is not None:
+        try:
+            await live_execution.execute_basket_entry(
+                symbol, side, hedge_option_type, hedge_strike_target,
+                config, derivatives_chain, order_executor, live_order_repository,
+                notifier if notifier is not None else LoggingNotifier(),
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Live order execution raised for %s (%s) -- shadow tracking above still stands.",
+                symbol, side,
+            )
     return "; ".join(notes) if notes else None
 
 
@@ -771,10 +820,16 @@ async def _close_derivatives_shadow(
     derivatives_chain: KiteDerivativesChain | None,
     options_trade_repository: TursoOptionsTradeRepository | None,
     futures_trade_repository: TursoFuturesTradeRepository | None,
+    config: AppConfig | None = None,
+    order_executor: KiteOrderExecutor | None = None,
+    live_order_repository: TursoLiveOrderRepository | None = None,
+    notifier: Notifier | None = None,
 ) -> None:
     """Best-effort close of whatever ``_open_derivatives_shadow`` opened --
-    see that function's docstring. Logged, not notified via Telegram --
-    these are analysis-only positions, see the module docstring."""
+    see that function's docstring, including the real-order gate. Shadow
+    close is logged, not notified via Telegram (analysis-only, see the
+    module docstring); a real close always notifies regardless, since it's
+    real money moving."""
     if derivatives_chain is None:
         return
     hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
@@ -799,6 +854,17 @@ async def _close_derivatives_shadow(
             "Derivatives shadow close failed for %s (%s) -- continuing without it.",
             symbol, side, exc_info=True,
         )
+    if config is not None and order_executor is not None and live_order_repository is not None:
+        try:
+            await live_execution.execute_basket_exit(
+                symbol, config, order_executor, live_order_repository,
+                notifier if notifier is not None else LoggingNotifier(),
+            )
+        except Exception:
+            logger.exception(
+                "Live order exit execution raised for %s (%s) -- shadow close above still stands.",
+                symbol, side,
+            )
 
 
 async def _win_rate_summary(

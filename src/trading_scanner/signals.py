@@ -13,6 +13,7 @@ from trading_scanner.infrastructure.turso import (
     TursoEngineStateRepository,
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
+    TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
     TursoSignalRepository,
@@ -48,6 +49,7 @@ async def _run(config: AppConfig) -> None:
         kite_session_repository = TursoKiteSessionRepository(client)
         options_trade_repository = TursoOptionsTradeRepository(client)
         futures_trade_repository = TursoFuturesTradeRepository(client)
+        live_order_repository = TursoLiveOrderRepository(client)
         await candle_repository.ensure_schema()
         await signal_repository.ensure_schema()
         await engine_state_repository.ensure_schema()
@@ -56,6 +58,7 @@ async def _run(config: AppConfig) -> None:
         await kite_session_repository.ensure_schema()
         await options_trade_repository.ensure_schema()
         await futures_trade_repository.ensure_schema()
+        await live_order_repository.ensure_schema()
 
         notifier = _build_notifier(config)
         await run_signal_pipeline(
@@ -70,6 +73,7 @@ async def _run(config: AppConfig) -> None:
             kite_session_repository,
             options_trade_repository,
             futures_trade_repository,
+            live_order_repository,
         )
     finally:
         await client.close()

@@ -147,6 +147,9 @@ def _config() -> AppConfig:
         index_symbol=None,
         kite_api_key=None,
         kite_api_secret=None,
+        live_trading_enabled=False,
+        live_trading_symbols=frozenset(),
+        live_trading_max_lots=1,
     )
 
 
@@ -1103,6 +1106,9 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         index_symbol="^NSEI",
         kite_api_key=None,
         kite_api_secret=None,
+        live_trading_enabled=False,
+        live_trading_symbols=frozenset(),
+        live_trading_max_lots=1,
     )
     candle_repository = FakeCandleRepository()
     signal_repository = FakeSignalRepository()

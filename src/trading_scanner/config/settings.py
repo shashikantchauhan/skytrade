@@ -24,6 +24,14 @@ class AppConfig:
     index_symbol: str | None
     kite_api_key: str | None
     kite_api_secret: str | None
+    # The kill switch for real order execution -- see application/
+    # live_execution.py. Defaults fully OFF; every one of these must be
+    # explicitly set to place a single real order. live_trading_symbols
+    # empty means nothing is allowed regardless of live_trading_enabled --
+    # there is no "all symbols" wildcard, on purpose.
+    live_trading_enabled: bool
+    live_trading_symbols: frozenset[str]
+    live_trading_max_lots: int
 
 
 def load_config() -> AppConfig:
@@ -46,6 +54,13 @@ def load_config() -> AppConfig:
         index_symbol=os.getenv("TRADING_SCANNER_INDEX_SYMBOL", "^NSEI") or None,
         kite_api_key=os.getenv("TRADING_SCANNER_KITE_API_KEY"),
         kite_api_secret=os.getenv("TRADING_SCANNER_KITE_API_SECRET"),
+        live_trading_enabled=_bool_flag("TRADING_SCANNER_LIVE_TRADING_ENABLED", default=False),
+        live_trading_symbols=frozenset(
+            s.strip()
+            for s in os.getenv("TRADING_SCANNER_LIVE_TRADING_SYMBOLS", "").split(",")
+            if s.strip()
+        ),
+        live_trading_max_lots=_positive_int("TRADING_SCANNER_LIVE_TRADING_MAX_LOTS", 1),
     )
 
 
@@ -59,6 +74,17 @@ def _positive_int(name: str, default: int) -> int:
     if parsed <= 0:
         raise ValueError(f"{name} must be a positive integer; got {parsed}.")
     return parsed
+
+
+def _bool_flag(name: str, default: bool) -> bool:
+    """Explicit opt-in parsing for the live-trading kill switch -- only the
+    exact string "true" (case-insensitive) turns it on; anything else
+    (unset, "false", a typo) stays off. No implicit truthiness on a
+    setting this consequential."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() == "true"
 
 
 def _logging_level(value: str) -> int:

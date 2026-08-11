@@ -14,6 +14,7 @@ touches this server; only the resulting access token is stored (in Turso,
 see ``TursoKiteSessionRepository``).
 """
 
+import time
 from datetime import date, datetime, timedelta
 
 import pandas as pd
@@ -357,6 +358,63 @@ class KiteDerivativesChain:
         target = when.timestamp()
         nearest = min(candles, key=lambda candle: abs(candle["date"].timestamp() - target))
         return nearest["close"]
+
+
+class KiteOrderExecutor:
+    """Places and polls *real* orders on Zerodha -- deliberately a separate
+    class from ``KiteDerivativesChain`` (which is analysis-only per its own
+    docstring: "never a real order"). Nothing in this class is wired into
+    the signal pipeline unless ``AppConfig.live_trading_enabled`` is set --
+    see ``application/live_execution.py`` for the gated basket-entry/exit
+    flow that actually calls this.
+    """
+
+    def __init__(self, kite: KiteConnect) -> None:
+        self._kite = kite
+
+    def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
+        """Places a real NFO market order, product NRML (carries positions
+        overnight -- appropriate for a swing strategy, not an intraday
+        one). Returns Kite's order_id; does not wait for a fill -- see
+        ``poll_order_status``/``wait_for_fill`` for that."""
+        return self._kite.place_order(
+            variety=self._kite.VARIETY_REGULAR,
+            exchange="NFO",
+            tradingsymbol=tradingsymbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type=self._kite.ORDER_TYPE_MARKET,
+            product=self._kite.PRODUCT_NRML,
+        )
+
+    def order_status(self, order_id: str) -> dict:
+        """The most recent status entry for ``order_id`` -- Kite's
+        ``order_history`` returns every state transition the order has gone
+        through (OPEN -> COMPLETE, or OPEN -> REJECTED, etc.); the last
+        entry is always the current state."""
+        history = self._kite.order_history(order_id)
+        return history[-1]
+
+    def wait_for_fill(self, order_id: str, timeout_seconds: float, poll_interval: float = 1.0):
+        """Blocks (synchronously -- callers run this via ``asyncio.
+        to_thread``) polling ``order_status`` until it reaches a terminal
+        state (COMPLETE/REJECTED/CANCELLED) or ``timeout_seconds`` elapses.
+
+        Returns the final status dict. On timeout, returns the last-seen
+        status as-is (still likely OPEN/TRIGGER PENDING) rather than
+        raising -- the caller decides what "still pending after our
+        timeout" means for basket sequencing (see ``live_execution.py``),
+        this function's only job is to stop polling and hand back what it
+        last saw.
+        """
+        deadline = time.monotonic() + timeout_seconds
+        status = self.order_status(order_id)
+        while status["status"] not in ("COMPLETE", "REJECTED", "CANCELLED"):
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(poll_interval)
+            status = self.order_status(order_id)
+        return status
 
 
 def build_login_url(api_key: str) -> str:

@@ -41,7 +41,11 @@ from trading_scanner.application.signal_pipeline import (
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
 from trading_scanner.domain.models import Candle
-from trading_scanner.infrastructure.kite import KiteDerivativesChain, KiteInstrumentMap
+from trading_scanner.infrastructure.kite import (
+    KiteDerivativesChain,
+    KiteInstrumentMap,
+    KiteOrderExecutor,
+)
 from trading_scanner.infrastructure.kite_ticker import (
     CandleAggregator,
     bucket_start,
@@ -53,6 +57,7 @@ from trading_scanner.infrastructure.turso import (
     TursoEngineStateRepository,
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
+    TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
     TursoSignalRepository,
@@ -121,6 +126,7 @@ class LiveTickerPipeline:
             "kite_session": TursoKiteSessionRepository(self._client),
             "options_trade": TursoOptionsTradeRepository(self._client),
             "futures_trade": TursoFuturesTradeRepository(self._client),
+            "live_order": TursoLiveOrderRepository(self._client),
         }
         for repo in self._repos.values():
             await repo.ensure_schema()
@@ -251,6 +257,7 @@ class LiveTickerPipeline:
         kite = KiteConnect(api_key=self._config.kite_api_key)
         kite.set_access_token(self._access_token)
         derivatives_chain = KiteDerivativesChain(kite)
+        order_executor = KiteOrderExecutor(kite)
 
         index_result = None
         if self._config.index_symbol and self._config.index_symbol in candles:
@@ -286,6 +293,8 @@ class LiveTickerPipeline:
                         derivatives_chain,
                         self._repos["options_trade"], self._repos["futures_trade"],
                         precomputed_evaluation=evaluated,
+                        order_executor=order_executor,
+                        live_order_repository=self._repos["live_order"],
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)
