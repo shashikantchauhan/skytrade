@@ -55,6 +55,13 @@ class SimulationResult:
     trades_skipped_ineligible: int = 0
     trades_skipped_no_capital: int = 0
     final_cash: Decimal = Decimal("0")
+    # Capital still locked in positions open at the end of the dataset --
+    # never returned to final_cash since they never close within this
+    # history, but it is still real equity, not lost money. Needed because
+    # initial_capital + total_pnl_amount alone silently drops it (it only
+    # accounts for *closed* trades), which would misstate final_equity by
+    # exactly this amount.
+    final_open_capital: Decimal = Decimal("0")
     total_pnl_amount: Decimal = Decimal("0")
     wins: int = 0
     losses: int = 0
@@ -72,7 +79,7 @@ class SimulationResult:
 
     @property
     def final_equity(self) -> Decimal:
-        return self.config.initial_capital + self.total_pnl_amount
+        return self.final_cash + self.final_open_capital
 
 
 @dataclass(slots=True)
@@ -204,4 +211,7 @@ def simulate(trades: Sequence[Trade], config: SimulationConfig) -> SimulationRes
                 result.trades_skipped_no_capital += 1
 
     result.final_cash = cash
+    result.final_open_capital = sum(
+        (position.capital_allocated for position in open_positions.values()), start=Decimal("0")
+    )
     return result

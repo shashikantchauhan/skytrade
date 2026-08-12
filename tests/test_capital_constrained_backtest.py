@@ -25,6 +25,29 @@ def _track_record(symbol, count=5, win=True):
     return [_closed_trade(symbol, day, win=win) for day in range(1, count + 1)]
 
 
+def test_final_equity_counts_capital_still_locked_in_an_open_position():
+    """A position still open at the end of the dataset never returns its
+    capital to final_cash (it never closes) -- final_equity must still
+    count that capital as real equity, not silently drop it."""
+    history = _track_record("GOOD")
+    still_open_entry = Trade(
+        symbol="GOOD", side=SignalSide.BUY, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("100"), prediction_at_entry=5, is_early_signal_flip=False,
+        exit_timestamp=None, exit_price=None, status="open",
+    )
+    config = SimulationConfig(
+        initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
+    )
+    result = simulate([*history, still_open_entry], config)
+
+    assert result.trades_taken == 1
+    # position_size = max(800000/10, 75000) = max(80000, 75000) = 80000.
+    assert result.final_open_capital == Decimal("80000")
+    # No realized pnl yet (nothing closed) -- equity is exactly capital in,
+    # neither gained nor lost, not silently short by the open position's stake.
+    assert result.final_equity == config.initial_capital
+
+
 def test_ineligible_symbol_with_no_track_record_is_skipped():
     trade = Trade(
         symbol="NEW", side=SignalSide.BUY, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
