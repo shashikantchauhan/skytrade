@@ -110,6 +110,12 @@ async def _store_trade(
             entry_price=Decimal(str(pine_trade.entry_price)),
             prediction_at_entry=pine_trade.prediction_at_entry,
             is_early_signal_flip=pine_trade.is_early_signal_flip,
+            adx_at_entry=pine_trade.adx_at_entry,
+            regime_normalized_at_entry=pine_trade.regime_normalized_at_entry,
+            volatility_margin_at_entry=pine_trade.volatility_margin_at_entry,
+            volatility_filter_passed=pine_trade.volatility_filter_passed,
+            regime_filter_passed=pine_trade.regime_filter_passed,
+            adx_filter_passed=pine_trade.adx_filter_passed,
         ),
     )
     if pine_trade.status == "closed":

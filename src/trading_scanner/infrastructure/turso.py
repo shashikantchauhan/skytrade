@@ -69,7 +69,13 @@ CREATE TABLE IF NOT EXISTS trades (
     exit_timestamp TEXT,
     exit_price REAL,
     pnl_percent REAL,
-    status TEXT NOT NULL DEFAULT 'open'
+    status TEXT NOT NULL DEFAULT 'open',
+    adx_at_entry REAL,
+    regime_normalized_at_entry REAL,
+    volatility_margin_at_entry REAL,
+    volatility_filter_passed INTEGER,
+    regime_filter_passed INTEGER,
+    adx_filter_passed INTEGER
 )
 """
 
@@ -368,16 +374,27 @@ class TursoTradeRepository:
         self._client = client
 
     async def ensure_schema(self) -> None:
-        """Create the trades table if it does not already exist."""
+        """Create the trades table if it does not already exist, and migrate it forward."""
         await self._client.execute(_CREATE_TRADES_TABLE)
+        for column, definition in (
+            ("adx_at_entry", "REAL"),
+            ("regime_normalized_at_entry", "REAL"),
+            ("volatility_margin_at_entry", "REAL"),
+            ("volatility_filter_passed", "INTEGER"),
+            ("regime_filter_passed", "INTEGER"),
+            ("adx_filter_passed", "INTEGER"),
+        ):
+            await _add_column_if_missing(self._client, "trades", column, definition)
 
     async def open_trade(self, interval: str, trade: Trade) -> None:
         await self._client.execute(
             """
             INSERT INTO trades
                 (symbol, interval, side, entry_timestamp, entry_price,
-                 prediction_at_entry, is_early_signal_flip, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, 'open')
+                 prediction_at_entry, is_early_signal_flip, status,
+                 adx_at_entry, regime_normalized_at_entry, volatility_margin_at_entry,
+                 volatility_filter_passed, regime_filter_passed, adx_filter_passed)
+            VALUES (?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, ?, ?)
             """,
             [
                 trade.symbol,
@@ -387,6 +404,16 @@ class TursoTradeRepository:
                 float(trade.entry_price),
                 trade.prediction_at_entry,
                 int(trade.is_early_signal_flip),
+                trade.adx_at_entry,
+                trade.regime_normalized_at_entry,
+                trade.volatility_margin_at_entry,
+                (
+                    None
+                    if trade.volatility_filter_passed is None
+                    else int(trade.volatility_filter_passed)
+                ),
+                None if trade.regime_filter_passed is None else int(trade.regime_filter_passed),
+                None if trade.adx_filter_passed is None else int(trade.adx_filter_passed),
             ],
         )
 
@@ -447,7 +474,9 @@ class TursoTradeRepository:
     async def get_trades(self, symbol: str | None, interval: str) -> Sequence[Trade]:
         query = """
             SELECT symbol, side, entry_timestamp, entry_price, prediction_at_entry,
-                   is_early_signal_flip, exit_timestamp, exit_price, pnl_percent, status
+                   is_early_signal_flip, exit_timestamp, exit_price, pnl_percent, status,
+                   adx_at_entry, regime_normalized_at_entry, volatility_margin_at_entry,
+                   volatility_filter_passed, regime_filter_passed, adx_filter_passed
             FROM trades WHERE interval = ?
         """
         parameters = [interval]
@@ -468,6 +497,12 @@ class TursoTradeRepository:
                 exit_price=Decimal(str(row[7])) if row[7] is not None else None,
                 pnl_percent=Decimal(str(row[8])) if row[8] is not None else None,
                 status=row[9],
+                adx_at_entry=row[10],
+                regime_normalized_at_entry=row[11],
+                volatility_margin_at_entry=row[12],
+                volatility_filter_passed=None if row[13] is None else bool(row[13]),
+                regime_filter_passed=None if row[14] is None else bool(row[14]),
+                adx_filter_passed=None if row[15] is None else bool(row[15]),
             )
             for row in result.rows
         ]

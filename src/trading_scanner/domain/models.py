@@ -63,6 +63,15 @@ class Trade:
     exit_price: Decimal | None = None
     pnl_percent: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+    # Feature snapshot at entry, for training a future ranking/meta-labeling
+    # model (see application/backtest.py) -- all optional so existing rows
+    # (and any caller not yet passing them) remain valid.
+    adx_at_entry: float | None = None
+    regime_normalized_at_entry: float | None = None
+    volatility_margin_at_entry: float | None = None
+    volatility_filter_passed: bool | None = None
+    regime_filter_passed: bool | None = None
+    adx_filter_passed: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

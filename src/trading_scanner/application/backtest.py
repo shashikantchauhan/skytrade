@@ -33,9 +33,17 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC
 
+import numpy as np
 import pandas as pd
 
-from trading_scanner.alpha_engine import AlphaEngine
+from trading_scanner.alpha_engine import (
+    AlphaEngine,
+    _atr,
+    _ema,
+    _filter_adx,
+    _filter_volatility,
+    _regime_filter,
+)
 from trading_scanner.domain.models import Candle
 from trading_scanner.validation.runner import _changed, _signal_state
 
@@ -52,6 +60,17 @@ class HistoricalEvent:
     end_long: bool
     end_short: bool
     is_early_signal_flip: bool
+    # Feature/filter snapshot for this bar -- for training a future
+    # ranking/meta-labeling model (see NOTES.md Phase 2). These are already
+    # computed by AlphaEngine's vectorized filter/feature pass in
+    # ``compute_historical_events``; this just keeps them instead of
+    # discarding them per bar.
+    adx: float
+    regime_normalized: float
+    volatility_margin: float
+    volatility_filter_passed: bool
+    regime_filter_passed: bool
+    adx_filter_passed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +85,12 @@ class PineTrade:
     exit_timestamp: object | None
     exit_price: float | None
     status: str  # "open" | "closed"
+    adx_at_entry: float
+    regime_normalized_at_entry: float
+    volatility_margin_at_entry: float
+    volatility_filter_passed: bool
+    regime_filter_passed: bool
+    adx_filter_passed: bool
 
 
 def compute_historical_events(
@@ -95,6 +120,23 @@ def compute_historical_events(
     # not the close (its default, useWorstCase=false).
     market_price = (high + low + open_ + open_) / 4.0
 
+    # Individual filter states and the continuous values behind two of them
+    # -- `_calculate_filters` above already ANDs these into one bool per bar
+    # for live trading, which is all the live path needs. For training data
+    # we want each filter's own pass/fail plus, for regime and volatility,
+    # the underlying margin (not just the threshold crossing). Calling the
+    # same filter functions again here is cheap (one more vectorized pass)
+    # and does not change anything about the live signal.
+    ohlc4 = (open_ + high + low + close) / 4.0
+    volatility_passed = _filter_volatility(high, low, close, 1, 10, engine.use_volatility_filter)
+    regime_passed = _regime_filter(
+        ohlc4, high, low, engine.regime_threshold, engine.use_regime_filter
+    )
+    adx_passed = _filter_adx(source, high, low, 14, engine.adx_threshold, engine.use_adx_filter)
+    adx_value = features[3]  # `_n_adx`, already computed for the model's own features
+    regime_normalized = _regime_normalized(ohlc4, high, low)
+    volatility_margin = _volatility_margin(high, low, close)
+
     timestamps = data.index
     return [
         HistoricalEvent(
@@ -106,9 +148,53 @@ def compute_historical_events(
             end_long=bool(events["end_long"][bar]),
             end_short=bool(events["end_short"][bar]),
             is_early_signal_flip=_is_early_signal_flip(changed, bar),
+            adx=float(adx_value[bar]),
+            regime_normalized=float(regime_normalized[bar]),
+            volatility_margin=float(volatility_margin[bar]),
+            volatility_filter_passed=bool(volatility_passed[bar]),
+            regime_filter_passed=bool(regime_passed[bar]),
+            adx_filter_passed=bool(adx_passed[bar]),
         )
         for bar in range(len(data))
     ]
+
+
+def _regime_normalized(source: np.ndarray, high: np.ndarray, low: np.ndarray) -> np.ndarray:
+    """The continuous KLMF-slope value ``_regime_filter`` thresholds, kept for training data.
+
+    Same formula as ``alpha_engine._regime_filter``, just returning the
+    normalized value instead of collapsing it into a pass/fail bool --
+    ``alpha_engine.py`` itself is untouched.
+    """
+    value1 = np.full(len(source), np.nan)
+    value2 = np.full(len(source), np.nan)
+    klmf = np.full(len(source), np.nan)
+    for index in range(len(source)):
+        old_value1 = value1[index - 1] if index else 0.0
+        old_value2 = value2[index - 1] if index else 0.0
+        old_klmf = klmf[index - 1] if index else 0.0
+        delta = source[index] - source[index - 1] if index else np.nan
+        value1[index] = 0.2 * delta + 0.8 * (0.0 if np.isnan(old_value1) else old_value1)
+        value2[index] = 0.1 * (high[index] - low[index]) + 0.8 * (
+            0.0 if np.isnan(old_value2) else old_value2
+        )
+        omega = abs(value1[index] / value2[index])
+        alpha = (-(omega**2) + np.sqrt(omega**4 + 16.0 * omega**2)) / 8.0
+        klmf[index] = alpha * source[index] + (1.0 - alpha) * (
+            0.0 if np.isnan(old_klmf) else old_klmf
+        )
+    slope = np.abs(klmf - np.concatenate(([np.nan], klmf[:-1])))
+    average = _ema(slope, 200)
+    return (slope - average) / average
+
+
+def _volatility_margin(high: np.ndarray, low: np.ndarray, close: np.ndarray) -> np.ndarray:
+    """How far the short-lookback ATR clears the long-lookback ATR.
+
+    ``_filter_volatility`` only reports whether ``atr(1) > atr(10)``; this
+    keeps the gap itself as a continuous training feature.
+    """
+    return _atr(high, low, close, 1) - _atr(high, low, close, 10)
 
 
 def replay_pine_backtest(events: Sequence[HistoricalEvent]) -> list[PineTrade]:
@@ -127,24 +213,12 @@ def replay_pine_backtest(events: Sequence[HistoricalEvent]) -> list[PineTrade]:
 
     for event in events:
         if event.start_long:
-            current = {
-                "side": "buy",
-                "entry_timestamp": event.timestamp,
-                "entry_price": event.market_price,
-                "prediction_at_entry": event.prediction,
-                "is_early_signal_flip": event.is_early_signal_flip,
-            }
+            current = _open_position("buy", event)
         if event.end_long and current is not None and current["side"] == "buy":
             trades.append(_close_trade(current, event))
             current = None
         if event.start_short:
-            current = {
-                "side": "sell",
-                "entry_timestamp": event.timestamp,
-                "entry_price": event.market_price,
-                "prediction_at_entry": event.prediction,
-                "is_early_signal_flip": event.is_early_signal_flip,
-            }
+            current = _open_position("sell", event)
         if event.end_short and current is not None and current["side"] == "sell":
             trades.append(_close_trade(current, event))
             current = None
@@ -160,9 +234,32 @@ def replay_pine_backtest(events: Sequence[HistoricalEvent]) -> list[PineTrade]:
                 exit_timestamp=None,
                 exit_price=None,
                 status="open",
+                adx_at_entry=current["adx_at_entry"],
+                regime_normalized_at_entry=current["regime_normalized_at_entry"],
+                volatility_margin_at_entry=current["volatility_margin_at_entry"],
+                volatility_filter_passed=current["volatility_filter_passed"],
+                regime_filter_passed=current["regime_filter_passed"],
+                adx_filter_passed=current["adx_filter_passed"],
             )
         )
     return trades
+
+
+def _open_position(side: str, event: HistoricalEvent) -> dict[str, object]:
+    """Snapshot an entry event's price/prediction plus its feature state."""
+    return {
+        "side": side,
+        "entry_timestamp": event.timestamp,
+        "entry_price": event.market_price,
+        "prediction_at_entry": event.prediction,
+        "is_early_signal_flip": event.is_early_signal_flip,
+        "adx_at_entry": event.adx,
+        "regime_normalized_at_entry": event.regime_normalized,
+        "volatility_margin_at_entry": event.volatility_margin,
+        "volatility_filter_passed": event.volatility_filter_passed,
+        "regime_filter_passed": event.regime_filter_passed,
+        "adx_filter_passed": event.adx_filter_passed,
+    }
 
 
 def _close_trade(current: dict[str, object], exit_event: HistoricalEvent) -> PineTrade:
@@ -176,6 +273,12 @@ def _close_trade(current: dict[str, object], exit_event: HistoricalEvent) -> Pin
         exit_timestamp=exit_event.timestamp,
         exit_price=exit_event.market_price,
         status="closed",
+        adx_at_entry=current["adx_at_entry"],
+        regime_normalized_at_entry=current["regime_normalized_at_entry"],
+        volatility_margin_at_entry=current["volatility_margin_at_entry"],
+        volatility_filter_passed=current["volatility_filter_passed"],
+        regime_filter_passed=current["regime_filter_passed"],
+        adx_filter_passed=current["adx_filter_passed"],
     )
 
 
