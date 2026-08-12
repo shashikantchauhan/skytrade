@@ -933,8 +933,16 @@ async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypat
     # interleaved.
     assert total_allocated <= starting_cash
     assert len(paper_account_repository.opened) == 2
+    # Positions are now opened in ranked order (see application/ranking.py),
+    # not first-come-first-served -- once capital runs out, everything after
+    # the first exhausted slot is tagged "ranked below capacity" rather than
+    # the plain no-capital message, which only the very first exhausted
+    # candidate (if any) would ever see.
     skipped_count = sum(
-        1 for signal in notifier.sent if "SKIPPED (no capital available)" in signal.rationale
+        1
+        for signal in notifier.sent
+        if "SKIPPED (no capital available)" in signal.rationale
+        or "SKIPPED (ranked below capacity" in signal.rationale
     )
     assert skipped_count == len(symbols) - 2
 

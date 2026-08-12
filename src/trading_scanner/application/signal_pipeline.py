@@ -23,6 +23,7 @@ from trading_scanner.application.fast_predict import (
     bootstrap_queue_state,
     evaluate_latest_bar,
 )
+from trading_scanner.application.ranking import RankedCandidate, rank_candidates
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
 from trading_scanner.domain.ports import (
@@ -195,8 +196,81 @@ async def run_signal_pipeline(
     mid_run_notified = False
     mid_run_notify_lock = asyncio.Lock()
 
-    async def _process_with_limit(symbol: str) -> None:
+    async def _notify_mid_run_kite_expiry_once(error: BaseException) -> None:
         nonlocal mid_run_notified
+        if kite_session_repository is not None and not mid_run_notified and _is_kite_token_error(
+            error
+        ):
+            async with mid_run_notify_lock:
+                if not mid_run_notified:
+                    mid_run_notified = True
+                    await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
+
+    # Ranking (see application/ranking.py) needs one scan cycle's full set of
+    # BUY candidates before any of them can open a paper position -- so
+    # evaluation and paper-position-opening can no longer happen inside a
+    # single per-symbol pass the way _process_symbol traditionally did it.
+    # This splits the run into: (1) evaluate every symbol concurrently
+    # (download/compute only, no trade or paper-account writes -- safe to
+    # run in any order), (2) rank this cycle's eligible BUY candidates and
+    # open paper positions for them strongest-first, (3) run the rest of
+    # each symbol's bookkeeping/notifications concurrently again, now with
+    # the paper-position outcome already decided so it isn't redecided.
+    evaluated_by_symbol: dict[str, tuple[FastPredictResult, Candle] | None] = {}
+
+    async def _evaluate_with_limit(symbol: str) -> None:
+        async with semaphore:
+            try:
+                evaluated_by_symbol[symbol] = await _evaluate_symbol(
+                    symbol, config, provider, engine, candle_repository, engine_state_repository
+                )
+            except Exception as error:
+                logger.exception("Unexpected exception while evaluating %s", symbol)
+                evaluated_by_symbol[symbol] = None
+                await _notify_mid_run_kite_expiry_once(error)
+
+    await asyncio.gather(*(_evaluate_with_limit(symbol) for symbol in symbols))
+
+    paper_notes: dict[str, str] = {}
+    ranked_candidates: list[tuple[str, RankedCandidate]] = []
+    for symbol, evaluated in evaluated_by_symbol.items():
+        if evaluated is None:
+            continue
+        result, newest_candle = evaluated
+        if result.signal != "BUY":
+            continue
+        if await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
+            ranked_candidates.append((
+                symbol,
+                RankedCandidate(
+                    symbol=symbol,
+                    entry_timestamp=newest_candle.timestamp,
+                    entry_price=_market_price(newest_candle),
+                    prediction_at_entry=result.prediction,
+                    # ADX/regime/volatility aren't available from the live
+                    # incremental evaluation path (fast_predict.py) yet --
+                    # only application/backtest.py's full replay computes
+                    # them today. Ranking degrades gracefully to
+                    # prediction_at_entry alone until that gap is closed.
+                    adx=0.0,
+                    regime_normalized=0.0,
+                    volatility_margin=0.0,
+                ),
+            ))
+        else:
+            paper_notes[symbol] = (
+                "paper: not eligible yet (win_rate<55% or insufficient trade history)"
+            )
+    paper_notes.update(
+        await _rank_and_open_paper_positions(
+            ranked_candidates, paper_account_repository, paper_account_lock
+        )
+    )
+
+    async def _process_with_limit(symbol: str) -> None:
+        evaluated = evaluated_by_symbol.get(symbol)
+        if evaluated is None:
+            return  # Nothing new for this symbol this cycle -- same as before.
         async with semaphore:
             try:
                 await _process_symbol(
@@ -215,23 +289,14 @@ async def run_signal_pipeline(
                     derivatives_chain,
                     options_trade_repository,
                     futures_trade_repository,
-                    None,
+                    evaluated,
                     order_executor,
                     live_order_repository,
+                    precomputed_paper_note=paper_notes.get(symbol),
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
-                if (
-                    kite_session_repository is not None
-                    and not mid_run_notified
-                    and _is_kite_token_error(error)
-                ):
-                    async with mid_run_notify_lock:
-                        if not mid_run_notified:
-                            mid_run_notified = True
-                            await _notify_kite_expired_once_per_day(
-                                kite_session_repository, notifier
-                            )
+                await _notify_mid_run_kite_expiry_once(error)
 
     await asyncio.gather(*(_process_with_limit(symbol) for symbol in symbols))
 
@@ -440,6 +505,7 @@ async def _process_symbol(
     precomputed_evaluation: tuple[FastPredictResult, Candle] | None = None,
     order_executor: KiteOrderExecutor | None = None,
     live_order_repository: TursoLiveOrderRepository | None = None,
+    precomputed_paper_note: str | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -468,6 +534,12 @@ async def _process_symbol(
     ``_evaluate_from_stored_candles`` itself; this lets it reuse every bit of
     the trade/paper/derivatives/notification logic below unchanged, rather
     than duplicating it.
+
+    ``precomputed_paper_note``, when given, is used as-is for the BUY
+    paper-position outcome instead of calling ``_open_paper_position`` --
+    the ranked cron path (``run_signal_pipeline``) already decided (and
+    opened, if applicable) this cycle's paper positions in ranked order
+    before calling this function, so it must not redecide/reopen here.
     """
     if precomputed_evaluation is not None:
         evaluated = precomputed_evaluation
@@ -495,9 +567,13 @@ async def _process_symbol(
                 is_early_signal_flip=result.is_early_signal_flip,
             ),
         )
-        paper_note = await _open_paper_position(
-            symbol, config, newest_candle.timestamp, market_price,
-            trade_repository, paper_account_repository, paper_account_lock,
+        paper_note = (
+            precomputed_paper_note
+            if precomputed_paper_note is not None
+            else await _open_paper_position(
+                symbol, config, newest_candle.timestamp, market_price,
+                trade_repository, paper_account_repository, paper_account_lock,
+            )
         )
         derivatives_note = await _open_derivatives_shadow(
             symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
@@ -696,6 +772,45 @@ async def _open_paper_position(
     if position is None:
         return "paper: SKIPPED (no capital available)"
     return f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f})"
+
+
+async def _rank_and_open_paper_positions(
+    candidates: list[tuple[str, RankedCandidate]],
+    paper_account_repository: PaperAccountRepository,
+    paper_account_lock: asyncio.Lock,
+) -> dict[str, str]:
+    """Open paper positions for one cycle's already-eligible BUY candidates,
+    strongest-ranked first, instead of whichever symbol's task happened to
+    finish first (see ``application/ranking.py``).
+
+    Each ``try_open_position`` call is still individually gated on free
+    capital exactly as ``_open_paper_position`` does today -- this only
+    changes the *order* candidates compete for that capital, not the
+    capital math itself. Once capital runs out, every remaining (weaker)
+    candidate is skipped and tagged distinctly from a plain
+    no-capital-at-all skip, so it is visible in the notification that
+    ranking, not just capital, decided the outcome.
+    """
+    notes: dict[str, str] = {}
+    symbol_by_candidate = {candidate: symbol for symbol, candidate in candidates}
+    ranked = rank_candidates([candidate for _, candidate in candidates])
+    for index, candidate in enumerate(ranked):
+        symbol = symbol_by_candidate[candidate]
+        async with paper_account_lock:
+            position = await paper_trading.try_open_position(
+                symbol, candidate.entry_timestamp, candidate.entry_price, paper_account_repository
+            )
+        if position is None:
+            notes[symbol] = (
+                "paper: SKIPPED (ranked below capacity, no capital left)"
+                if index > 0
+                else "paper: SKIPPED (no capital available)"
+            )
+        else:
+            notes[symbol] = (
+                f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f})"
+            )
+    return notes
 
 
 async def _close_paper_position(
