@@ -4,9 +4,16 @@ from pathlib import Path
 
 import pytest
 
-from trading_scanner.domain.models import Candle, PaperPosition, SignalSide, Trade
+from trading_scanner.domain.models import (
+    Candle,
+    FuturesPaperPosition,
+    PaperPosition,
+    SignalSide,
+    Trade,
+)
 from trading_scanner.infrastructure.turso import (
     TursoCandleRepository,
+    TursoFuturesPaperAccountRepository,
     TursoPaperAccountRepository,
     TursoSignalRepository,
     TursoTradeRepository,
@@ -243,5 +250,95 @@ async def test_paper_position_open_close_round_trip_credits_pnl_to_cash(tmp_path
         # 500000 - 75000 (opened) + 75000 + 7500 (closed: capital back + pnl).
         assert await repository.get_cash_balance() == Decimal("507500")
         assert await repository.get_open_positions() == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_futures_paper_account_initializes_cash_balance_on_first_call(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoFuturesPaperAccountRepository(client, Decimal("400000"))
+        await repository.ensure_schema()
+
+        assert await repository.get_cash_balance() == Decimal("400000")
+        await repository.open_position(
+            FuturesPaperPosition(
+                symbol="RELIANCE.NS",
+                side="long",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                futures_entry_price=Decimal("2900"),
+                futures_tradingsymbol="RELIANCE26AUGFUT",
+                hedge_tradingsymbol="RELIANCE26AUG2800PE",
+                lot_size=500,
+                margin_allocated=Decimal("18750"),
+            )
+        )
+        assert await repository.get_cash_balance() == Decimal("381250")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_futures_paper_position_open_close_round_trip_credits_pnl_for_long(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoFuturesPaperAccountRepository(client, Decimal("400000"))
+        await repository.ensure_schema()
+        await repository.open_position(
+            FuturesPaperPosition(
+                symbol="RELIANCE.NS",
+                side="long",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                futures_entry_price=Decimal("2900"),
+                futures_tradingsymbol="RELIANCE26AUGFUT",
+                hedge_tradingsymbol="RELIANCE26AUG2800PE",
+                lot_size=500,
+                margin_allocated=Decimal("18750"),
+            )
+        )
+
+        closed = await repository.close_position(
+            "RELIANCE.NS", datetime(2026, 8, 7, 10, 15, tzinfo=UTC), Decimal("2920")
+        )
+
+        assert closed.status == "closed"
+        assert closed.pnl_amount == Decimal("10000")  # (2920-2900) * 500
+        # 400000 - 18750 (opened) + 18750 + 10000 (closed: margin back + pnl).
+        assert await repository.get_cash_balance() == Decimal("410000")
+        assert await repository.get_open_positions() == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_futures_paper_position_close_credits_pnl_for_short(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoFuturesPaperAccountRepository(client, Decimal("400000"))
+        await repository.ensure_schema()
+        await repository.open_position(
+            FuturesPaperPosition(
+                symbol="RELIANCE.NS",
+                side="short",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                futures_entry_price=Decimal("2900"),
+                futures_tradingsymbol="RELIANCE26AUGFUT",
+                hedge_tradingsymbol="RELIANCE26AUG3000CE",
+                lot_size=500,
+                margin_allocated=Decimal("18750"),
+            )
+        )
+
+        # Price fell -- a short profits.
+        closed = await repository.close_position(
+            "RELIANCE.NS", datetime(2026, 8, 7, 10, 15, tzinfo=UTC), Decimal("2880")
+        )
+
+        assert closed.pnl_amount == Decimal("10000")  # (2900-2880) * 500
     finally:
         await client.close()

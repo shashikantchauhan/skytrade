@@ -98,6 +98,38 @@ class PaperPosition:
 
 
 @dataclass(frozen=True, slots=True)
+class FuturesPaperPosition:
+    """A simulated real-money futures+hedge combo position in the futures
+    paper account (see ``application/futures_trading.py``).
+
+    Distinct from ``FuturesShadowTrade`` (which shadow-tracks *every*
+    BUY/SELL signal, uncapped, analysis-only): this only exists for combos
+    that actually cleared the futures paper account's own capital gate --
+    sized against ``margin_allocated`` (live SPAN+exposure margin for the
+    futures+hedge combo together, from ``KiteDerivativesChain.
+    margin_benefit``'s ``combined_margin``, not the futures leg's full
+    notional), a plus-buffer figure of which is deducted from the account's
+    own capital pool. Own book, separate from the cash paper account's
+    capital (see NOTES.md's futures-capital-gate roadmap for why: simpler
+    to reason about, and the two are already tracked in separate tables
+    with no shared accounting today).
+    """
+
+    symbol: str
+    side: str  # "long" | "short"
+    entry_timestamp: datetime
+    futures_entry_price: Decimal
+    futures_tradingsymbol: str
+    hedge_tradingsymbol: str
+    lot_size: int
+    margin_allocated: Decimal
+    exit_timestamp: datetime | None = None
+    futures_exit_price: Decimal | None = None
+    pnl_amount: Decimal | None = None
+    status: str = "open"  # "open" | "closed"
+
+
+@dataclass(frozen=True, slots=True)
 class OptionsShadowTrade:
     """A hypothetical options trade shadowing a BUY/SELL signal.
 

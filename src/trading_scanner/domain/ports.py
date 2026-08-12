@@ -4,7 +4,14 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
-from trading_scanner.domain.models import Candle, PaperPosition, Signal, SignalSide, Trade
+from trading_scanner.domain.models import (
+    Candle,
+    FuturesPaperPosition,
+    PaperPosition,
+    Signal,
+    SignalSide,
+    Trade,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,3 +126,35 @@ class PaperAccountRepository(Protocol):
         ...
 
     async def get_open_positions(self) -> Sequence[PaperPosition]: ...
+
+
+class FuturesPaperAccountRepository(Protocol):
+    """Tracks the futures paper account's own capital pool and open/closed
+    futures+hedge combo positions -- see ``application/futures_trading.py``.
+    Separate book from ``PaperAccountRepository``'s cash pool by design (see
+    ``FuturesPaperPosition``'s docstring)."""
+
+    async def get_cash_balance(self) -> Decimal:
+        """Return the current cash balance, initializing it on first call."""
+        ...
+
+    async def open_position(self, position: FuturesPaperPosition) -> None:
+        """Record a new open combo and deduct its margin from cash."""
+        ...
+
+    async def close_position(
+        self,
+        symbol: str,
+        exit_timestamp: datetime,
+        futures_exit_price: Decimal,
+    ) -> FuturesPaperPosition | None:
+        """Close the most recent open combo for ``symbol``, crediting cash
+        back its margin plus/minus the futures leg's P&L (the hedge option
+        leg's own P&L is tracked separately by ``options_shadow.py`` and not
+        included here -- see ``application/futures_trading.py``).
+
+        Returns the closed position, or None if nothing was open.
+        """
+        ...
+
+    async def get_open_positions(self) -> Sequence[FuturesPaperPosition]: ...
