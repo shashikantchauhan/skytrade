@@ -18,3 +18,36 @@ jobs:
       - run: poetry install --no-interaction
       - run: poetry run ruff check .
       - run: poetry run pytest
+
+  deploy:
+    # Only after test passes, and only for a real push to main (never for a
+    # pull_request event, and never for a push to any other branch) -- this
+    # is what turns a merge (including from the GitHub mobile app) into the
+    # entire deploy process: no SSH/server access needed for routine changes.
+    # See deploy/p-trade-live.service and this repo's history for why the
+    # VPS, not GitHub Actions itself, runs the live pipeline (a stable
+    # outbound IP SEBI requires for order placement, and a real crontab
+    # instead of GitHub's unreliable schedule trigger -- see
+    # hourly-signals.yml's own docstring).
+    needs: test
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull latest code and restart services on the VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/p-trade
+            # Mirrors the documented manual process exactly (README/deploy/
+            # p-trade-live.service): git pull, then restart. No dependency
+            # reinstall step -- the manual process never had one either
+            # (the VPS's .venv is not poetry-managed in place; a PR adding a
+            # new dependency still needs a one-off manual venv update, same
+            # as it always has).
+            git pull origin main --ff-only
+            systemctl restart p-trade-live
+            systemctl restart p-trade-dashboard
