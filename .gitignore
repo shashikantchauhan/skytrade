@@ -9,5 +9,11 @@ data/*.json
 validation/*.csv
 local.db*
 
+# train_ranking_model.py artifacts -- CatBoost's own training-run logs, and
+# the saved model itself (large binary, regenerate via the training script
+# rather than version it).
+catboost_info/
+data/ranking_stage_a.cbm
+
 # Full project context/history -- local only, not for GitHub
 NOTES.md
