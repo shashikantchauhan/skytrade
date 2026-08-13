@@ -1,0 +1,41 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SkyTrade dashboard &mdash; log in</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: -apple-system, system-ui, sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; }
+  form { border: 1px solid #8884; border-radius: 12px; padding: 2rem; width: 260px; display: flex; flex-direction: column; gap: 0.8rem; }
+  h1 { font-size: 1.1rem; margin: 0 0 0.5rem 0; }
+  input { padding: 0.5rem; border-radius: 6px; border: 1px solid #8884; font-size: 1rem; }
+  button { padding: 0.5rem; border-radius: 6px; border: none; background: #2563eb; color: white; font-size: 1rem; cursor: pointer; }
+  #error { color: #d33; font-size: 0.85rem; min-height: 1.2em; }
+</style>
+</head>
+<body>
+<form id="login-form">
+  <h1>SkyTrade dashboard</h1>
+  <input id="password" type="password" placeholder="Password" autofocus required />
+  <button type="submit">Log in</button>
+  <div id="error"></div>
+</form>
+<script>
+document.getElementById("login-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const password = document.getElementById("password").value;
+  const res = await fetch("/login", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({password}),
+  });
+  if (res.ok) {
+    window.location.href = "/";
+  } else {
+    document.getElementById("error").textContent = "Wrong password.";
+  }
+});
+</script>
+</body>
+</html>

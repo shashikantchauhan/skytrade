@@ -1,0 +1,475 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>SkyTrade dashboard</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #f5f6f8;
+    --surface: #ffffff;
+    --border: #e2e4e9;
+    --text: #14161a;
+    --muted: #6b7280;
+    --accent: #2563eb;
+    --accent-soft: #eaf0fe;
+    --green: #0f9d58;
+    --green-soft: #e6f7ee;
+    --red: #d93025;
+    --red-soft: #fdeceb;
+    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06);
+    --radius: 12px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115;
+      --surface: #191b20;
+      --border: #2b2e35;
+      --text: #eceef1;
+      --muted: #9aa1ac;
+      --accent: #5b8def;
+      --accent-soft: #1c2740;
+      --green: #35c07a;
+      --green-soft: #103524;
+      --red: #f0685f;
+      --red-soft: #3a1a19;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 2px 6px rgba(0,0,0,0.25);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 1.5rem 1.25rem 4rem;
+  }
+  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.75rem; }
+  .topbar h1 { font-size: 1.15rem; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
+  .topbar .sub { color: var(--muted); font-size: 0.8rem; margin-top: 0.15rem; }
+  h2 { font-size: 0.95rem; font-weight: 650; margin: 0 0 0.75rem 0; letter-spacing: -0.01em; }
+  section { margin-bottom: 1.75rem; }
+  .panel {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 1.1rem 1.2rem;
+    box-shadow: var(--shadow);
+  }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.7rem; }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.85rem 1rem;
+    box-shadow: var(--shadow);
+  }
+  .card .label { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.3rem; font-weight: 500; }
+  .card .value { font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
+  .green { color: var(--green); } .red { color: var(--red); }
+  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+  .pill.green { background: var(--green-soft); color: var(--green); }
+  .pill.red { background: var(--red-soft); color: var(--red); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  th {
+    text-align: left; padding: 0.5rem 0.7rem; color: var(--muted); font-weight: 600;
+    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em;
+    border-bottom: 1px solid var(--border);
+  }
+  td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
+  tbody tr:hover { background: var(--accent-soft); }
+  tbody tr:last-child td { border-bottom: none; }
+  .table-wrap { overflow-x: auto; }
+  button {
+    padding: 0.45rem 0.95rem; border-radius: 8px; border: 1px solid var(--border);
+    cursor: pointer; background: var(--surface); color: var(--text); font-size: 0.85rem; font-weight: 550;
+    transition: background 0.15s;
+  }
+  button:hover { background: var(--accent-soft); border-color: var(--accent); }
+  button.primary { background: var(--accent); color: white; border-color: var(--accent); }
+  button.primary:hover { opacity: 0.9; }
+  input, select {
+    padding: 0.4rem 0.6rem; border-radius: 8px; border: 1px solid var(--border);
+    background: var(--surface); color: var(--text); font-size: 0.85rem;
+  }
+  input { width: 110px; }
+  select { min-width: 220px; }
+  label.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+  pre {
+    background: var(--bg); border: 1px solid var(--border); padding: 0.75rem;
+    border-radius: 10px; max-height: 300px; overflow: auto; font-size: 0.72rem; line-height: 1.5;
+  }
+  .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
+  .row.between { justify-content: space-between; }
+  .msg { font-size: 0.8rem; color: var(--muted); }
+  .tabnav {
+    display: flex; gap: 0.4rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border);
+    flex-wrap: wrap;
+  }
+  .tab-btn {
+    background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
+    padding: 0.6rem 0.9rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; border-radius: 0;
+  }
+  .tab-btn:hover { color: var(--text); background: none; }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .admin-only.viewer-hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div>
+    <h1>SkyTrade</h1>
+    <div class="sub">NSE signal scanner &amp; paper trading dashboard</div>
+  </div>
+  <button onclick="logout()">Log out</button>
+</div>
+
+<section>
+  <div class="cards" id="status-cards">Loading...</div>
+</section>
+
+<section class="admin-only">
+  <div class="row">
+    <button class="primary" onclick="trigger()">Run pipeline now</button>
+    <span class="msg" id="trigger-msg"></span>
+    <span class="row" id="kite-status" style="margin-left: auto;"></span>
+  </div>
+</section>
+
+<div class="tabnav">
+  <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
+  <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
+  <button class="tab-btn" data-tab="derivatives" onclick="switchTab('derivatives')">Derivatives</button>
+  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
+</div>
+
+<section class="tab-panel" data-tab="positions">
+  <h2>Open positions</h2>
+  <div class="panel table-wrap">
+    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Price diff</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section class="tab-panel" data-tab="trades" hidden>
+  <div class="row between">
+    <h2><span id="trades-title">Closed trades (buy-only win rate</span>: <span id="win-rate">-</span>)</h2>
+    <label class="field">Filter by symbol
+      <select id="symbol-filter" onchange="loadTrades()">
+        <option value="">All symbols (recent 30)</option>
+      </select>
+    </label>
+  </div>
+  <div class="panel table-wrap">
+    <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section class="tab-panel" data-tab="derivatives" hidden>
+  <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
+  <div class="cards" id="derivatives-cards"></div>
+  <div class="panel row admin-only" style="margin-top: 0.8rem; align-items: flex-end;">
+    <label class="field">Symbol (e.g. RELIANCE.NS)<input id="margin-symbol" placeholder="RELIANCE.NS" /></label>
+    <button class="primary" onclick="checkMarginBenefit()">Check live margin benefit</button>
+    <span class="msg" id="margin-msg"></span>
+  </div>
+  <div class="row" style="margin-top: 0.8rem;">
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
+      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
+      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <h2 style="margin-top: 1.5rem;">Current-month derivatives backtest <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(replays this month's closed trades against Kite historical data -- expired contracts can't be reached, so only the current month works)</span></h2>
+  <div class="panel row admin-only" style="margin-bottom: 0.8rem;">
+    <button class="primary" onclick="runBacktest()">Run backtest</button>
+    <span class="msg" id="backtest-msg"></span>
+  </div>
+  <div class="cards" id="backtest-cards"></div>
+  <div class="row" style="margin-top: 0.8rem;">
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
+      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
+    </div>
+    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
+      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
+      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+</section>
+
+<section class="tab-panel" data-tab="settings" hidden>
+  <h2>Config</h2>
+  <div class="panel row admin-only">
+    <label class="field">Capital<input id="cfg-capital" /></label>
+    <label class="field">Slots<input id="cfg-slots" /></label>
+    <label class="field">Min position<input id="cfg-min" /></label>
+    <button class="primary" onclick="saveConfig()" style="align-self: flex-end;">Save</button>
+    <span class="msg" id="config-msg"></span>
+  </div>
+
+  <h2 style="margin-top: 1.5rem;">Recent logs</h2>
+  <pre id="logs"></pre>
+</section>
+
+<script>
+function switchTab(name) {
+  document.querySelectorAll(".tab-panel").forEach(el => { el.hidden = el.dataset.tab !== name; });
+  document.querySelectorAll(".tab-btn").forEach(el => { el.classList.toggle("active", el.dataset.tab === name); });
+}
+
+async function api(path, opts) {
+  const res = await fetch(path, opts);
+  if (res.status === 401) { window.location.href = "/login"; throw new Error("401"); }
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function logout() {
+  await fetch("/logout", {method: "POST"});
+  window.location.href = "/login";
+}
+
+function fmt(n) { return n === null || n === undefined ? "-" : Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
+
+// One side (entry or exit) of a greeks snapshot -- null means the
+// Black-Scholes computation couldn't resolve for that row (see
+// application/options_analytics.py), shown as "-" rather than hidden so
+// it's clear the column was checked, not skipped.
+function formatGreeksSide(g) {
+  if (!g) return "-";
+  return `IV ${fmt(g.implied_volatility)}% · Δ ${fmt(g.delta)} · Θ ${fmt(g.theta)}/day`;
+}
+
+function formatGreeksCell(greeks) {
+  if (!greeks) return "-";
+  const entry = formatGreeksSide(greeks.entry);
+  if (!greeks.exit) return entry;
+  return `${entry} → ${formatGreeksSide(greeks.exit)}`;
+}
+
+// Every timestamp from the API is UTC ISO -- displayed in IST throughout
+// this dashboard since that's the timezone the strategy/market actually
+// operates in, to avoid the exact confusion UTC timestamps caused before.
+function fmtTime(iso) {
+  if (!iso) return "-";
+  return new Date(iso).toLocaleString("en-IN", {
+    timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  });
+}
+
+async function loadStatus() {
+  const s = await api("/api/status");
+  const pnlClass = s.pnl_since_start >= 0 ? "green" : "red";
+  const haveMtm = s.total_equity_mtm !== null && s.total_equity_mtm !== undefined;
+  const mtmClass = haveMtm && s.pnl_since_start_mtm >= 0 ? "green" : "red";
+  const mtmCard = haveMtm
+    ? `<div class="card"><div class="label">P&L (live, mark-to-market)</div><div class="value ${mtmClass}">₹${fmt(s.pnl_since_start_mtm)} (${fmt(s.pnl_since_start_mtm_pct)}%)</div></div>
+       <div class="card"><div class="label">Unrealized P&L (open positions)</div><div class="value ${s.unrealized_pnl >= 0 ? "green" : "red"}">₹${fmt(s.unrealized_pnl)}</div></div>`
+    : "";
+  document.getElementById("status-cards").innerHTML = `
+    <div class="card"><div class="label">Cash balance</div><div class="value">₹${fmt(s.cash_balance)}</div></div>
+    <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(s.total_equity)}</div></div>
+    <div class="card"><div class="label">P&L since start (at cost)</div><div class="value ${pnlClass}">₹${fmt(s.pnl_since_start)} (${fmt(s.pnl_since_start_pct)}%)</div></div>
+    ${mtmCard}
+    <div class="card"><div class="label">Open positions</div><div class="value">${s.open_position_count} / ${s.target_slots}</div></div>
+    <div class="card"><div class="label">Current slot size</div><div class="value">₹${fmt(s.current_slot_size)}</div></div>
+    <div class="card"><div class="label">Last run</div><div class="value" style="font-size:0.85rem">${s.last_run ? s.last_run.status : "unknown"}</div></div>
+  `;
+}
+
+async function loadPositions() {
+  const rows = await api("/api/positions");
+  document.querySelector("#positions-table tbody").innerHTML = rows.map(p => {
+    const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
+    const cls = known && p.unrealized_pnl >= 0 ? "green" : "red";
+    const pnlCell = known
+      ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
+      : `<td>-</td>`;
+    const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
+    const diffCell = known ? `₹${fmt(p.current_price - p.entry_price)}` : "-";
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td><td>${diffCell}</td>${pnlCell}</tr>`;
+  }).join("") || "<tr><td colspan=8>No open positions</td></tr>";
+}
+
+let symbolsLoaded = false;
+
+async function loadSymbols() {
+  const rows = await api("/api/symbols");
+  const select = document.getElementById("symbol-filter");
+  const current = select.value;
+  select.innerHTML = '<option value="">All symbols (recent 30)</option>' + rows.map(r =>
+    `<option value="${r.symbol}">${r.symbol} (${r.trade_count} trades, ${fmt(r.win_rate)}% win)</option>`
+  ).join("");
+  select.value = current;
+  symbolsLoaded = true;
+}
+
+async function loadTrades() {
+  const select = document.getElementById("symbol-filter");
+  const symbol = select.value;
+  const query = symbol ? `symbol=${encodeURIComponent(symbol)}` : "limit=30";
+  const t = await api(`/api/trades?${query}`);
+  document.getElementById("trades-title").textContent = symbol
+    ? `${symbol} trades (win rate`
+    : "Closed trades (buy-only win rate";
+  document.getElementById("win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
+  document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
+    const cls = r.pnl_percent >= 0 ? "green" : "red";
+    const sideCls = r.side === "buy" ? "green" : "red";
+    // BUY profits when price rises (exit - entry), SELL profits when price
+    // falls (entry - exit) -- same convention as domain.models.Trade.
+    const diff = r.side === "buy" ? r.exit_price - r.entry_price : r.entry_price - r.exit_price;
+    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>₹${fmt(r.entry_price)}</td><td>${fmtTime(r.exit_timestamp)}</td><td>₹${fmt(r.exit_price)}</td><td>₹${fmt(diff)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
+  }).join("") || "<tr><td colspan=8>No closed trades yet</td></tr>";
+}
+
+async function loadConfig() {
+  const c = await api("/api/config");
+  document.getElementById("cfg-capital").value = c.capital;
+  document.getElementById("cfg-slots").value = c.slots;
+  document.getElementById("cfg-min").value = c.min_position;
+}
+
+async function saveConfig() {
+  const body = {
+    capital: document.getElementById("cfg-capital").value,
+    slots: document.getElementById("cfg-slots").value,
+    min_position: document.getElementById("cfg-min").value,
+  };
+  const opts = {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(body),
+  };
+  await api("/api/config", opts);
+  document.getElementById("config-msg").textContent = "Saved - takes effect next pipeline run.";
+}
+
+async function trigger() {
+  document.getElementById("trigger-msg").textContent = "Triggering...";
+  await api("/api/trigger", {method: "POST"});
+  const msg = "Triggered - check logs below in a few minutes.";
+  document.getElementById("trigger-msg").textContent = msg;
+}
+
+async function loadLogs() {
+  const l = await api("/api/logs?lines=150");
+  document.getElementById("logs").textContent = l.lines.join("\n");
+}
+
+async function loadKiteStatus() {
+  const k = await api("/api/kite-status");
+  const el = document.getElementById("kite-status");
+  if (!k.configured) { el.innerHTML = ""; return; }
+  if (k.logged_in) {
+    // obtained_at is already IST (Kite's own login_time), not UTC -- do not
+    // run it through fmtTime()'s UTC->IST conversion, that would shift it.
+    el.innerHTML = `<span class="pill green">Kite: logged in (${k.obtained_at})</span> <button onclick="window.location.href='/kite/login'">Re-login</button>`;
+  } else {
+    el.innerHTML = `<span class="pill red">Kite: not logged in (using Yahoo)</span> <button class="primary" onclick="window.location.href='/kite/login'">Login to Kite</button>`;
+  }
+}
+
+function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
+  const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
+  document.getElementById(cardsId).innerHTML = `
+    <div class="card"><div class="label">Futures -- the trade (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
+    <div class="card"><div class="label">Hedge option on the future (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
+  `;
+  document.querySelector(`#${optionsTableId} tbody`).innerHTML = d.recent_options.map(o => {
+    const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
+    const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}% (₹${fmt(o.pnl_amount)})</span>`;
+    const known = o.exit_premium !== null && o.exit_premium !== undefined;
+    // Buying an option profits when its premium rises, whether it's a
+    // CALL or a PUT -- see options_shadow.py's own pnl_amount comment.
+    const diff = known ? `₹${fmt(o.exit_premium - o.entry_premium)}` : "-";
+    const exitCell = known ? `₹${fmt(o.exit_premium)}` : "-";
+    const greeksCell = formatGreeksCell(o.greeks);
+    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${o.moneyness} (strike ₹${fmt(o.strike)}, spot ₹${fmt(o.underlying_price_at_entry)})</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td><td>${greeksCell}</td></tr>`;
+  }).join("") || "<tr><td colspan=10>No trades yet</td></tr>";
+  document.querySelector(`#${futuresTableId} tbody`).innerHTML = d.recent_futures.map(f => {
+    const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
+    const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}% (₹${fmt(f.pnl_amount)})</span>`;
+    const known = f.exit_price !== null && f.exit_price !== undefined;
+    // long profits when price rises (exit - entry), short profits when it
+    // falls (entry - exit) -- same convention as futures_shadow.py.
+    const rawDiff = known ? (f.side === "long" ? f.exit_price - f.entry_price : f.entry_price - f.exit_price) : null;
+    const diff = known ? `₹${fmt(rawDiff)}` : "-";
+    const exitCell = known ? `₹${fmt(f.exit_price)}` : "-";
+    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${f.purpose}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
+  }).join("") || "<tr><td colspan=8>No trades yet</td></tr>";
+}
+
+async function loadDerivativesShadow() {
+  const d = await api("/api/derivatives-shadow");
+  renderDerivativesShadow(d, "derivatives-cards", "options-shadow-table", "futures-shadow-table");
+}
+
+async function loadDerivativesBacktest() {
+  const d = await api("/api/derivatives-backtest");
+  renderDerivativesShadow(d, "backtest-cards", "backtest-options-table", "backtest-futures-table");
+}
+
+async function runBacktest() {
+  const el = document.getElementById("backtest-msg");
+  el.textContent = "Running (uses this month's closed trades + Kite historical data, may take a bit)...";
+  await api("/api/trigger-backtest", { method: "POST" });
+  setTimeout(async () => {
+    await loadDerivativesBacktest();
+    el.textContent = "Done -- refresh in a few seconds if you triggered it just now and don't see results yet.";
+  }, 5000);
+}
+
+async function checkMarginBenefit() {
+  const symbol = document.getElementById("margin-symbol").value.trim();
+  const el = document.getElementById("margin-msg");
+  if (!symbol) { el.textContent = "Enter a symbol first."; return; }
+  el.textContent = "Checking live margin via Kite...";
+  try {
+    const r = await api(`/api/margin-benefit?symbol=${encodeURIComponent(symbol)}`);
+    if (!r.has_hedge) {
+      el.textContent = `${symbol}: primary future open, no hedge option open yet -- margin ₹${fmt(r.primary_only_margin)}.`;
+      return;
+    }
+    el.innerHTML = `${symbol}: future alone ₹${fmt(r.primary_only_margin)} &rarr; with hedge ₹${fmt(r.combined_margin)} ` +
+      `(<span class="pill ${r.margin_benefit >= 0 ? "green" : "red"}">benefit ₹${fmt(r.margin_benefit)}</span>)`;
+  } catch (e) {
+    el.textContent = `Couldn't check: ${e.message}`;
+  }
+}
+
+let myRole = null;
+
+async function applyRole() {
+  // Server-side _require_admin is what actually enforces this (see
+  // webapp.py) -- this is purely so a viewer's screen doesn't show buttons
+  // that would just 403, e.g. after a spouse/friend's Kite login attempt
+  // once stomped the one active session the pipeline depends on.
+  const me = await api("/api/me");
+  myRole = me.role;
+  if (myRole !== "admin") {
+    document.querySelectorAll(".admin-only").forEach(el => el.classList.add("viewer-hidden"));
+  }
+}
+
+async function refreshAll() {
+  if (myRole === null) await applyRole();
+  if (!symbolsLoaded) await loadSymbols();
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadDerivativesShadow(), loadDerivativesBacktest()];
+  if (myRole === "admin") {
+    loaders.push(loadConfig(), loadKiteStatus());
+  }
+  await Promise.all(loaders);
+}
+refreshAll();
+setInterval(refreshAll, 30000);
+</script>
+</body>
+</html>
