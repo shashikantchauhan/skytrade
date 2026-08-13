@@ -6,7 +6,7 @@ and the market-close cutoff this refuses to act past.
 """
 
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
@@ -41,7 +41,9 @@ class _FakePaperAccountRepository:
             return None
         position = matching[-1]
         self._open.remove(position)
-        closed = replace(position, exit_timestamp=exit_timestamp, exit_price=exit_price, status="closed")
+        closed = replace(
+            position, exit_timestamp=exit_timestamp, exit_price=exit_price, status="closed"
+        )
         self._open.append(closed)
         self._cash_balance += position.capital_allocated
         self.closed.append((symbol, exit_timestamp, exit_price))

@@ -192,7 +192,8 @@ async def try_evict_and_open(
         return None
 
     open_positions = await paper_account_repository.get_open_positions()
-    worst: tuple[Decimal, PaperPosition, Decimal] | None = None  # (unrealized_pct, position, current_price)
+    # (unrealized_pct, position, current_price) of the worst eligible candidate so far.
+    worst: tuple[Decimal, PaperPosition, Decimal] | None = None
     for position in open_positions:
         if position.prediction_at_entry is None:
             continue
