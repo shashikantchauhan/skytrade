@@ -207,6 +207,7 @@ async def test_symbol_below_minimum_history_is_skipped_without_analysis(monkeypa
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert notifier.sent == []
@@ -237,6 +238,7 @@ async def test_candles_are_upserted_every_run(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     symbol, interval, upserted_candles = candle_repository.upserted[0]
@@ -270,6 +272,7 @@ async def test_new_symbol_triggers_a_full_backfill_window(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert requested_days == [_BACKFILL_WINDOW_DAYS]
@@ -301,6 +304,7 @@ async def test_known_symbol_only_requests_the_recent_window(monkeypatch) -> None
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert requested_days == [_RECENT_WINDOW_DAYS]
@@ -334,6 +338,7 @@ async def test_one_failing_symbol_does_not_stop_the_batch(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     # BROKEN.NS raised during download; AARTIIND.NS should still be processed.
@@ -367,6 +372,7 @@ async def test_repeated_run_with_same_newest_candle_does_not_reprocess(monkeypat
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
     state_after_first_run = await engine_state_repository.get_state("AARTIIND.NS", "1h")
 
@@ -379,6 +385,7 @@ async def test_repeated_run_with_same_newest_candle_does_not_reprocess(monkeypat
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
     state_after_second_run = await engine_state_repository.get_state("AARTIIND.NS", "1h")
 
@@ -424,6 +431,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert len(trade_repository.opened) == 1
@@ -475,6 +483,7 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert trade_repository.opened == []  # NEUTRAL -- no new trade
@@ -526,6 +535,7 @@ async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(mon
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert trade_repository.abandoned == [("AARTIIND.NS", "1h", SignalSide.BUY)]
@@ -581,6 +591,7 @@ async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert len(notifier.sent) == 1
@@ -659,6 +670,7 @@ async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert notifier.sent
@@ -718,6 +730,7 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert len(paper_account_repository.opened) == 1
@@ -768,6 +781,7 @@ async def test_buy_entry_skips_paper_position_when_not_eligible(monkeypatch) -> 
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert paper_account_repository.opened == []
@@ -823,6 +837,7 @@ async def test_buy_entry_skips_paper_position_when_no_capital(monkeypatch) -> No
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert paper_account_repository.opened == []
@@ -922,6 +937,7 @@ async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypat
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     total_allocated = sum(
@@ -996,6 +1012,7 @@ async def test_end_long_closes_the_paper_position_and_notifies_pnl(monkeypatch) 
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert len(paper_account_repository.closed) == 1
@@ -1046,6 +1063,7 @@ async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert paper_account_repository.opened == []
@@ -1134,6 +1152,7 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         trade_repository,
         paper_account_repository,
         notifier,
+        market_data_provider=YahooProvider(),
     )
 
     assert len(notifier.sent) == 1  # stock BUY still notifies despite index disagreeing

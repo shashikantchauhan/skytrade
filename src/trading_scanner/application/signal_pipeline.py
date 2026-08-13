@@ -123,8 +123,16 @@ async def run_signal_pipeline(
     options_trade_repository: TursoOptionsTradeRepository | None = None,
     futures_trade_repository: TursoFuturesTradeRepository | None = None,
     live_order_repository: TursoLiveOrderRepository | None = None,
+    market_data_provider: MarketDataProvider | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
+
+    ``market_data_provider``, when given, bypasses ``_select_provider``
+    entirely and is used as-is -- test-only injection point (there is no
+    production code path that ever passes this). Exists so tests can
+    supply a fake/stubbed provider directly instead of needing a real Kite
+    session; production always goes through the real Kite-only selection
+    below.
 
     If ``config.index_symbol`` is set, it is evaluated once per run (same
     machinery, no trades/notifications of its own) and its current state is
@@ -132,13 +140,13 @@ async def run_signal_pipeline(
     you can judge whether a stock signal lines up with the broader market or
     looks like noise against it. It is never used to suppress a signal.
 
-    Data source: Kite Connect's Historical Data API when a valid session
-    exists (the same feed NSE brokers use -- see
-    ``infrastructure/kite.py``), falling back to Yahoo Finance automatically
-    otherwise. Kite sessions expire daily and are refreshed via the
-    dashboard's ``/kite/login`` flow, not anything in this pipeline -- a
-    stale/missing session here just means today's runs use Yahoo until the
-    user logs in again.
+    Data source: Kite Connect's Historical Data API only (the same feed NSE
+    brokers use -- see ``infrastructure/kite.py``). No Yahoo fallback (see
+    ``_select_provider``'s docstring for why that was removed 2026-08-13).
+    Kite sessions expire daily and are refreshed via the dashboard's
+    ``/kite/login`` flow, not anything in this pipeline -- a stale/missing
+    session here just means this run is skipped entirely until the user
+    logs in again, rather than silently degrading to a worse data source.
 
     When Kite is active and the shadow-trade repositories are provided,
     every BUY/SELL entry-exit also shadow-tracks (analysis only, never a
@@ -150,9 +158,18 @@ async def run_signal_pipeline(
     ``application/futures_shadow.py``).
     """
     logger = logging.getLogger(__name__)
-    provider, provider_name, kite = await _select_provider(
-        config, kite_session_repository, notifier
-    )
+    if market_data_provider is not None:
+        provider, provider_name, kite = market_data_provider, "injected (test)", None
+    else:
+        try:
+            provider, provider_name, kite = await _select_provider(
+                config, kite_session_repository, notifier
+            )
+        except NoValidKiteSession:
+            logger.warning(
+                "No valid Kite session -- skipping this run entirely (no Yahoo fallback)."
+            )
+            return
     logger.info("Using %s as the market data source for this run.", provider_name)
     engine = AlphaEngine(**_ENGINE_SETTINGS)
     derivatives_chain = KiteDerivativesChain(kite) if kite is not None else None
@@ -263,11 +280,7 @@ async def run_signal_pipeline(
             )
     paper_notes.update(
         await _rank_and_open_paper_positions(
-            ranked_candidates,
-            paper_account_repository,
-            paper_account_lock,
-            candle_repository,
-            config.candle_interval,
+            ranked_candidates, paper_account_repository, paper_account_lock
         )
     )
 
@@ -318,29 +331,50 @@ def _is_kite_token_error(error: BaseException) -> bool:
     return False
 
 
+class NoValidKiteSession(RuntimeError):
+    """Raised by ``_select_provider`` when no usable Kite session exists.
+
+    There is deliberately no Yahoo fallback here anymore (see this
+    function's own docstring) -- the caller's job is to notify and skip
+    this cycle cleanly, not to substitute a different data source.
+    """
+
+
 async def _select_provider(
     config: AppConfig,
     kite_session_repository: TursoKiteSessionRepository | None,
     notifier: Notifier | None = None,
 ) -> tuple[MarketDataProvider, str, KiteConnect | None]:
-    """Prefer Kite when a valid session exists; fall back to Yahoo otherwise.
+    """Require a valid Kite session; never silently substitute Yahoo.
+
+    Used to fall back to Yahoo Finance when no Kite session was available.
+    Removed 2026-08-13: Yahoo's ``yf.download`` has a documented failure
+    mode under concurrent request load where a response silently belongs
+    to the *wrong* ticker entirely (not just a malformed/partial one --
+    see ``infrastructure/yahoo.py``'s ``_clean_data`` docstring, which
+    already guarded the partial case). Root-caused to exactly this: 176
+    symbols' candles were found byte-for-byte identical across unrelated
+    stocks over a ~2-week window, matching runs where Kite's daily token
+    hadn't been refreshed yet and this fallback silently kicked in. Kite
+    Connect's Historical Data API is a paid, official data source with no
+    such issue -- there is no good reason to ever substitute a free,
+    unofficial scrape for real trading data again. A stale/missing Kite
+    session now means this cycle is skipped entirely (see
+    ``NoValidKiteSession``) rather than degrading to a worse, riskier data
+    source.
 
     "Valid" is checked by actually calling Kite's instruments endpoint and
     confirming the hardcoded index mapping still resolves (see
     ``KiteInstrumentMap.validate_index_mapping``) rather than trusting a
     stored token blindly -- catches both an expired/revoked token and a
-    stale index mapping in one check, and either failure just means this
-    run uses Yahoo instead of blocking the whole pipeline. The raw Kite
-    client is returned too (None when Yahoo is used) so the caller can also
-    drive the options-shadow feature, which needs Kite specifically --
-    Yahoo has no Indian options data.
+    stale index mapping in one check.
 
-    Falling back also sends one "please log in again" notification per
-    calendar day (deduped via ``kite_session_repository``'s
-    ``expiry_notified_date``, see ``TursoKiteSessionRepository``) -- Kite
-    tokens expire daily with no documented exact time, so this piggybacks
-    on the pipeline's own hourly cron rather than needing separate
-    infrastructure to detect expiry.
+    Also sends one "please log in again" notification per calendar day
+    (deduped via ``kite_session_repository``'s ``expiry_notified_date``,
+    see ``TursoKiteSessionRepository``) -- Kite tokens expire daily with
+    no documented exact time, so this piggybacks on the pipeline's own
+    hourly cron rather than needing separate infrastructure to detect
+    expiry.
     """
     logger = logging.getLogger(__name__)
     if config.kite_api_key and kite_session_repository is not None:
@@ -355,12 +389,14 @@ async def _select_provider(
                 return KiteProvider(kite, instrument_map), "kite", kite
             except Exception:
                 logger.warning(
-                    "Kite session unusable (obtained_at=%s); falling back to Yahoo for this run.",
+                    "Kite session unusable (obtained_at=%s); skipping this run.",
                     obtained_at,
                     exc_info=True,
                 )
         await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
-    return YahooProvider(), "yahoo", None
+    elif kite_session_repository is not None:
+        await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
+    raise NoValidKiteSession("No valid Kite session -- skipping this run rather than using Yahoo.")
 
 
 async def _notify_kite_expired_once_per_day(
@@ -375,7 +411,7 @@ async def _notify_kite_expired_once_per_day(
             return
         await notifier.send_text(
             "⚠️ <b>SYSTEM ALERT</b>\n"
-            "Kite session expired/missing -- today's runs are using Yahoo (delayed) data.\n"
+            "Kite session expired/missing -- this run is being skipped (no Yahoo fallback).\n"
             "Log in again: https://skytrade.oneatem.com/kite/login"
         )
         await kite_session_repository.set_expiry_notified_date(today)
@@ -782,8 +818,6 @@ async def _rank_and_open_paper_positions(
     candidates: list[tuple[str, RankedCandidate]],
     paper_account_repository: PaperAccountRepository,
     paper_account_lock: asyncio.Lock,
-    candle_repository: CandleRepository,
-    interval: str,
 ) -> dict[str, str]:
     """Open paper positions for one cycle's already-eligible BUY candidates,
     strongest-ranked first, instead of whichever symbol's task happened to
@@ -792,14 +826,15 @@ async def _rank_and_open_paper_positions(
     Each ``try_open_position`` call is still individually gated on free
     capital exactly as ``_open_paper_position`` does today -- this only
     changes the *order* candidates compete for that capital, not the
-    capital math itself. If capital is out, before giving up on a
-    candidate this also tries ``paper_trading.try_evict_and_open`` --
-    evicting a weaker, currently-losing open position to make room, rather
-    than always just skipping (see that function's docstring for the
-    eviction rule and the market-close cutoff). Once both fail, the
+    capital math itself. Once capital runs out, every remaining (weaker)
     candidate is skipped and tagged distinctly from a plain
     no-capital-at-all skip, so it is visible in the notification that
     ranking, not just capital, decided the outcome.
+
+    (2026-08-13: a capital-rotation/eviction variant of this -- selling a
+    weaker, losing open position to make room for a stronger new signal --
+    was built, tested, and deployed, then explicitly rejected and reverted
+    same day. Not wanted; do not reintroduce without being asked.)
     """
     notes: dict[str, str] = {}
     symbol_by_candidate = {candidate: symbol for symbol, candidate in candidates}
@@ -808,34 +843,13 @@ async def _rank_and_open_paper_positions(
         symbol = symbol_by_candidate[candidate]
         async with paper_account_lock:
             position = await paper_trading.try_open_position(
-                symbol,
-                candidate.entry_timestamp,
-                candidate.entry_price,
-                paper_account_repository,
-                Decimal(str(candidate.prediction_at_entry)),
+                symbol, candidate.entry_timestamp, candidate.entry_price, paper_account_repository
             )
-            evicted = False
-            if position is None:
-                position = await paper_trading.try_evict_and_open(
-                    symbol,
-                    candidate.entry_timestamp,
-                    candidate.entry_price,
-                    Decimal(str(candidate.prediction_at_entry)),
-                    paper_account_repository,
-                    candle_repository,
-                    interval,
-                )
-                evicted = position is not None
         if position is None:
             notes[symbol] = (
                 "paper: SKIPPED (ranked below capacity, no capital left)"
                 if index > 0
                 else "paper: SKIPPED (no capital available)"
-            )
-        elif evicted:
-            notes[symbol] = (
-                f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f}) "
-                "-- evicted a weaker, losing position to make room"
             )
         else:
             notes[symbol] = (
