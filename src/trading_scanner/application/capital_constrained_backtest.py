@@ -30,6 +30,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.application.ranking import RankedCandidate, rank_candidates, score_candidate
+from trading_scanner.application.trading_costs import round_trip_cost
 from trading_scanner.domain.models import SignalSide, Trade
 
 MIN_WIN_RATE = Decimal("55")
@@ -51,6 +52,11 @@ class SimulationConfig:
     # use_ranking is True (a floor without ranking has no ordering to
     # apply it against consistently).
     min_score: float = 0.0
+    # Every result before 2026-08-14 was gross, not net of real trading
+    # costs (see trading_costs.py -- known gap, never modeled). Defaults
+    # False so existing callers/tests keep today's (unrealistic) numbers
+    # unless they explicitly opt in.
+    apply_realistic_costs: bool = False
 
 
 @dataclass(slots=True)
@@ -69,6 +75,7 @@ class SimulationResult:
     # exactly this amount.
     final_open_capital: Decimal = Decimal("0")
     total_pnl_amount: Decimal = Decimal("0")
+    total_costs_paid: Decimal = Decimal("0")
     wins: int = 0
     losses: int = 0
 
@@ -176,8 +183,18 @@ def simulate(trades: Sequence[Trade], config: SimulationConfig) -> SimulationRes
             if position is None or trade.exit_price is None:
                 continue
             pnl_amount = position.quantity * (trade.exit_price - position.entry_price)
+            if config.apply_realistic_costs:
+                entry_value = position.quantity * position.entry_price
+                exit_value = position.quantity * trade.exit_price
+                cost = round_trip_cost(entry_value, exit_value)
+                pnl_amount -= cost
+                result.total_costs_paid += cost
             cash += position.capital_allocated + pnl_amount
             result.total_pnl_amount += pnl_amount
+            # Win/loss (and therefore win_rate, and therefore is_eligible's
+            # own downstream eligibility bar) is judged on the same
+            # cost-adjusted pnl_amount -- a trade that was gross-profitable
+            # but net-negative after real costs is a loss, not a win.
             if pnl_amount > 0:
                 result.wins += 1
             else:

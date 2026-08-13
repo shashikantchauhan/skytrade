@@ -201,3 +201,43 @@ def test_exit_frees_capital_for_a_same_cycle_entry():
     assert result.trades_taken == 2
     assert result.trades_skipped_no_capital == 0
     assert result.wins == 1  # only A's trade has closed; C is still open
+
+
+def test_realistic_costs_reduce_pnl_and_can_flip_a_marginal_win_to_a_loss():
+    """A trade barely profitable before costs should come out net-negative
+    once real STT/stamp-duty/DP charges are deducted -- this is the whole
+    point of apply_realistic_costs, not just a smaller positive number."""
+    history = _track_record("A")
+    tiny_win = Trade(
+        symbol="A", side=SignalSide.BUY, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("100"), prediction_at_entry=5, is_early_signal_flip=False,
+        exit_timestamp=datetime(2026, 2, 2, tzinfo=UTC), exit_price=Decimal("100.05"),
+        pnl_percent=Decimal("0.05"), status="closed",
+    )
+    config = SimulationConfig(
+        initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
+        apply_realistic_costs=True,
+    )
+    result = simulate([*history, tiny_win], config)
+
+    assert result.trades_taken == 1
+    assert result.total_costs_paid > 0
+    assert result.losses == 1  # net-negative after costs, not a win
+    assert result.wins == 0
+
+
+def test_realistic_costs_default_off_matches_gross_behavior():
+    history = _track_record("A")
+    entry = Trade(
+        symbol="A", side=SignalSide.BUY, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("100"), prediction_at_entry=5, is_early_signal_flip=False,
+        exit_timestamp=datetime(2026, 2, 2, tzinfo=UTC), exit_price=Decimal("110"),
+        pnl_percent=Decimal("10"), status="closed",
+    )
+    config = SimulationConfig(
+        initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
+    )
+    result = simulate([*history, entry], config)
+
+    assert result.total_costs_paid == Decimal("0")
+    assert result.wins == 1
