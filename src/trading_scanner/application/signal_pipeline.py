@@ -42,7 +42,7 @@ from trading_scanner.infrastructure.kite import (
     KiteProvider,
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
     TursoLiveOrderRepository,

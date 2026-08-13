@@ -11,7 +11,7 @@ from trading_scanner.domain.models import (
     SignalSide,
     Trade,
 )
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoFuturesPaperAccountRepository,
     TursoPaperAccountRepository,

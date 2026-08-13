@@ -24,7 +24,7 @@ import logging
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application.backtest import compute_historical_events, replay_pine_backtest
 from trading_scanner.config.settings import load_config
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoTradeRepository,
     create_turso_client,

@@ -19,7 +19,7 @@ from decimal import Decimal
 from trading_scanner.application.stop_loss_replay import apply_stop_loss, summarize
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import SignalSide
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoTradeRepository,
     create_turso_client,

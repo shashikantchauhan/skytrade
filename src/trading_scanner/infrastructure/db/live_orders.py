@@ -1,0 +1,130 @@
+"""Ledger of every real order leg placed on Zerodha -- see application/live_execution.py."""
+
+from collections.abc import Sequence
+from datetime import datetime
+from decimal import Decimal
+
+import libsql_client
+
+from trading_scanner.domain.models import LiveOrderLeg
+
+_CREATE_LIVE_ORDER_LEGS_TABLE = """
+CREATE TABLE IF NOT EXISTS live_order_legs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    basket_id TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    tradingsymbol TEXT NOT NULL,
+    transaction_type TEXT NOT NULL,
+    quantity INTEGER NOT NULL,
+    order_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    placed_at TEXT NOT NULL,
+    average_price REAL,
+    rejection_reason TEXT
+)
+"""
+
+
+class TursoLiveOrderRepository:
+    """Records every real order leg placed on Zerodha -- see
+    ``application/live_execution.py``. Purely a ledger/audit trail (every
+    row is an already-known outcome from Kite's own order API); nothing
+    here decides whether to place an order.
+    """
+
+    def __init__(self, client: libsql_client.Client) -> None:
+        self._client = client
+
+    async def ensure_schema(self) -> None:
+        await self._client.execute(_CREATE_LIVE_ORDER_LEGS_TABLE)
+
+    async def record_leg(self, leg: LiveOrderLeg) -> None:
+        await self._client.execute(
+            """
+            INSERT INTO live_order_legs
+                (basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                 quantity, order_id, status, placed_at, average_price, rejection_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                leg.basket_id,
+                leg.symbol,
+                leg.purpose,
+                leg.tradingsymbol,
+                leg.transaction_type,
+                leg.quantity,
+                leg.order_id,
+                leg.status,
+                leg.placed_at.isoformat(),
+                float(leg.average_price) if leg.average_price is not None else None,
+                leg.rejection_reason,
+            ],
+        )
+
+    async def get_legs(self, basket_id: str) -> Sequence[LiveOrderLeg]:
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason
+            FROM live_order_legs WHERE basket_id = ? ORDER BY placed_at ASC
+            """,
+            [basket_id],
+        )
+        return [
+            LiveOrderLeg(
+                basket_id=row[0],
+                symbol=row[1],
+                purpose=row[2],
+                tradingsymbol=row[3],
+                transaction_type=row[4],
+                quantity=int(row[5]),
+                order_id=row[6],
+                status=row[7],
+                placed_at=datetime.fromisoformat(row[8]),
+                average_price=Decimal(str(row[9])) if row[9] is not None else None,
+                rejection_reason=row[10],
+            )
+            for row in result.rows
+        ]
+
+    async def get_open_primary_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
+        """Every currently-open (no matching closing leg yet) real
+        ``purpose="primary"`` futures leg for ``symbol`` -- used to check
+        "do we already hold a real position here" before opening another,
+        and to know what to square off on exit. A leg counts as open if its
+        basket_id has no later leg with the opposite transaction_type for
+        the same tradingsymbol (i.e. it was never closed out)."""
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason
+            FROM live_order_legs
+            WHERE symbol = ? AND purpose = 'primary' AND status = 'COMPLETE'
+              AND tradingsymbol NOT IN (
+                  SELECT tradingsymbol FROM live_order_legs AS closer
+                  WHERE closer.symbol = live_order_legs.symbol
+                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
+                    AND closer.transaction_type != live_order_legs.transaction_type
+                    AND closer.status = 'COMPLETE'
+              )
+            ORDER BY placed_at ASC
+            """,
+            [symbol],
+        )
+        return [
+            LiveOrderLeg(
+                basket_id=row[0],
+                symbol=row[1],
+                purpose=row[2],
+                tradingsymbol=row[3],
+                transaction_type=row[4],
+                quantity=int(row[5]),
+                order_id=row[6],
+                status=row[7],
+                placed_at=datetime.fromisoformat(row[8]),
+                average_price=Decimal(str(row[9])) if row[9] is not None else None,
+                rejection_reason=row[10],
+            )
+            for row in result.rows
+        ]

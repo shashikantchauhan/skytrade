@@ -38,7 +38,7 @@ from sklearn.metrics import roc_auc_score
 
 from trading_scanner.application.ranking_features import FeatureRow, build_feature_table
 from trading_scanner.config.settings import load_config
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoTradeRepository,
     create_turso_client,

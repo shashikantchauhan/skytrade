@@ -50,7 +50,7 @@ from trading_scanner.application.backtest import compute_historical_events, repl
 from trading_scanner.application.signal_pipeline import _dataframe_to_candles
 from trading_scanner.config.settings import load_config
 from trading_scanner.infrastructure.kite import KiteInstrumentMap, KiteProvider
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoKiteSessionRepository,
     TursoTradeRepository,

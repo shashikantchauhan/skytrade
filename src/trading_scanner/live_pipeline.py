@@ -53,7 +53,7 @@ from trading_scanner.infrastructure.kite_ticker import (
     is_market_hours,
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoEngineStateRepository,
     TursoFuturesTradeRepository,

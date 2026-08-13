@@ -39,7 +39,7 @@ from trading_scanner.infrastructure.kite import (
 from trading_scanner.infrastructure.kite import (
     get_last_prices as kite_get_last_prices,
 )
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
     TursoOptionsTradeRepository,

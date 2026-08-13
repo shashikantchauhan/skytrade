@@ -29,7 +29,7 @@ from sector_mapping import sector_for  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from trading_scanner.config.settings import load_config  # noqa: E402
-from trading_scanner.infrastructure.turso import create_turso_client  # noqa: E402
+from trading_scanner.infrastructure.db import create_turso_client  # noqa: E402
 
 CHOPPY_THRESHOLD_PCT = 0.2
 

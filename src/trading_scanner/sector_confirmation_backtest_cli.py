@@ -14,7 +14,7 @@ import logging
 from trading_scanner.application.sector_confirmation import compare_confirmed_vs_unconfirmed
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import SignalSide
-from trading_scanner.infrastructure.turso import TursoTradeRepository, create_turso_client
+from trading_scanner.infrastructure.db import TursoTradeRepository, create_turso_client
 
 
 def _print_row(label: str, stats) -> None:

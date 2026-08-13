@@ -31,7 +31,7 @@ from decimal import Decimal
 
 from trading_scanner.domain.models import FuturesShadowTrade, OptionsShadowTrade, Trade
 from trading_scanner.infrastructure.kite import KiteDerivativesChain
-from trading_scanner.infrastructure.turso import (
+from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
     TursoOptionsTradeRepository,
     TursoTradeRepository,

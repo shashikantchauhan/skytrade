@@ -20,7 +20,7 @@ from trading_scanner.application.capital_constrained_backtest import (
     simulate,
 )
 from trading_scanner.config.settings import load_config
-from trading_scanner.infrastructure.turso import TursoTradeRepository, create_turso_client
+from trading_scanner.infrastructure.db import TursoTradeRepository, create_turso_client
 
 
 async def main() -> None:
