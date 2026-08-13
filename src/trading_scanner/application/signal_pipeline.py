@@ -263,7 +263,11 @@ async def run_signal_pipeline(
             )
     paper_notes.update(
         await _rank_and_open_paper_positions(
-            ranked_candidates, paper_account_repository, paper_account_lock
+            ranked_candidates,
+            paper_account_repository,
+            paper_account_lock,
+            candle_repository,
+            config.candle_interval,
         )
     )
 
@@ -778,6 +782,8 @@ async def _rank_and_open_paper_positions(
     candidates: list[tuple[str, RankedCandidate]],
     paper_account_repository: PaperAccountRepository,
     paper_account_lock: asyncio.Lock,
+    candle_repository: CandleRepository,
+    interval: str,
 ) -> dict[str, str]:
     """Open paper positions for one cycle's already-eligible BUY candidates,
     strongest-ranked first, instead of whichever symbol's task happened to
@@ -786,7 +792,11 @@ async def _rank_and_open_paper_positions(
     Each ``try_open_position`` call is still individually gated on free
     capital exactly as ``_open_paper_position`` does today -- this only
     changes the *order* candidates compete for that capital, not the
-    capital math itself. Once capital runs out, every remaining (weaker)
+    capital math itself. If capital is out, before giving up on a
+    candidate this also tries ``paper_trading.try_evict_and_open`` --
+    evicting a weaker, currently-losing open position to make room, rather
+    than always just skipping (see that function's docstring for the
+    eviction rule and the market-close cutoff). Once both fail, the
     candidate is skipped and tagged distinctly from a plain
     no-capital-at-all skip, so it is visible in the notification that
     ranking, not just capital, decided the outcome.
@@ -798,13 +808,34 @@ async def _rank_and_open_paper_positions(
         symbol = symbol_by_candidate[candidate]
         async with paper_account_lock:
             position = await paper_trading.try_open_position(
-                symbol, candidate.entry_timestamp, candidate.entry_price, paper_account_repository
+                symbol,
+                candidate.entry_timestamp,
+                candidate.entry_price,
+                paper_account_repository,
+                Decimal(str(candidate.prediction_at_entry)),
             )
+            evicted = False
+            if position is None:
+                position = await paper_trading.try_evict_and_open(
+                    symbol,
+                    candidate.entry_timestamp,
+                    candidate.entry_price,
+                    Decimal(str(candidate.prediction_at_entry)),
+                    paper_account_repository,
+                    candle_repository,
+                    interval,
+                )
+                evicted = position is not None
         if position is None:
             notes[symbol] = (
                 "paper: SKIPPED (ranked below capacity, no capital left)"
                 if index > 0
                 else "paper: SKIPPED (no capital available)"
+            )
+        elif evicted:
+            notes[symbol] = (
+                f"paper: opened {position.quantity} qty (₹{position.capital_allocated:.0f}) "
+                "-- evicted a weaker, losing position to make room"
             )
         else:
             notes[symbol] = (

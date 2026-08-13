@@ -95,6 +95,13 @@ class PaperPosition:
     exit_price: Decimal | None = None
     pnl_amount: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+    # The ranking candidate's score at the moment this position was opened
+    # (AlphaEngine's prediction_at_entry -- see application/ranking.py).
+    # None for positions opened before this field existed. Used by
+    # application/paper_trading.py's capital-rotation logic to judge
+    # whether a stronger new candidate should evict a weaker open
+    # position, rather than just being skipped for lack of capital.
+    prediction_at_entry: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

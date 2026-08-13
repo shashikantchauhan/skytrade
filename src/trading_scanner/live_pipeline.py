@@ -32,9 +32,10 @@ from decimal import Decimal
 from kiteconnect import KiteConnect, KiteTicker
 
 from trading_scanner.alpha_engine import AlphaEngine
-from trading_scanner.application.paper_trading import INITIAL_CAPITAL
+from trading_scanner.application.paper_trading import INITIAL_CAPITAL, stop_loss_price
 from trading_scanner.application.signal_pipeline import (
     _ENGINE_SETTINGS,
+    _close_paper_position,
     _evaluate_from_stored_candles,
     _process_symbol,
 )
@@ -83,6 +84,11 @@ _TOKEN_REFRESH_CHECK_SECONDS = 120
 # DB I/O bound, not CPU bound).
 _MAX_CONCURRENT_SYMBOLS = 12
 
+# How often the tick-level stop-loss's open-positions cache is refreshed
+# from the DB -- see _open_positions_cache's docstring. A few seconds of
+# staleness is harmless; querying on every tick would not be.
+_POSITIONS_CACHE_REFRESH_SECONDS = 5
+
 
 def _build_notifier(config: AppConfig):
     if config.telegram_bot_token and config.telegram_chat_id:
@@ -110,6 +116,15 @@ class LiveTickerPipeline:
         self._client = None
         self._repos: dict = {}
         self._notifier = None
+        # symbol -> entry_price for every currently-open paper position.
+        # Refreshed from the DB every _POSITIONS_CACHE_REFRESH_SECONDS
+        # (see _refresh_positions_cache_loop) rather than on every tick --
+        # a DB round trip per tick would be far too slow across 220
+        # symbols. Staleness is bounded and harmless: close_position() is
+        # idempotent (returns None if nothing's open), so a stale entry
+        # here only risks one redundant, no-op close attempt, never a
+        # double-close or double-charge.
+        self._open_positions_cache: dict[str, Decimal] = {}
 
     async def _setup_repositories(self) -> None:
         if not self._config.turso_database_url:
@@ -196,7 +211,9 @@ class LiveTickerPipeline:
         """Consumes ticks pushed by the (threaded) KiteTicker callback and
         feeds them into the right symbol's aggregator. ``queue.Queue.get``
         is blocking, so it runs via ``asyncio.to_thread`` rather than
-        polling/spinning."""
+        polling/spinning. Also checks each tick against the open-positions
+        cache for a stop-loss breach -- this is what makes the stop
+        tick-level rather than only checked at the hourly bucket close."""
         while True:
             ticks = await asyncio.to_thread(self._tick_queue.get)
             for tick in ticks:
@@ -208,7 +225,49 @@ class LiveTickerPipeline:
                 if price is None:
                     continue
                 volume = tick.get("volume_traded", 0) or 0
-                aggregator.add_tick(datetime.now(UTC), Decimal(str(price)), int(volume))
+                price_decimal = Decimal(str(price))
+                aggregator.add_tick(datetime.now(UTC), price_decimal, int(volume))
+                await self._check_stop_loss(token, price_decimal)
+
+    async def _check_stop_loss(self, token: int, price: Decimal) -> None:
+        symbol = self._token_to_symbol.get(token)
+        if symbol is None:
+            return
+        entry_price = self._open_positions_cache.get(symbol)
+        if entry_price is None:
+            return
+        if price > stop_loss_price(entry_price):
+            return
+        # Drop it from the cache immediately -- a burst of ticks can arrive
+        # for the same symbol before the next cache refresh, and this must
+        # not fire more than once for the same position.
+        self._open_positions_cache.pop(symbol, None)
+        logger.warning(
+            "Stop-loss breached for %s: price=%s <= stop=%s (entry=%s) -- force-closing.",
+            symbol, price, stop_loss_price(entry_price), entry_price,
+        )
+        await _close_paper_position(
+            symbol, datetime.now(UTC), price,
+            self._repos["paper_account"], self._repos["signal"], self._notifier,
+            self._paper_account_lock,
+        )
+
+    async def _refresh_positions_cache_loop(self) -> None:
+        """Keeps ``_open_positions_cache`` in sync with the DB every few
+        seconds -- not on every tick (see ``_open_positions_cache``'s own
+        docstring for why), and not hooked into every individual
+        open/close call site (which would be fragile -- easy to miss one).
+        Polling the DB for ground truth is simpler and safe given
+        ``close_position``'s idempotency."""
+        while True:
+            try:
+                positions = await self._repos["paper_account"].get_open_positions()
+                self._open_positions_cache = {p.symbol: p.entry_price for p in positions}
+            except Exception:
+                logger.warning(
+                    "Failed to refresh open-positions cache (will retry).", exc_info=True
+                )
+            await asyncio.sleep(_POSITIONS_CACHE_REFRESH_SECONDS)
 
     async def _boundary_loop(self) -> None:
         """Wakes up periodically; when the current hourly bucket has
@@ -355,6 +414,18 @@ class LiveTickerPipeline:
                     await asyncio.sleep(60)
                     continue
 
+                # Prime the stop-loss cache immediately -- a mid-day
+                # restart (token refresh, deploy, crash-recover) must not
+                # leave already-open positions unprotected until the first
+                # periodic refresh fires.
+                try:
+                    positions = await self._repos["paper_account"].get_open_positions()
+                    self._open_positions_cache = {p.symbol: p.entry_price for p in positions}
+                except Exception:
+                    logger.warning(
+                        "Failed to prime open-positions cache on startup.", exc_info=True
+                    )
+
                 self._connect_ticker(access_token)
                 self._current_bucket = None
                 try:
@@ -362,6 +433,7 @@ class LiveTickerPipeline:
                         self._drain_ticks_loop(),
                         self._boundary_loop(),
                         self._token_refresh_loop(),
+                        self._refresh_positions_cache_loop(),
                         self._run_until_market_close(),
                     )
                 finally:

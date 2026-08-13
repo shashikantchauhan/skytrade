@@ -550,6 +550,9 @@ class TursoPaperAccountRepository:
         """Create the paper_account and paper_positions tables if missing."""
         await self._client.execute(_CREATE_PAPER_ACCOUNT_TABLE)
         await self._client.execute(_CREATE_PAPER_POSITIONS_TABLE)
+        await _add_column_if_missing(
+            self._client, "paper_positions", "prediction_at_entry", "REAL"
+        )
 
     async def get_cash_balance(self) -> Decimal:
         result = await self._client.execute("SELECT cash_balance FROM paper_account WHERE id = 1")
@@ -567,8 +570,9 @@ class TursoPaperAccountRepository:
         await self._client.execute(
             """
             INSERT INTO paper_positions
-                (symbol, entry_timestamp, entry_price, quantity, capital_allocated, status)
-            VALUES (?, ?, ?, ?, ?, 'open')
+                (symbol, entry_timestamp, entry_price, quantity, capital_allocated,
+                 prediction_at_entry, status)
+            VALUES (?, ?, ?, ?, ?, ?, 'open')
             """,
             [
                 position.symbol,
@@ -576,6 +580,9 @@ class TursoPaperAccountRepository:
                 float(position.entry_price),
                 position.quantity,
                 float(position.capital_allocated),
+                float(position.prediction_at_entry)
+                if position.prediction_at_entry is not None
+                else None,
             ],
         )
         await self._client.execute(
@@ -630,7 +637,8 @@ class TursoPaperAccountRepository:
     async def get_open_positions(self) -> Sequence[PaperPosition]:
         result = await self._client.execute(
             """
-            SELECT symbol, entry_timestamp, entry_price, quantity, capital_allocated
+            SELECT symbol, entry_timestamp, entry_price, quantity, capital_allocated,
+                   prediction_at_entry
             FROM paper_positions WHERE status = 'open'
             """
         )
@@ -641,6 +649,7 @@ class TursoPaperAccountRepository:
                 entry_price=Decimal(str(row[2])),
                 quantity=row[3],
                 capital_allocated=Decimal(str(row[4])),
+                prediction_at_entry=Decimal(str(row[5])) if row[5] is not None else None,
             )
             for row in result.rows
         ]
