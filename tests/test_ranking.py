@@ -85,3 +85,20 @@ def test_score_candidate_buy_and_sell_conviction_are_symmetric():
     strong_short = _candidate("STRONG_SHORT", prediction=-6, direction=SignalSide.SELL)
 
     assert score_candidate(strong_buy) == score_candidate(strong_short)
+
+
+def test_score_candidate_caps_volatility_margin_so_it_only_breaks_ties():
+    # An extreme volatility_margin (real production data reaches into the
+    # thousands) must not let a weak-prediction candidate outrank a
+    # strong-prediction one -- prediction is supposed to dominate.
+    weak_pred_huge_volmargin = _candidate("SPIKY", prediction=1, vol_margin=2000.0)
+    strong_pred_normal_volmargin = _candidate("STRONG", prediction=8, vol_margin=1.0)
+
+    assert score_candidate(strong_pred_normal_volmargin) > score_candidate(weak_pred_huge_volmargin)
+
+
+def test_score_candidate_volatility_margin_still_breaks_ties_within_the_cap():
+    same_pred_low_vol = _candidate("LOW_VOL", prediction=5, vol_margin=0.5)
+    same_pred_high_vol = _candidate("HIGH_VOL", prediction=5, vol_margin=3.0)
+
+    assert score_candidate(same_pred_high_vol) > score_candidate(same_pred_low_vol)

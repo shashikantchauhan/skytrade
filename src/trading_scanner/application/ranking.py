@@ -45,9 +45,17 @@ from trading_scanner.domain.models import SignalSide
 # a candidate scoring below this gets rejected outright even when capital
 # is sitting free, rather than funded just because nothing stronger showed
 # up in that cycle. 0 (default) preserves today's pure-relative behavior.
-# 2026-08-14 baseline (see Stage A baseline report): a floor around 81
-# keeps roughly the top 40% of signals (Q4+Q5), 60.6% win rate / PF ~4.5
-# vs. 58.0% / PF 4.35 unfiltered -- tune via this env var, not a code edit.
+#
+# 2026-08-14: an earlier baseline run here (floors of 81, then 92) was
+# built on the pre-cap formula below, whose score distribution was
+# dominated by volatility_margin's uncapped long tail -- once fixed, that
+# same analysis re-run against the corrected formula showed NO real
+# discriminating power (quintiles roughly flat 55-60% win rate, top decile
+# actually *worse* PF than baseline; prediction_at_entry alone shows the
+# same flat pattern). Deployed floor was reverted to 0 (no floor) the same
+# session pending real evidence the heuristic discriminates quality --
+# don't reintroduce a nonzero floor without a fresh baseline run against
+# THIS (capped) formula first.
 MIN_SCORE = float(os.getenv("TRADING_SCANNER_RANKING_MIN_SCORE", "0"))
 
 
@@ -75,6 +83,23 @@ class RankedCandidate:
     direction: SignalSide = SignalSide.BUY
 
 
+# 2026-08-14: found by hand, checking real trade examples against this
+# formula -- volatility_margin is NOT a small, bounded quantity the way ADX
+# is (see this constant's own reasoning below). Its real distribution across
+# 6,292 production trades: median ~4.9, p90 ~57, p99 ~438, max ~2160. Added
+# uncapped, it silently stopped being a tie-breaker for a meaningful chunk
+# of trades (44.5% of the top score quintile got there mainly *because of*
+# a large volatility_margin, not strong prediction -- directly contradicting
+# this function's own "prediction dominates" claim below, which was true in
+# intent but false in practice until this cap). Capped at 5.0: prediction's
+# own range is 10-80 (neighbors_count=8, so -8..+8 * 10), so a 5-point cap
+# can never outweigh even a single prediction-vote's difference (10 points)
+# -- restores tie-breaker-only behavior for volatility_margin. Chosen close
+# to the real median (4.9) specifically so typical trades are barely
+# affected; only the pathological long tail gets reined in.
+_MAX_VOLATILITY_MARGIN_CONTRIBUTION = 5.0
+
+
 def score_candidate(candidate: RankedCandidate) -> float:
     """Stage A heuristic score: higher is a stronger candidate, regardless
     of direction.
@@ -88,9 +113,13 @@ def score_candidate(candidate: RankedCandidate) -> float:
     backwards. A no-op for today's BUY-only ranking (direction is always
     BUY live), but correct the moment SELL candidates are ranked too.
 
-    ADX and the volatility margin break ties between similarly-confident
-    signals: prefer a trending market (higher ADX) with volatility clearly
-    above its filter threshold (positive margin) over a borderline one.
+    ADX and the (capped) volatility margin break ties between similarly-
+    confident signals: prefer a trending market (higher ADX) with
+    volatility clearly above its filter threshold (positive margin) over a
+    borderline one -- capped at ``_MAX_VOLATILITY_MARGIN_CONTRIBUTION`` so
+    an extreme volatility reading can nudge a tie but never override a
+    real prediction-strength difference (see that constant's own docstring
+    for why this cap exists and how it was chosen).
 
     Replace this function's body with a trained model's ``predict_proba``
     call once ``train_ranking_model.py`` has one validated -- callers only
@@ -98,10 +127,13 @@ def score_candidate(candidate: RankedCandidate) -> float:
     score is computed.
     """
     direction_sign = 1.0 if candidate.direction == SignalSide.BUY else -1.0
+    volatility_contribution = min(
+        max(candidate.volatility_margin, 0.0), _MAX_VOLATILITY_MARGIN_CONTRIBUTION
+    )
     return (
         float(candidate.prediction_at_entry) * direction_sign * 10.0
         + candidate.adx
-        + max(candidate.volatility_margin, 0.0)
+        + volatility_contribution
     )
 
 
