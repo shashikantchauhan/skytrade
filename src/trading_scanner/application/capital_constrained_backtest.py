@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from trading_scanner.application.ranking import RankedCandidate, rank_candidates
+from trading_scanner.application.ranking import RankedCandidate, rank_candidates, score_candidate
 from trading_scanner.domain.models import SignalSide, Trade
 
 MIN_WIN_RATE = Decimal("55")
@@ -46,6 +46,11 @@ class SimulationConfig:
     target_slots: int
     min_position_size: Decimal
     use_ranking: bool = True
+    # Mirrors ranking.MIN_SCORE -- 0 (default) means no floor, matching
+    # ranking.py's own backward-compatible default. Only applied when
+    # use_ranking is True (a floor without ranking has no ordering to
+    # apply it against consistently).
+    min_score: float = 0.0
 
 
 @dataclass(slots=True)
@@ -54,6 +59,7 @@ class SimulationResult:
     trades_taken: int = 0
     trades_skipped_ineligible: int = 0
     trades_skipped_no_capital: int = 0
+    trades_skipped_below_score_floor: int = 0
     final_cash: Decimal = Decimal("0")
     # Capital still locked in positions open at the end of the dataset --
     # never returned to final_cash since they never close within this
@@ -69,7 +75,10 @@ class SimulationResult:
     @property
     def total_signals(self) -> int:
         return (
-            self.trades_taken + self.trades_skipped_ineligible + self.trades_skipped_no_capital
+            self.trades_taken
+            + self.trades_skipped_ineligible
+            + self.trades_skipped_no_capital
+            + self.trades_skipped_below_score_floor
         )
 
     @property
@@ -202,7 +211,19 @@ def simulate(trades: Sequence[Trade], config: SimulationConfig) -> SimulationRes
                 for trade in eligible
             ])
             by_symbol = {trade.symbol: trade for trade in eligible}
-            ordered = [by_symbol[candidate.symbol] for candidate in ranked]
+            # Ranked strongest-first -- once one candidate falls below the
+            # floor, every remaining one does too, so cut the ordered list
+            # there rather than filtering after (keeps trades_skipped_no_capital
+            # meaning what it says: real capacity misses, not floor rejects).
+            below_floor_count = 0
+            cutoff = len(ranked)
+            for index, candidate in enumerate(ranked):
+                if score_candidate(candidate) < config.min_score:
+                    cutoff = index
+                    below_floor_count = len(ranked) - index
+                    break
+            result.trades_skipped_below_score_floor += below_floor_count
+            ordered = [by_symbol[candidate.symbol] for candidate in ranked[:cutoff]]
 
         for trade in ordered:
             if try_open(trade):

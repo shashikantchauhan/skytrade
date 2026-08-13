@@ -7,9 +7,12 @@ import pandas as pd
 import pytest
 
 from trading_scanner.application.fast_predict import ExitState, FastPredictResult, QueueState
+from trading_scanner.application.ranking import RankedCandidate
+import trading_scanner.application.signal_pipeline as signal_pipeline_module
 from trading_scanner.application.signal_pipeline import (
     _BACKFILL_WINDOW_DAYS,
     _RECENT_WINDOW_DAYS,
+    _rank_and_open_paper_positions,
     run_signal_pipeline,
 )
 from trading_scanner.config.settings import AppConfig
@@ -1159,3 +1162,46 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
     assert "index(^NSEI)=SELL" in notifier.sent[0].rationale
     assert "pred=-4" in notifier.sent[0].rationale
     assert "early_flip=True" in notifier.sent[0].rationale
+
+
+async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypatch) -> None:
+    """A candidate scoring below MIN_SCORE is rejected outright, even with
+    plenty of free capital -- distinct from a capacity-driven skip."""
+    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 50.0)
+
+    strong = RankedCandidate(  # score = 8*10 + 0 + 0 = 80
+        symbol="A", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
+        prediction_at_entry=8, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
+    )
+    weak = RankedCandidate(  # score = 1*10 + 0 + 0 = 10, below the 50 floor
+        symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
+        prediction_at_entry=1, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
+    )
+    paper_account_repository = FakePaperAccountRepository()
+
+    notes = await _rank_and_open_paper_positions(
+        [("A", strong), ("B", weak)], paper_account_repository, asyncio.Lock()
+    )
+
+    assert "opened" in notes["A"]
+    assert "REJECTED" in notes["B"]
+    assert "below minimum 50" in notes["B"]
+    # Rejected by policy, not by running out of capital -- must not have
+    # even attempted to open a position for it.
+    assert all(position.symbol != "B" for position in paper_account_repository.opened)
+
+
+async def test_rank_and_open_paper_positions_default_floor_is_a_no_op(monkeypatch) -> None:
+    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 0.0)
+
+    weak = RankedCandidate(
+        symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
+        prediction_at_entry=1, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
+    )
+    paper_account_repository = FakePaperAccountRepository()
+
+    notes = await _rank_and_open_paper_positions(
+        [("B", weak)], paper_account_repository, asyncio.Lock()
+    )
+
+    assert "opened" in notes["B"]

@@ -1,10 +1,22 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from trading_scanner.application.ranking import RankedCandidate, rank_candidates, select_top_n
+from trading_scanner.application.ranking import (
+    RankedCandidate,
+    rank_candidates,
+    score_candidate,
+    select_top_n,
+)
+from trading_scanner.domain.models import SignalSide
 
 
-def _candidate(symbol: str, prediction: int, adx: float = 0.2, vol_margin: float = 0.0):
+def _candidate(
+    symbol: str,
+    prediction: int,
+    adx: float = 0.2,
+    vol_margin: float = 0.0,
+    direction: SignalSide = SignalSide.BUY,
+):
     return RankedCandidate(
         symbol=symbol,
         entry_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
@@ -13,6 +25,7 @@ def _candidate(symbol: str, prediction: int, adx: float = 0.2, vol_margin: float
         adx=adx,
         regime_normalized=0.0,
         volatility_margin=vol_margin,
+        direction=direction,
     )
 
 
@@ -51,3 +64,24 @@ def test_select_top_n_with_no_free_slots_skips_everyone():
 
     assert take == []
     assert skip == candidates
+
+
+def test_score_candidate_is_direction_aware_for_sell():
+    # Strongly bearish (prediction=-6) should score HIGHER than weakly
+    # bearish (prediction=-1) for a SELL candidate -- without flipping the
+    # sign by direction, the raw formula would rank these backwards, since
+    # prediction_at_entry is only "more positive = better" for a BUY.
+    strong_short = _candidate("STRONG_SHORT", prediction=-6, direction=SignalSide.SELL)
+    weak_short = _candidate("WEAK_SHORT", prediction=-1, direction=SignalSide.SELL)
+
+    assert score_candidate(strong_short) > score_candidate(weak_short)
+
+
+def test_score_candidate_buy_and_sell_conviction_are_symmetric():
+    # A BUY at prediction=+6 and a SELL at prediction=-6 represent equally
+    # strong conviction in their own direction, so should score identically
+    # (all else equal).
+    strong_buy = _candidate("STRONG_BUY", prediction=6, direction=SignalSide.BUY)
+    strong_short = _candidate("STRONG_SHORT", prediction=-6, direction=SignalSide.SELL)
+
+    assert score_candidate(strong_buy) == score_candidate(strong_short)

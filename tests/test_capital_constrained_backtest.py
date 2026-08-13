@@ -106,6 +106,49 @@ def test_capital_exhaustion_skips_lower_ranked_candidates():
     assert result.trades_skipped_no_capital == 1
 
 
+def test_score_floor_rejects_weak_candidate_even_with_free_capital():
+    history_a = _track_record("A")
+    history_b = _track_record("B")
+    same_time = datetime(2026, 2, 1, tzinfo=UTC)
+    strong = Trade(
+        symbol="A", side=SignalSide.BUY, entry_timestamp=same_time, entry_price=Decimal("100"),
+        prediction_at_entry=8, is_early_signal_flip=False,  # score = 80
+        exit_timestamp=None, exit_price=None, status="open",
+    )
+    weak = Trade(
+        symbol="B", side=SignalSide.BUY, entry_timestamp=same_time, entry_price=Decimal("100"),
+        prediction_at_entry=1, is_early_signal_flip=False,  # score = 10
+        exit_timestamp=None, exit_price=None, status="open",
+    )
+    # Plenty of capital for both -- the weak one must be rejected by the
+    # floor, not by running out of money.
+    config = SimulationConfig(
+        initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
+        min_score=50.0,
+    )
+    result = simulate([*history_a, *history_b, strong, weak], config)
+    assert result.trades_taken == 1
+    assert result.trades_skipped_no_capital == 0
+    assert result.trades_skipped_below_score_floor == 1
+
+
+def test_score_floor_of_zero_is_a_no_op_by_default():
+    """Default min_score=0 must not change behavior for realistic (positive)
+    scores -- this is the backward-compatible default, not an opt-in."""
+    history = _track_record("A")
+    entry = Trade(
+        symbol="A", side=SignalSide.BUY, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("100"), prediction_at_entry=1, is_early_signal_flip=False,
+        exit_timestamp=None, exit_price=None, status="open",
+    )
+    config = SimulationConfig(
+        initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
+    )
+    result = simulate([*history, entry], config)
+    assert result.trades_taken == 1
+    assert result.trades_skipped_below_score_floor == 0
+
+
 def test_unranked_mode_preserves_input_order_instead_of_scoring():
     history_a = _track_record("A")
     history_b = _track_record("B")

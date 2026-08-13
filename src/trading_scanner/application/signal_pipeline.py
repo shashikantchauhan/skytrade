@@ -23,7 +23,12 @@ from trading_scanner.application.fast_predict import (
     bootstrap_queue_state,
     evaluate_latest_bar,
 )
-from trading_scanner.application.ranking import RankedCandidate, rank_candidates
+from trading_scanner.application.ranking import (
+    MIN_SCORE,
+    RankedCandidate,
+    rank_candidates,
+    score_candidate,
+)
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
 from trading_scanner.domain.ports import (
@@ -841,6 +846,21 @@ async def _rank_and_open_paper_positions(
     ranked = rank_candidates([candidate for _, candidate in candidates])
     for index, candidate in enumerate(ranked):
         symbol = symbol_by_candidate[candidate]
+        score = score_candidate(candidate)
+        if score < MIN_SCORE:
+            # Ranked strongest-first, so every remaining candidate also
+            # scores below the floor -- reject them all and stop, rather
+            # than spending capital on a signal too weak by policy just
+            # because a slot happens to be free (see MIN_SCORE's own
+            # docstring for the 2026-08-14 baseline this threshold is
+            # tuned against).
+            for weaker_candidate in ranked[index:]:
+                weaker_symbol = symbol_by_candidate[weaker_candidate]
+                weaker_score = score_candidate(weaker_candidate)
+                notes[weaker_symbol] = (
+                    f"paper: REJECTED (score {weaker_score:.0f} below minimum {MIN_SCORE:.0f})"
+                )
+            break
         async with paper_account_lock:
             position = await paper_trading.try_open_position(
                 symbol, candidate.entry_timestamp, candidate.entry_price, paper_account_repository

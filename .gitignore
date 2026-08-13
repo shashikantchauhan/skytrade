@@ -5,6 +5,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 data/*.json
+data/*.db
 !data/.gitkeep
 validation/*.csv
 local.db*
