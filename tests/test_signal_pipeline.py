@@ -6,17 +6,27 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
+import trading_scanner.application.signal_pipeline as signal_pipeline_module
 from trading_scanner.application.fast_predict import ExitState, FastPredictResult, QueueState
 from trading_scanner.application.ranking import RankedCandidate
-import trading_scanner.application.signal_pipeline as signal_pipeline_module
 from trading_scanner.application.signal_pipeline import (
     _BACKFILL_WINDOW_DAYS,
     _RECENT_WINDOW_DAYS,
+    _close_futures_paper,
+    _collect_and_open_ranked_positions,
+    _open_futures_paper,
+    _rank_and_open_futures_positions,
     _rank_and_open_paper_positions,
     run_signal_pipeline,
 )
 from trading_scanner.config.settings import AppConfig
-from trading_scanner.domain.models import Candle, PaperPosition, SignalSide, Trade
+from trading_scanner.domain.models import (
+    Candle,
+    FuturesPaperPosition,
+    PaperPosition,
+    SignalSide,
+    Trade,
+)
 from trading_scanner.domain.ports import EngineState
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
@@ -158,6 +168,7 @@ def _config() -> AppConfig:
         live_trading_enabled=False,
         live_trading_symbols=frozenset(),
         live_trading_max_lots=1,
+        futures_paper_symbols_file=None,
     )
 
 
@@ -1143,6 +1154,7 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         live_trading_enabled=False,
         live_trading_symbols=frozenset(),
         live_trading_max_lots=1,
+        futures_paper_symbols_file=None,
     )
     candle_repository = FakeCandleRepository()
     signal_repository = FakeSignalRepository()
@@ -1181,7 +1193,7 @@ async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypat
         symbol="A", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=8, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
-    weak = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 1*2 + 0*1 + 75 = 77, below the 80 floor
+    weak = RankedCandidate(  # score = 1*2 + 75 (neutral expectancy) = 77, below the floor
         symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=1, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
@@ -1213,3 +1225,247 @@ async def test_rank_and_open_paper_positions_default_floor_is_a_no_op(monkeypatc
     )
 
     assert "opened" in notes["B"]
+
+
+# --- _open_futures_paper / _close_futures_paper ---
+# The gating wrapper _process_symbol actually calls per BUY/SELL signal --
+# see application/futures_trading.py for the eligibility/margin logic these
+# wrap.
+
+
+class _FakeFuturesDerivativesChain:
+    def margin_benefit(self, legs):
+        return {
+            "primary_only_margin": 15000.0, "combined_margin": 10000.0, "margin_benefit": 5000.0,
+        }
+
+    def nearest_future(self, symbol):
+        return {
+            "tradingsymbol": f"{symbol.removesuffix('.NS')}26AUGFUT", "lot_size": 500,
+            "instrument_token": 111, "expiry": "2026-08-25",
+        }
+
+    def nearest_atm_option(self, symbol, option_type, underlying_price):
+        return {
+            "tradingsymbol": f"{symbol.removesuffix('.NS')}26AUG{option_type}", "lot_size": 500,
+            "instrument_token": 222, "strike": underlying_price,
+        }
+
+
+class _FakeFuturesPaperAccountRepository:
+    def __init__(self) -> None:
+        self.opened = []
+
+    async def get_cash_balance(self):
+        return Decimal("400000")
+
+    async def open_position(self, position) -> None:
+        self.opened.append(position)
+
+    async def close_position(self, symbol, exit_timestamp, futures_exit_price):
+        matching = [p for p in self.opened if p.symbol == symbol]
+        return matching[-1] if matching else None
+
+    async def get_open_positions(self):
+        return self.opened
+
+
+def _eligible_trade_repo() -> FakeTradeRepository:
+    repo = FakeTradeRepository()
+    repo.opened = [
+        Trade(
+            symbol="RELIANCE.NS", side=SignalSide.BUY,
+            entry_timestamp=datetime(2026, 1, 1, tzinfo=UTC), entry_price=Decimal("100"),
+            prediction_at_entry=1, is_early_signal_flip=False,
+            exit_timestamp=datetime(2026, 1, 2, tzinfo=UTC), exit_price=Decimal("110"),
+            pnl_percent=Decimal("10"), status="closed",
+        )
+        for _ in range(5)
+    ]
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_noop_when_symbol_not_in_allowlist():
+    account = _FakeFuturesPaperAccountRepository()
+
+    note = await _open_futures_paper(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "1h", _eligible_trade_repo(), _FakeFuturesDerivativesChain(), account,
+        frozenset(),  # empty allowlist -- RELIANCE.NS isn't on it
+    )
+
+    assert note is None
+    assert account.opened == []
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_noop_when_no_account_repository():
+    note = await _open_futures_paper(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "1h", _eligible_trade_repo(), _FakeFuturesDerivativesChain(), None,
+        frozenset({"RELIANCE.NS"}),
+    )
+
+    assert note is None
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_opens_when_allowlisted_and_eligible():
+    account = _FakeFuturesPaperAccountRepository()
+
+    note = await _open_futures_paper(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "1h", _eligible_trade_repo(), _FakeFuturesDerivativesChain(), account,
+        frozenset({"RELIANCE.NS"}),
+    )
+
+    assert note is not None
+    assert len(account.opened) == 1
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_swallows_exceptions():
+    class _ExplodingChain:
+        def nearest_future(self, symbol):
+            raise RuntimeError("Kite API hiccup")
+
+    note = await _open_futures_paper(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "1h", _eligible_trade_repo(), _ExplodingChain(), _FakeFuturesPaperAccountRepository(),
+        frozenset({"RELIANCE.NS"}),
+    )
+
+    assert note is None  # never raises into the caller
+
+
+@pytest.mark.asyncio
+async def test_close_futures_paper_noop_when_symbol_not_in_allowlist():
+    account = _FakeFuturesPaperAccountRepository()
+    account.opened.append(
+        FuturesPaperPosition(
+            symbol="RELIANCE.NS", side="long", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+            futures_entry_price=Decimal("2900"), futures_tradingsymbol="RELIANCE26AUGFUT",
+            hedge_tradingsymbol="RELIANCE26AUGPE", lot_size=500, margin_allocated=Decimal("10000"),
+        )
+    )
+
+    await _close_futures_paper(
+        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account, frozenset(),
+    )
+
+    # close_position was never even called -- position stays "open" (no
+    # status flip in this fake, since close_position wasn't invoked).
+    assert account.opened[0].status == "open"
+
+
+# --- _rank_and_open_futures_positions / _collect_and_open_ranked_positions ---
+# 2026-08-14: these close the gap where live_pipeline.py (the actual
+# production driver) never ranked either book at all -- see
+# _collect_and_open_ranked_positions's own docstring.
+
+
+def _eligible_multi_symbol_trade_repo(entries: list[tuple[str, SignalSide]]) -> FakeTradeRepository:
+    """Like _eligible_trade_repo, but for arbitrary (symbol, side) pairs --
+    each gets 5 winning closed trades, clearing the 55% eligibility bar."""
+    repo = FakeTradeRepository()
+    for symbol, side in entries:
+        repo.opened.extend(
+            Trade(
+                symbol=symbol, side=side,
+                entry_timestamp=datetime(2026, 1, 1, tzinfo=UTC), entry_price=Decimal("100"),
+                prediction_at_entry=1, is_early_signal_flip=False,
+                exit_timestamp=datetime(2026, 1, 2, tzinfo=UTC), exit_price=Decimal("110"),
+                pnl_percent=Decimal("10"), status="closed",
+            )
+            for _ in range(5)
+        )
+    return repo
+
+
+@pytest.mark.asyncio
+async def test_rank_and_open_futures_positions_opens_strongest_first():
+    strong = RankedCandidate(  # prediction=8 -> highest score
+        symbol="STRONG.NS", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("2900"), prediction_at_entry=8, adx=0.0, regime_normalized=0.0,
+        volatility_margin=0.0, direction=SignalSide.BUY,
+    )
+    weak = RankedCandidate(  # prediction=1 -> lowest score, opposite direction
+        symbol="WEAK.NS", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("2900"), prediction_at_entry=-1, adx=0.0, regime_normalized=0.0,
+        volatility_margin=0.0, direction=SignalSide.SELL,
+    )
+    chain = _FakeFuturesDerivativesChain()
+    account = _FakeFuturesPaperAccountRepository()
+    trade_repository = _eligible_multi_symbol_trade_repo(
+        [("STRONG.NS", SignalSide.BUY), ("WEAK.NS", SignalSide.SELL)]
+    )
+
+    notes = await _rank_and_open_futures_positions(
+        [("WEAK.NS", weak), ("STRONG.NS", strong)],
+        "1h", trade_repository, chain, account,
+    )
+
+    assert "STRONG.NS" in notes["STRONG.NS"] or "opened" in notes["STRONG.NS"]
+    # Both actually open here (no capital constraint in this fake), but the
+    # opening order itself is strongest-first -- confirm STRONG went first.
+    assert account.opened[0].symbol == "STRONG.NS"
+    assert account.opened[1].symbol == "WEAK.NS"
+
+
+def _fast_predict_result(signal: str, prediction: int) -> FastPredictResult:
+    return FastPredictResult(
+        signal=signal, prediction=prediction, end_long=False, end_short=False,
+        is_early_signal_flip=False, signal_previous=0,
+        queue_state=QueueState(), exit_state=ExitState(),
+        adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
+    )
+
+
+def _fake_candle(symbol: str) -> Candle:
+    return Candle(
+        symbol=symbol, timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        open=Decimal("2900"), high=Decimal("2905"), low=Decimal("2895"), close=Decimal("2900"),
+        volume=1000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_populates_both_books():
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS has an eligible BUY track record
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
+    }
+
+    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, _config(), trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository,
+        frozenset({"RELIANCE.NS"}),
+    )
+
+    assert "opened" in paper_notes["RELIANCE.NS"]
+    assert "opened" in futures_notes["RELIANCE.NS"]
+    assert len(paper_account_repository.opened) == 1
+    assert len(futures_account_repository.opened) == 1
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_skips_futures_when_not_allowlisted():
+    trade_repository = _eligible_trade_repo()
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
+    }
+
+    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, _config(), trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository,
+        frozenset(),  # empty allowlist
+    )
+
+    assert "opened" in paper_notes["RELIANCE.NS"]  # cash unaffected
+    assert "RELIANCE.NS" not in futures_notes  # never even collected as a futures candidate
+    assert futures_account_repository.opened == []

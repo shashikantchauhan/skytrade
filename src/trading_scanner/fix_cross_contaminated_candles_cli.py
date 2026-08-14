@@ -49,13 +49,13 @@ from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application.backtest import compute_historical_events, replay_pine_backtest
 from trading_scanner.application.signal_pipeline import _dataframe_to_candles
 from trading_scanner.config.settings import load_config
-from trading_scanner.infrastructure.kite import KiteInstrumentMap, KiteProvider
 from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoKiteSessionRepository,
     TursoTradeRepository,
     create_turso_client,
 )
+from trading_scanner.infrastructure.kite import KiteInstrumentMap, KiteProvider
 
 _ENGINE_SETTINGS = {"include_full_history": True, "use_dynamic_exits": True}
 _MINIMUM_CANDLES = 200

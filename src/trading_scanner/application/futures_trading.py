@@ -21,11 +21,15 @@ becomes a tracked, capital-constrained futures paper position, exactly
 mirroring how ``paper_trading.py`` sits alongside the strategy's raw
 ``trades`` bookkeeping for the cash side.
 
-Not yet wired into ``signal_pipeline.py``'s live scan loop -- see
-NOTES.md's futures-capital-gate roadmap. Calling Kite's margin API
-synchronously per signal has its own latency/rate-limit design questions
-that deserve the same review Phase 2's live ranking wiring got, so this
-stops at the module boundary for now.
+2026-08-14: wired into ``signal_pipeline.py``'s live scan loop via
+``open_futures_paper_position``/``close_futures_paper_position`` below,
+restricted to the futures-paper symbol allowlist (``AppConfig.
+futures_paper_symbols_file`` -- Nifty50 by default, see ``config/
+nifty50_symbols.txt``) so the margin-API-per-signal latency this module's
+docstring used to flag stays bounded to 49 symbols, not the full 220.
+Reuses the eligibility bar from this module (55% win rate, this exact
+symbol+side's own closed trades, ``MIN_CLOSED_TRADES`` minimum) --
+unchanged from when this module was first built.
 """
 
 import asyncio
@@ -139,3 +143,97 @@ async def try_open_futures_position(
     )
     await futures_account_repository.open_position(position)
     return position
+
+
+# Same OTM target as signal_pipeline.py's own hedge leg (_HEDGE_OTM_PCT) and
+# derivatives_backtest.py's copy -- duplicated rather than imported to avoid
+# a circular import (signal_pipeline.py is the one calling into this
+# module, not the other way around); see either of those two for the full
+# reasoning on why 2% instead of ATM.
+_HEDGE_OTM_PCT = Decimal("0.02")
+
+
+async def open_futures_paper_position(
+    symbol: str,
+    side: SignalSide,
+    entry_timestamp: datetime,
+    market_price: Decimal,
+    interval: str,
+    derivatives_chain: KiteDerivativesChain,
+    trade_repository: TradeRepository,
+    futures_account_repository: FuturesPaperAccountRepository,
+) -> str | None:
+    """One call per signal, mirroring ``signal_pipeline._open_derivatives_shadow``'s
+    shape but for the real, capital-gated futures paper account instead of
+    the uncapped analysis-only shadow: resolves the nearest futures
+    contract and its OTM hedge option, checks this exact symbol+side's own
+    55%-win-rate track record (``is_eligible``), then hands off to
+    ``try_open_futures_position`` for the real margin check.
+
+    Caller (``signal_pipeline.py``) is responsible for only calling this
+    for symbols on the futures-paper allowlist (see ``AppConfig.
+    futures_paper_symbols_file`` -- Nifty50 today) -- this function itself
+    is symbol-agnostic, same as every other function in this module.
+
+    Best-effort: returns None (nothing opened) on missing eligibility, a
+    missing futures/options contract, or a margin-check failure, matching
+    ``try_open_futures_position``'s own silent-on-failure convention. Never
+    raises into the caller.
+    """
+    if not await is_eligible(symbol, side, interval, trade_repository):
+        return None
+    futures_contract = derivatives_chain.nearest_future(symbol)
+    if futures_contract is None:
+        return None
+    futures_side = "long" if side == SignalSide.BUY else "short"
+    hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
+    # PE is OTM below spot, CE is OTM above spot -- see _HEDGE_OTM_PCT.
+    hedge_strike_target = (
+        market_price * (1 - _HEDGE_OTM_PCT)
+        if side == SignalSide.BUY
+        else market_price * (1 + _HEDGE_OTM_PCT)
+    )
+    hedge_contract = derivatives_chain.nearest_atm_option(
+        symbol, hedge_option_type, float(hedge_strike_target)
+    )
+    if hedge_contract is None:
+        return None
+    position = await try_open_futures_position(
+        symbol,
+        futures_side,
+        entry_timestamp,
+        market_price,
+        futures_contract["tradingsymbol"],
+        hedge_contract["tradingsymbol"],
+        int(futures_contract["lot_size"]),
+        derivatives_chain,
+        futures_account_repository,
+    )
+    if position is None:
+        return None
+    return (
+        f"futures-paper: opened {futures_side} {futures_contract['tradingsymbol']} "
+        f"margin=₹{position.margin_allocated:.0f}"
+    )
+
+
+async def close_futures_paper_position(
+    symbol: str,
+    exit_timestamp: datetime,
+    futures_exit_price: Decimal,
+    futures_account_repository: FuturesPaperAccountRepository,
+) -> str | None:
+    """Close whatever ``open_futures_paper_position`` opened for ``symbol``,
+    if anything did. None (no-op) if this symbol has no open combo in the
+    futures paper account -- most signals never clear eligibility/margin in
+    the first place, so this is the common case, not an error.
+    """
+    position = await futures_account_repository.close_position(
+        symbol, exit_timestamp, futures_exit_price
+    )
+    if position is None:
+        return None
+    return (
+        f"futures-paper: closed {position.side} {position.futures_tradingsymbol} "
+        f"pnl=₹{position.pnl_amount:.0f}"
+    )

@@ -17,8 +17,8 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import FuturesShadowTrade
-from trading_scanner.infrastructure.kite import KiteDerivativesChain
 from trading_scanner.infrastructure.db import TursoFuturesTradeRepository
+from trading_scanner.infrastructure.kite import KiteDerivativesChain
 
 
 async def try_open_futures_position(

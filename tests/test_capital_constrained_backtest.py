@@ -121,7 +121,7 @@ def test_score_floor_rejects_weak_candidate_even_with_free_capital():
     )
     weak = Trade(
         symbol="B", side=SignalSide.BUY, entry_timestamp=same_time, entry_price=Decimal("100"),
-        prediction_at_entry=1, is_early_signal_flip=False,  # score = 1*2 + 75 = 77, below the 80 floor
+        prediction_at_entry=1, is_early_signal_flip=False,  # score = 1*2 + 75 = 77, below floor
         exit_timestamp=None, exit_price=None, status="open",
     )
     # Plenty of capital for both -- the weak one must be rejected by the

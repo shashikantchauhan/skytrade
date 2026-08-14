@@ -27,10 +27,19 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
-from trading_scanner.application import paper_trading
+from trading_scanner.application import futures_trading, paper_trading
 from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
+from trading_scanner.infrastructure.db import (
+    TursoFuturesPaperAccountRepository,
+    TursoFuturesTradeRepository,
+    TursoKiteSessionRepository,
+    TursoOptionsTradeRepository,
+    TursoPaperAccountRepository,
+    TursoTradeRepository,
+    create_turso_client,
+)
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
     build_login_url,
@@ -38,14 +47,6 @@ from trading_scanner.infrastructure.kite import (
 )
 from trading_scanner.infrastructure.kite import (
     get_last_prices as kite_get_last_prices,
-)
-from trading_scanner.infrastructure.db import (
-    TursoFuturesTradeRepository,
-    TursoKiteSessionRepository,
-    TursoOptionsTradeRepository,
-    TursoPaperAccountRepository,
-    TursoTradeRepository,
-    create_turso_client,
 )
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
@@ -381,6 +382,110 @@ async def positions(_: None = Depends(_require_session)) -> JSONResponse:
                 }
                 for p in sorted(open_positions, key=lambda p: p.entry_timestamp, reverse=True)
             ]
+        )
+    finally:
+        await client.close()
+
+
+async def _futures_last_prices(positions: list, client, config) -> dict[str, float]:
+    """Live LTP for the futures leg of each open combo (NFO segment) --
+    separate from ``_last_prices`` above, which fetches equity/index quotes.
+    Kite-only (no Yahoo fallback for NFO); returns {} if no active Kite
+    session, matching this dashboard's other best-effort quote fetches."""
+    if not positions or not config.kite_api_key:
+        return {}
+    repository = TursoKiteSessionRepository(client)
+    await repository.ensure_schema()
+    token_row = await repository.get_token()
+    if token_row is None:
+        return {}
+    access_token, _obtained_at = token_row
+    kite = KiteConnect(api_key=config.kite_api_key)
+    kite.set_access_token(access_token)
+    keys = [f"NFO:{p.futures_tradingsymbol}" for p in positions]
+
+    def _fetch() -> dict:
+        try:
+            return kite.ltp(keys)
+        except Exception:
+            return {}
+
+    data = await asyncio.to_thread(_fetch)
+    return {
+        p.symbol: data[f"NFO:{p.futures_tradingsymbol}"]["last_price"]
+        for p in positions
+        if f"NFO:{p.futures_tradingsymbol}" in data
+    }
+
+
+def _futures_unrealized_pnl(position, last_prices: dict[str, float]) -> dict:
+    current_price = last_prices.get(position.symbol)
+    if current_price is None:
+        return {"current_price": None, "unrealized_pnl": None, "unrealized_pnl_pct": None}
+    current = Decimal(str(current_price))
+    pnl = (
+        (current - position.futures_entry_price) * position.lot_size
+        if position.side == "long"
+        else (position.futures_entry_price - current) * position.lot_size
+    )
+    return {
+        "current_price": current_price,
+        "unrealized_pnl": _decimal(pnl),
+        "unrealized_pnl_pct": _decimal(pnl / position.margin_allocated * 100),
+    }
+
+
+@app.get("/api/futures-paper")
+async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
+    """The real, capital-gated Nifty50 futures paper account (see
+    application/futures_trading.py) -- separate book from the cash paper
+    account above, own margin-based capital pool, own eligibility track
+    record. Not shadow-tracking (that's /api/derivatives-shadow, uncapped,
+    every symbol); this is only the trades that actually cleared the
+    55%-win-rate bar and a real Kite margin check."""
+    client, config = _client()
+    try:
+        repository = TursoFuturesPaperAccountRepository(client, futures_trading.FUTURES_INITIAL_CAPITAL)
+        await repository.ensure_schema()
+        cash_balance = await repository.get_cash_balance()
+        open_positions = list(await repository.get_open_positions())
+        recent_closed = list(await repository.get_recent_closed_positions(50))
+        last_prices = await _futures_last_prices(open_positions, client, config)
+        total_margin_allocated = sum(
+            (p.margin_allocated for p in open_positions), start=Decimal("0")
+        )
+        return JSONResponse(
+            {
+                "cash_balance": _decimal(cash_balance),
+                "total_equity": _decimal(cash_balance + total_margin_allocated),
+                "open_positions": [
+                    {
+                        "symbol": p.symbol,
+                        "side": p.side,
+                        "entry_timestamp": p.entry_timestamp.isoformat(),
+                        "futures_entry_price": _decimal(p.futures_entry_price),
+                        "futures_tradingsymbol": p.futures_tradingsymbol,
+                        "hedge_tradingsymbol": p.hedge_tradingsymbol,
+                        "lot_size": p.lot_size,
+                        "margin_allocated": _decimal(p.margin_allocated),
+                        **_futures_unrealized_pnl(p, last_prices),
+                    }
+                    for p in sorted(open_positions, key=lambda p: p.entry_timestamp, reverse=True)
+                ],
+                "recent_closed": [
+                    {
+                        "symbol": p.symbol,
+                        "side": p.side,
+                        "entry_timestamp": p.entry_timestamp.isoformat(),
+                        "futures_entry_price": _decimal(p.futures_entry_price),
+                        "exit_timestamp": p.exit_timestamp.isoformat() if p.exit_timestamp else None,
+                        "futures_exit_price": _decimal(p.futures_exit_price),
+                        "margin_allocated": _decimal(p.margin_allocated),
+                        "pnl_amount": _decimal(p.pnl_amount),
+                    }
+                    for p in recent_closed
+                ],
+            }
         )
     finally:
         await client.close()

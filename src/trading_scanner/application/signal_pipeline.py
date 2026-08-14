@@ -12,6 +12,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
     futures_shadow,
+    futures_trading,
     live_execution,
     options_shadow,
     paper_trading,
@@ -36,10 +37,17 @@ from trading_scanner.domain.ports import (
     CandleRepository,
     EngineState,
     EngineStateRepository,
+    FuturesPaperAccountRepository,
     Notifier,
     PaperAccountRepository,
     SignalRepository,
     TradeRepository,
+)
+from trading_scanner.infrastructure.db import (
+    TursoFuturesTradeRepository,
+    TursoKiteSessionRepository,
+    TursoLiveOrderRepository,
+    TursoOptionsTradeRepository,
 )
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
@@ -48,12 +56,6 @@ from trading_scanner.infrastructure.kite import (
     KiteProvider,
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier
-from trading_scanner.infrastructure.db import (
-    TursoFuturesTradeRepository,
-    TursoKiteSessionRepository,
-    TursoLiveOrderRepository,
-    TursoOptionsTradeRepository,
-)
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
 # Both providers implement the same duck-typed get_recent_history(symbol,
@@ -130,6 +132,8 @@ async def run_signal_pipeline(
     futures_trade_repository: TursoFuturesTradeRepository | None = None,
     live_order_repository: TursoLiveOrderRepository | None = None,
     market_data_provider: MarketDataProvider | None = None,
+    futures_account_repository: FuturesPaperAccountRepository | None = None,
+    futures_paper_symbols: frozenset[str] = frozenset(),
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -254,39 +258,9 @@ async def run_signal_pipeline(
 
     await asyncio.gather(*(_evaluate_with_limit(symbol) for symbol in symbols))
 
-    paper_notes: dict[str, str] = {}
-    ranked_candidates: list[tuple[str, RankedCandidate]] = []
-    for symbol, evaluated in evaluated_by_symbol.items():
-        if evaluated is None:
-            continue
-        result, newest_candle = evaluated
-        if result.signal != "BUY":
-            continue
-        if await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
-            expectancy = await symbol_expectancy(
-                symbol, SignalSide.BUY, config.candle_interval, trade_repository
-            )
-            ranked_candidates.append((
-                symbol,
-                RankedCandidate(
-                    symbol=symbol,
-                    entry_timestamp=newest_candle.timestamp,
-                    entry_price=_market_price(newest_candle),
-                    prediction_at_entry=result.prediction,
-                    adx=result.adx,
-                    regime_normalized=result.regime_normalized,
-                    volatility_margin=result.volatility_margin,
-                    expectancy=expectancy,
-                ),
-            ))
-        else:
-            paper_notes[symbol] = (
-                "paper: not eligible yet (win_rate<55% or insufficient trade history)"
-            )
-    paper_notes.update(
-        await _rank_and_open_paper_positions(
-            ranked_candidates, paper_account_repository, paper_account_lock
-        )
+    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        paper_account_lock, derivatives_chain, futures_account_repository, futures_paper_symbols,
     )
 
     async def _process_with_limit(symbol: str) -> None:
@@ -315,6 +289,9 @@ async def run_signal_pipeline(
                     order_executor,
                     live_order_repository,
                     precomputed_paper_note=paper_notes.get(symbol),
+                    futures_account_repository=futures_account_repository,
+                    futures_paper_symbols=futures_paper_symbols,
+                    precomputed_futures_note=futures_notes.get(symbol),
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -551,6 +528,9 @@ async def _process_symbol(
     order_executor: KiteOrderExecutor | None = None,
     live_order_repository: TursoLiveOrderRepository | None = None,
     precomputed_paper_note: str | None = None,
+    futures_account_repository: FuturesPaperAccountRepository | None = None,
+    futures_paper_symbols: frozenset[str] = frozenset(),
+    precomputed_futures_note: str | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -572,6 +552,16 @@ async def _process_symbol(
     also shadow-tracks (analysis only, never a real order) a directional
     option and a futures+hedge position -- see ``_open_derivatives_shadow``.
 
+    When ``futures_account_repository`` is given AND ``symbol`` is in
+    ``futures_paper_symbols`` (Nifty50 by default -- see ``AppConfig.
+    futures_paper_symbols_file``), entries/exits *additionally* attempt a
+    real, capital-gated futures paper position on BOTH sides (unlike the
+    cash paper account, futures can short) -- see
+    ``application/futures_trading.py``'s own 55%-win-rate eligibility bar
+    and live-margin sizing. Entirely separate book/capital from the cash
+    paper account and from the always-on, uncapped derivatives shadow
+    tracking above.
+
     ``precomputed_evaluation``, when given, skips calling ``_evaluate_symbol``
     (the download-based path) entirely and uses this instead -- the live-
     ticker path (``live_pipeline.py``) already has a freshly-closed candle
@@ -582,9 +572,14 @@ async def _process_symbol(
 
     ``precomputed_paper_note``, when given, is used as-is for the BUY
     paper-position outcome instead of calling ``_open_paper_position`` --
-    the ranked cron path (``run_signal_pipeline``) already decided (and
-    opened, if applicable) this cycle's paper positions in ranked order
-    before calling this function, so it must not redecide/reopen here.
+    the caller (``_collect_and_open_ranked_positions``) already decided
+    (and opened, if applicable) this cycle's paper positions in ranked
+    order before calling this function, so it must not redecide/reopen
+    here. ``precomputed_futures_note`` is the same idea for the futures
+    paper account -- ``is None`` (not given) is what tells this function
+    whether to fall back to deciding it itself (``_open_futures_paper``,
+    unranked -- only used when a caller doesn't pre-rank a whole cycle at
+    once) or trust what's already been decided.
     """
     if precomputed_evaluation is not None:
         evaluated = precomputed_evaluation
@@ -628,6 +623,12 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
+        if precomputed_futures_note is None:
+            await _open_futures_paper(
+                symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
+                config.candle_interval, trade_repository, derivatives_chain,
+                futures_account_repository, futures_paper_symbols,
+            )
     if result.end_long:
         # Notification failures (e.g. a Telegram network timeout) must never
         # block actually recording the close -- this was a real bug: a
@@ -662,6 +663,10 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
+        await _close_futures_paper(
+            symbol, newest_candle.timestamp, market_price,
+            futures_account_repository, futures_paper_symbols,
+        )
     if result.signal == "SELL":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.BUY)
         await trade_repository.open_trade(
@@ -683,6 +688,12 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
+        if precomputed_futures_note is None:
+            await _open_futures_paper(
+                symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
+                config.candle_interval, trade_repository, derivatives_chain,
+                futures_account_repository, futures_paper_symbols,
+            )
     if result.end_short:
         # See the end_long branch above for why this is wrapped -- a
         # notification failure must never block recording the actual close.
@@ -703,6 +714,10 @@ async def _process_symbol(
             symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
+        )
+        await _close_futures_paper(
+            symbol, newest_candle.timestamp, market_price,
+            futures_account_repository, futures_paper_symbols,
         )
 
     if result.signal not in ("BUY", "SELL"):
@@ -884,6 +899,152 @@ async def _rank_and_open_paper_positions(
     return notes
 
 
+async def _rank_and_open_futures_positions(
+    candidates: list[tuple[str, RankedCandidate]],
+    interval: str,
+    trade_repository: TradeRepository,
+    derivatives_chain: KiteDerivativesChain,
+    futures_account_repository: FuturesPaperAccountRepository,
+) -> dict[str, str]:
+    """Same idea as ``_rank_and_open_paper_positions``, for the futures
+    paper account instead of cash -- strongest-ranked candidate wins this
+    cycle's margin budget first, instead of whichever symbol's task
+    happened to finish first.
+
+    One real difference from the cash version: candidates here can be
+    EITHER direction (BUY or SELL both compete for the same futures margin
+    pool, unlike cash which is BUY-only) -- ``score_candidate`` already
+    scores conviction in each candidate's own direction correctly (see
+    ``RankedCandidate.direction``), so ranking them together is safe.
+
+    ``open_futures_paper_position`` does its own eligibility recheck and
+    real Kite margin call per candidate -- this function doesn't
+    pre-compute whether each one will fit, it just tries them in ranked
+    order and lets that real check reject once the account's margin budget
+    (or a symbol's own eligibility) says no, exactly like the cash version
+    relies on ``try_open_position``'s own capital check.
+    """
+    notes: dict[str, str] = {}
+    symbol_by_candidate = {candidate: symbol for symbol, candidate in candidates}
+    ranked = rank_candidates([candidate for _, candidate in candidates])
+    for candidate in ranked:
+        symbol = symbol_by_candidate[candidate]
+        note = await futures_trading.open_futures_paper_position(
+            symbol, candidate.direction, candidate.entry_timestamp, candidate.entry_price,
+            interval, derivatives_chain, trade_repository, futures_account_repository,
+        )
+        notes[symbol] = (
+            note
+            if note is not None
+            else "futures-paper: SKIPPED (ranked below capacity, margin, or eligibility)"
+        )
+    return notes
+
+
+async def _collect_and_open_ranked_positions(
+    evaluated_by_symbol: dict[str, tuple[FastPredictResult, Candle] | None],
+    config: AppConfig,
+    trade_repository: TradeRepository,
+    paper_account_repository: PaperAccountRepository,
+    paper_account_lock: asyncio.Lock,
+    derivatives_chain: KiteDerivativesChain | None,
+    futures_account_repository: FuturesPaperAccountRepository | None,
+    futures_paper_symbols: frozenset[str],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """One scan cycle's ranked capital allocation for BOTH books -- cash
+    (BUY-only, ``_rank_and_open_paper_positions``) and futures (BUY+SELL,
+    Nifty50-allowlisted, ``_rank_and_open_futures_positions``) -- from the
+    same batch of already-evaluated symbols.
+
+    2026-08-14: this used to be duplicated inline inside
+    ``run_signal_pipeline`` (the cron path) with no futures-side
+    equivalent at all -- meaning ``live_pipeline.py`` (the actual
+    production driver) never ranked either book, cash or futures, despite
+    the ranking module existing and being "deployed." Factored out here so
+    both the cron path and the live WebSocket path call the exact same
+    ranking logic and can't silently drift apart again.
+
+    Returns ``(paper_notes, futures_notes)``, both ``symbol -> note``, for
+    the caller to pass into ``_process_symbol`` as
+    ``precomputed_paper_note``/``precomputed_futures_note`` so its second
+    pass doesn't redecide what this already decided.
+    """
+    paper_notes: dict[str, str] = {}
+    ranked_candidates: list[tuple[str, RankedCandidate]] = []
+    futures_notes: dict[str, str] = {}
+    futures_candidates: list[tuple[str, RankedCandidate]] = []
+    futures_enabled = derivatives_chain is not None and futures_account_repository is not None
+
+    for symbol, evaluated in evaluated_by_symbol.items():
+        if evaluated is None:
+            continue
+        result, newest_candle = evaluated
+        if result.signal not in ("BUY", "SELL"):
+            continue
+        entry_price = _market_price(newest_candle)
+
+        if result.signal == "BUY":
+            if await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
+                expectancy = await symbol_expectancy(
+                    symbol, SignalSide.BUY, config.candle_interval, trade_repository
+                )
+                ranked_candidates.append((
+                    symbol,
+                    RankedCandidate(
+                        symbol=symbol,
+                        entry_timestamp=newest_candle.timestamp,
+                        entry_price=entry_price,
+                        prediction_at_entry=result.prediction,
+                        adx=result.adx,
+                        regime_normalized=result.regime_normalized,
+                        volatility_margin=result.volatility_margin,
+                        expectancy=expectancy,
+                    ),
+                ))
+            else:
+                paper_notes[symbol] = (
+                    "paper: not eligible yet (win_rate<55% or insufficient trade history)"
+                )
+
+        if futures_enabled and symbol in futures_paper_symbols:
+            side = SignalSide.BUY if result.signal == "BUY" else SignalSide.SELL
+            if await futures_trading.is_eligible(
+                symbol, side, config.candle_interval, trade_repository
+            ):
+                futures_candidates.append((
+                    symbol,
+                    RankedCandidate(
+                        symbol=symbol,
+                        entry_timestamp=newest_candle.timestamp,
+                        entry_price=entry_price,
+                        prediction_at_entry=result.prediction,
+                        adx=result.adx,
+                        regime_normalized=result.regime_normalized,
+                        volatility_margin=result.volatility_margin,
+                        direction=side,
+                    ),
+                ))
+            else:
+                futures_notes[symbol] = (
+                    "futures-paper: not eligible yet (this side's win_rate<55% or "
+                    "insufficient trade history)"
+                )
+
+    paper_notes.update(
+        await _rank_and_open_paper_positions(
+            ranked_candidates, paper_account_repository, paper_account_lock
+        )
+    )
+    if futures_enabled:
+        futures_notes.update(
+            await _rank_and_open_futures_positions(
+                futures_candidates, config.candle_interval, trade_repository,
+                derivatives_chain, futures_account_repository,
+            )
+        )
+    return paper_notes, futures_notes
+
+
 async def _close_paper_position(
     symbol: str,
     exit_timestamp,
@@ -1051,6 +1212,66 @@ async def _close_derivatives_shadow(
                 "Live order exit execution raised for %s (%s) -- shadow close above still stands.",
                 symbol, side,
             )
+
+
+async def _open_futures_paper(
+    symbol: str,
+    side: SignalSide,
+    entry_timestamp: datetime,
+    market_price: Decimal,
+    interval: str,
+    trade_repository: TradeRepository,
+    derivatives_chain: KiteDerivativesChain | None,
+    futures_account_repository: FuturesPaperAccountRepository | None,
+    futures_paper_symbols: frozenset[str],
+) -> str | None:
+    """Best-effort wrapper around ``futures_trading.open_futures_paper_position``
+    -- see ``_process_symbol``'s docstring for the allowlist/gating this
+    checks first. Same exception-isolation shape as
+    ``_open_derivatives_shadow``: a Kite margin-API hiccup here must never
+    break the main signal/paper-trading flow around it.
+    """
+    if (
+        futures_account_repository is None
+        or derivatives_chain is None
+        or symbol not in futures_paper_symbols
+    ):
+        return None
+    try:
+        return await futures_trading.open_futures_paper_position(
+            symbol, side, entry_timestamp, market_price, interval,
+            derivatives_chain, trade_repository, futures_account_repository,
+        )
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Futures paper open failed for %s (%s) -- continuing without it.",
+            symbol, side, exc_info=True,
+        )
+        return None
+
+
+async def _close_futures_paper(
+    symbol: str,
+    exit_timestamp: datetime,
+    market_price: Decimal,
+    futures_account_repository: FuturesPaperAccountRepository | None,
+    futures_paper_symbols: frozenset[str],
+) -> None:
+    """Best-effort close of whatever ``_open_futures_paper`` opened -- see
+    that function's docstring."""
+    if futures_account_repository is None or symbol not in futures_paper_symbols:
+        return
+    try:
+        note = await futures_trading.close_futures_paper_position(
+            symbol, exit_timestamp, market_price, futures_account_repository,
+        )
+        if note is not None:
+            logging.getLogger(__name__).info(note)
+    except Exception:
+        logging.getLogger(__name__).warning(
+            "Futures paper close failed for %s -- continuing without it.",
+            symbol, exc_info=True,
+        )
 
 
 async def _win_rate_summary(

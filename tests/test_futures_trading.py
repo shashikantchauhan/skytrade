@@ -44,6 +44,10 @@ class FakeFuturesPaperAccountRepository:
     async def get_open_positions(self):
         return [p for p in self.opened if p.status == "open"]
 
+    async def get_recent_closed_positions(self, limit):
+        closed = [p for p in self.opened if p.status == "closed"]
+        return sorted(closed, key=lambda p: p.exit_timestamp, reverse=True)[:limit]
+
 
 class FakeTradeRepository:
     def __init__(self, trades) -> None:
@@ -63,11 +67,19 @@ class FakeTradeRepository:
 
 
 class FakeDerivativesChain:
-    """Stands in for KiteDerivativesChain -- only margin_benefit is used
-    by futures_trading.py."""
+    """Stands in for KiteDerivativesChain -- margin_benefit is used by
+    try_open_futures_position directly; nearest_future/nearest_atm_option
+    are used by open_futures_paper_position's contract resolution."""
 
-    def __init__(self, combined_margin: Decimal | None):
+    def __init__(
+        self,
+        combined_margin: Decimal | None,
+        has_future: bool = True,
+        has_hedge_option: bool = True,
+    ):
         self._combined_margin = combined_margin
+        self._has_future = has_future
+        self._has_hedge_option = has_hedge_option
 
     def margin_benefit(self, legs):
         if self._combined_margin is None:
@@ -76,6 +88,28 @@ class FakeDerivativesChain:
             "primary_only_margin": float(self._combined_margin) * 1.5,
             "combined_margin": float(self._combined_margin),
             "margin_benefit": float(self._combined_margin) * 0.5,
+        }
+
+    def nearest_future(self, symbol):
+        if not self._has_future:
+            return None
+        return {
+            "tradingsymbol": f"{symbol.removesuffix('.NS')}26AUGFUT",
+            "lot_size": 500,
+            "instrument_token": 111,
+            "expiry": "2026-08-25",
+        }
+
+    def nearest_atm_option(self, symbol, option_type, underlying_price):
+        if not self._has_hedge_option:
+            return None
+        name = symbol.removesuffix(".NS")
+        strike = int(underlying_price)
+        return {
+            "tradingsymbol": f"{name}26AUG{strike}{option_type}",
+            "lot_size": 500,
+            "instrument_token": 222,
+            "strike": underlying_price,
         }
 
 
@@ -152,3 +186,129 @@ async def test_try_open_skips_a_symbol_already_open():
         "RELIANCE26AUGFUT", "RELIANCE26AUG3000CE", 500, chain, account,
     )
     assert second is None
+
+
+# --- open_futures_paper_position / close_futures_paper_position ---
+# The orchestrator that resolves real contracts (nearest_future/
+# nearest_atm_option) and checks eligibility before handing off to
+# try_open_futures_position -- this is what signal_pipeline.py actually
+# calls per BUY/SELL signal.
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_position_skips_when_not_eligible():
+    # Only 5 BUY trades, all wins -> 100% win rate, so make it a losing
+    # track record instead to fail the 55% bar cleanly.
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=False) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
+
+    note = await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    assert note is None
+    assert account.opened == []
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_position_opens_a_long_for_buy_when_eligible():
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
+
+    note = await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    assert note is not None
+    assert len(account.opened) == 1
+    assert account.opened[0].side == "long"
+    assert account.opened[0].futures_tradingsymbol == "RELIANCE26AUGFUT"
+    # PE hedges a long future -- see _HEDGE_OTM_PCT's docstring.
+    assert "PE" in account.opened[0].hedge_tradingsymbol
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_position_opens_a_short_for_sell_when_eligible():
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.SELL, win=True) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
+
+    note = await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.SELL, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    assert note is not None
+    assert account.opened[0].side == "short"
+    # CE hedges a short future.
+    assert "CE" in account.opened[0].hedge_tradingsymbol
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_position_skips_when_no_futures_contract():
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"), has_future=False)
+
+    note = await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    assert note is None
+    assert account.opened == []
+
+
+@pytest.mark.asyncio
+async def test_open_futures_paper_position_skips_when_no_hedge_option():
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"), has_hedge_option=False)
+
+    note = await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    assert note is None
+    assert account.opened == []
+
+
+@pytest.mark.asyncio
+async def test_close_futures_paper_position_closes_the_open_combo():
+    trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
+    repo = FakeTradeRepository(trades)
+    account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
+    await futures_trading.open_futures_paper_position(
+        "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
+        "60minute", chain, repo, account,
+    )
+
+    note = await futures_trading.close_futures_paper_position(
+        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account,
+    )
+
+    assert note is not None
+    assert account.opened[0].status == "closed"
+    assert account.opened[0].pnl_amount == (Decimal("2950") - Decimal("2900")) * 500
+
+
+@pytest.mark.asyncio
+async def test_close_futures_paper_position_is_a_noop_when_nothing_open():
+    account = FakeFuturesPaperAccountRepository()
+
+    note = await futures_trading.close_futures_paper_position(
+        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account,
+    )
+
+    assert note is None

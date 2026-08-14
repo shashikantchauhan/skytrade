@@ -32,6 +32,13 @@ class AppConfig:
     live_trading_enabled: bool
     live_trading_symbols: frozenset[str]
     live_trading_max_lots: int
+    # Real, capital-gated futures paper account (application/futures_trading.py)
+    # -- restricted to this allowlist (Nifty50 by default) rather than the
+    # full 220-symbol universe, so the extra Kite margin-API call per signal
+    # this account needs stays bounded. Empty file/no file -> nothing
+    # trades on this book, same no-wildcard-default philosophy as
+    # live_trading_symbols above.
+    futures_paper_symbols_file: Path
 
 
 def load_config() -> AppConfig:
@@ -61,6 +68,11 @@ def load_config() -> AppConfig:
             if s.strip()
         ),
         live_trading_max_lots=_positive_int("TRADING_SCANNER_LIVE_TRADING_MAX_LOTS", 1),
+        futures_paper_symbols_file=Path(
+            os.getenv(
+                "TRADING_SCANNER_FUTURES_PAPER_SYMBOLS_FILE", "config/nifty50_symbols.txt"
+            )
+        ),
     )
 
 

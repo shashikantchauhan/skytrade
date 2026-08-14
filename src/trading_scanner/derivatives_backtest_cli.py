@@ -13,7 +13,6 @@ from kiteconnect import KiteConnect
 
 from trading_scanner.application.derivatives_backtest import run_current_month_backtest
 from trading_scanner.config.settings import AppConfig, load_config
-from trading_scanner.infrastructure.kite import KiteDerivativesChain
 from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
@@ -21,6 +20,7 @@ from trading_scanner.infrastructure.db import (
     TursoTradeRepository,
     create_turso_client,
 )
+from trading_scanner.infrastructure.kite import KiteDerivativesChain
 
 logger = logging.getLogger(__name__)
 

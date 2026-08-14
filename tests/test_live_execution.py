@@ -33,6 +33,7 @@ def _config(*, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"
         live_trading_enabled=enabled,
         live_trading_symbols=symbols,
         live_trading_max_lots=1,
+        futures_paper_symbols_file=None,
     )
 
 

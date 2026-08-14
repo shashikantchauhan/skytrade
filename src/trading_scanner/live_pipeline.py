@@ -32,6 +32,7 @@ from decimal import Decimal
 from kiteconnect import KiteConnect, KiteTicker
 
 from trading_scanner.alpha_engine import AlphaEngine
+from trading_scanner.application.futures_trading import FUTURES_INITIAL_CAPITAL
 from trading_scanner.application.paper_trading import (
     INITIAL_CAPITAL,
     stop_loss_price,
@@ -40,12 +41,26 @@ from trading_scanner.application.paper_trading import (
 from trading_scanner.application.signal_pipeline import (
     _ENGINE_SETTINGS,
     _close_paper_position,
+    _collect_and_open_ranked_positions,
     _evaluate_from_stored_candles,
     _process_symbol,
 )
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
 from trading_scanner.domain.models import Candle
+from trading_scanner.infrastructure.db import (
+    TursoCandleRepository,
+    TursoEngineStateRepository,
+    TursoFuturesPaperAccountRepository,
+    TursoFuturesTradeRepository,
+    TursoKiteSessionRepository,
+    TursoLiveOrderRepository,
+    TursoOptionsTradeRepository,
+    TursoPaperAccountRepository,
+    TursoSignalRepository,
+    TursoTradeRepository,
+    create_turso_client,
+)
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
     KiteInstrumentMap,
@@ -57,18 +72,6 @@ from trading_scanner.infrastructure.kite_ticker import (
     is_market_hours,
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
-from trading_scanner.infrastructure.db import (
-    TursoCandleRepository,
-    TursoEngineStateRepository,
-    TursoFuturesTradeRepository,
-    TursoKiteSessionRepository,
-    TursoLiveOrderRepository,
-    TursoOptionsTradeRepository,
-    TursoPaperAccountRepository,
-    TursoSignalRepository,
-    TursoTradeRepository,
-    create_turso_client,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +139,9 @@ class LiveTickerPipeline:
         # the moment a tick makes a new high, so the trail tightens in
         # real time rather than only every _POSITIONS_CACHE_REFRESH_SECONDS.
         self._peak_price_cache: dict[str, Decimal] = {}
+        # Set for real in _setup_repositories (needs the config's symbols
+        # file loaded) -- empty here just means "not set up yet."
+        self._futures_paper_symbols: frozenset[str] = frozenset()
 
     async def _setup_repositories(self) -> None:
         if not self._config.turso_database_url:
@@ -153,10 +159,27 @@ class LiveTickerPipeline:
             "options_trade": TursoOptionsTradeRepository(self._client),
             "futures_trade": TursoFuturesTradeRepository(self._client),
             "live_order": TursoLiveOrderRepository(self._client),
+            "futures_paper_account": TursoFuturesPaperAccountRepository(
+                self._client, FUTURES_INITIAL_CAPITAL
+            ),
         }
         for repo in self._repos.values():
             await repo.ensure_schema()
         self._notifier = _build_notifier(self._config)
+        # Real, capital-gated futures paper account -- restricted to this
+        # allowlist (Nifty50 by default), not the full symbol universe. See
+        # AppConfig.futures_paper_symbols_file / application/futures_trading.py.
+        try:
+            self._futures_paper_symbols = frozenset(
+                SymbolLoader().load(self._config.futures_paper_symbols_file)
+            )
+        except SymbolLoadError:
+            logger.warning(
+                "Futures paper symbols file missing/empty (%s) -- futures paper "
+                "trading is off this run.",
+                self._config.futures_paper_symbols_file,
+            )
+            self._futures_paper_symbols = frozenset()
 
     async def _resolve_instrument_tokens(self, kite: KiteConnect) -> None:
         instrument_map = KiteInstrumentMap(kite)
@@ -381,18 +404,52 @@ class LiveTickerPipeline:
 
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SYMBOLS)
 
-        async def _process_one(symbol: str, candle: Candle) -> None:
+        # Every symbol whose hourly bucket just closed lands in this same
+        # batch (``candles``) -- exactly the "one scan cycle" ranking
+        # needs a full set of candidates for (see
+        # application/signal_pipeline.py's _collect_and_open_ranked_positions).
+        # So this is now two passes, same shape as the cron path
+        # (run_signal_pipeline): (1) evaluate every symbol concurrently,
+        # no trade/paper/futures writes yet; (2) rank this batch's BUY
+        # candidates (cash) and BUY+SELL candidates (futures, Nifty50-only)
+        # and open positions for them strongest-first; (3) run the rest of
+        # each symbol's bookkeeping/notifications concurrently, with both
+        # outcomes already decided so they aren't redecided per-symbol,
+        # unranked, first-come-first-served like before.
+        evaluated_by_symbol: dict[str, tuple] = {}
+
+        async def _evaluate_one(symbol: str, candle: Candle) -> None:
             async with semaphore:
                 try:
                     await self._repos["candle"].upsert_candles(
                         symbol, self._config.candle_interval, [candle]
                     )
-                    evaluated = await _evaluate_from_stored_candles(
+                    evaluated_by_symbol[symbol] = await _evaluate_from_stored_candles(
                         symbol, self._config, self._engine,
                         self._repos["candle"], self._repos["engine_state"],
                     )
-                    if evaluated is None:
-                        return
+                except Exception:
+                    logger.exception("Unexpected exception evaluating closed candle for %s", symbol)
+                    evaluated_by_symbol[symbol] = None
+
+        await asyncio.gather(*(
+            _evaluate_one(symbol, candle)
+            for symbol, candle in candles.items()
+            if symbol != self._config.index_symbol
+        ))
+
+        paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+            evaluated_by_symbol, self._config, self._repos["trade"], self._repos["paper_account"],
+            self._paper_account_lock, derivatives_chain, self._repos["futures_paper_account"],
+            self._futures_paper_symbols,
+        )
+
+        async def _process_one(symbol: str) -> None:
+            evaluated = evaluated_by_symbol.get(symbol)
+            if evaluated is None:
+                return
+            async with semaphore:
+                try:
                     await _process_symbol(
                         symbol, self._config, None, self._engine,
                         self._repos["candle"], self._repos["signal"], self._repos["engine_state"],
@@ -403,13 +460,17 @@ class LiveTickerPipeline:
                         precomputed_evaluation=evaluated,
                         order_executor=order_executor,
                         live_order_repository=self._repos["live_order"],
+                        precomputed_paper_note=paper_notes.get(symbol),
+                        futures_account_repository=self._repos["futures_paper_account"],
+                        futures_paper_symbols=self._futures_paper_symbols,
+                        precomputed_futures_note=futures_notes.get(symbol),
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)
 
         await asyncio.gather(*(
-            _process_one(symbol, candle)
-            for symbol, candle in candles.items()
+            _process_one(symbol)
+            for symbol in candles
             if symbol != self._config.index_symbol
         ))
 

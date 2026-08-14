@@ -7,7 +7,6 @@ from trading_scanner.application.paper_trading import INITIAL_CAPITAL
 from trading_scanner.application.signal_pipeline import run_signal_pipeline
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
-from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 from trading_scanner.infrastructure.db import (
     TursoCandleRepository,
     TursoEngineStateRepository,
@@ -20,6 +19,7 @@ from trading_scanner.infrastructure.db import (
     TursoTradeRepository,
     create_turso_client,
 )
+from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 
 
 def _build_notifier(config: AppConfig):

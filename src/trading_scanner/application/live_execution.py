@@ -38,8 +38,8 @@ from decimal import Decimal
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg, SignalSide
 from trading_scanner.domain.ports import Notifier
-from trading_scanner.infrastructure.kite import KiteDerivativesChain, KiteOrderExecutor
 from trading_scanner.infrastructure.db import TursoLiveOrderRepository
+from trading_scanner.infrastructure.kite import KiteDerivativesChain, KiteOrderExecutor
 
 logger = logging.getLogger(__name__)
 

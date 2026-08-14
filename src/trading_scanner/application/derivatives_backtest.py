@@ -30,12 +30,12 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import FuturesShadowTrade, OptionsShadowTrade, SignalSide, Trade
-from trading_scanner.infrastructure.kite import KiteDerivativesChain
 from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
     TursoOptionsTradeRepository,
     TursoTradeRepository,
 )
+from trading_scanner.infrastructure.kite import KiteDerivativesChain
 
 logger = logging.getLogger(__name__)
 

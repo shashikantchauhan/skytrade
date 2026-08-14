@@ -169,3 +169,33 @@ class TursoFuturesPaperAccountRepository:
             )
             for row in result.rows
         ]
+
+    async def get_recent_closed_positions(self, limit: int) -> Sequence[FuturesPaperPosition]:
+        result = await self._client.execute(
+            """
+            SELECT symbol, side, entry_timestamp, futures_entry_price, futures_tradingsymbol,
+                   hedge_tradingsymbol, lot_size, margin_allocated, exit_timestamp,
+                   futures_exit_price, pnl_amount
+            FROM futures_paper_positions
+            WHERE status = 'closed'
+            ORDER BY exit_timestamp DESC LIMIT ?
+            """,
+            [limit],
+        )
+        return [
+            FuturesPaperPosition(
+                symbol=row[0],
+                side=row[1],
+                entry_timestamp=datetime.fromisoformat(row[2]),
+                futures_entry_price=Decimal(str(row[3])),
+                futures_tradingsymbol=row[4],
+                hedge_tradingsymbol=row[5],
+                lot_size=row[6],
+                margin_allocated=Decimal(str(row[7])),
+                exit_timestamp=datetime.fromisoformat(row[8]) if row[8] else None,
+                futures_exit_price=Decimal(str(row[9])) if row[9] is not None else None,
+                pnl_amount=Decimal(str(row[10])) if row[10] is not None else None,
+                status="closed",
+            )
+            for row in result.rows
+        ]

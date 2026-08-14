@@ -142,6 +142,7 @@
   <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
   <button class="tab-btn" data-tab="derivatives" onclick="switchTab('derivatives')">Derivatives</button>
+  <button class="tab-btn" data-tab="futures-paper" onclick="switchTab('futures-paper')">Futures (Nifty50)</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
 </div>
 
@@ -200,6 +201,21 @@
       <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
       <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
     </div>
+  </div>
+</section>
+
+<section class="tab-panel" data-tab="futures-paper" hidden>
+  <h2>Nifty50 futures paper account <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real, capital-gated -- 55% own-side win rate + live Kite margin check, separate book from cash)</span></h2>
+  <div class="cards" id="futures-paper-cards"></div>
+
+  <h2 style="margin-top: 1.5rem;">Open combos</h2>
+  <div class="panel table-wrap">
+    <table id="futures-paper-open-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Lot size</th><th>Margin allocated</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <h2 style="margin-top: 1.5rem;">Closed combos</h2>
+  <div class="panel table-wrap">
+    <table id="futures-paper-closed-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Margin allocated</th><th>P&amp;L</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
@@ -427,6 +443,31 @@ async function runBacktest() {
   }, 5000);
 }
 
+async function loadFuturesPaper() {
+  const f = await api("/api/futures-paper");
+  const pnlClass = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
+  document.getElementById("futures-paper-cards").innerHTML = `
+    <div class="card"><div class="label">Cash balance (margin pool)</div><div class="value">₹${fmt(f.cash_balance)}</div></div>
+    <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(f.total_equity)}</div></div>
+    <div class="card"><div class="label">Open combos</div><div class="value">${f.open_positions.length}</div></div>
+  `;
+  document.querySelector("#futures-paper-open-table tbody").innerHTML = f.open_positions.map(p => {
+    const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
+    const cls = pnlClass(p.unrealized_pnl);
+    const pnlCell = known
+      ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
+      : `<td>-</td>`;
+    const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
+    const sideCls = p.side === "long" ? "green" : "red";
+    return `<tr><td>${p.symbol}</td><td><span class="pill ${sideCls}">${p.side.toUpperCase()}</span></td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.futures_entry_price)}</td><td>${p.lot_size}</td><td>₹${fmt(p.margin_allocated)}</td><td>${priceCell}</td>${pnlCell}</tr>`;
+  }).join("") || "<tr><td colspan=8>No open combos</td></tr>";
+  document.querySelector("#futures-paper-closed-table tbody").innerHTML = f.recent_closed.map(p => {
+    const cls = pnlClass(p.pnl_amount);
+    const sideCls = p.side === "long" ? "green" : "red";
+    return `<tr><td>${p.symbol}</td><td><span class="pill ${sideCls}">${p.side.toUpperCase()}</span></td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.futures_entry_price)}</td><td>${fmtTime(p.exit_timestamp)}</td><td>₹${fmt(p.futures_exit_price)}</td><td>₹${fmt(p.margin_allocated)}</td><td class="${cls}">₹${fmt(p.pnl_amount)}</td></tr>`;
+  }).join("") || "<tr><td colspan=8>No closed combos yet</td></tr>";
+}
+
 async function checkMarginBenefit() {
   const symbol = document.getElementById("margin-symbol").value.trim();
   const el = document.getElementById("margin-msg");
@@ -462,7 +503,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadDerivativesShadow(), loadDerivativesBacktest()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadDerivativesShadow(), loadDerivativesBacktest(), loadFuturesPaper()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus());
   }

@@ -371,3 +371,37 @@ async def test_futures_paper_position_close_credits_pnl_for_short(tmp_path: Path
         assert closed.pnl_amount == Decimal("10000")  # (2900-2880) * 500
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_futures_paper_get_recent_closed_positions_newest_first(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoFuturesPaperAccountRepository(client, Decimal("400000"))
+        await repository.ensure_schema()
+        for symbol, entry_day, exit_day in [
+            ("RELIANCE.NS", 5, 6),
+            ("TCS.NS", 6, 7),
+        ]:
+            await repository.open_position(
+                FuturesPaperPosition(
+                    symbol=symbol,
+                    side="long",
+                    entry_timestamp=datetime(2026, 8, entry_day, 10, 15, tzinfo=UTC),
+                    futures_entry_price=Decimal("2900"),
+                    futures_tradingsymbol=f"{symbol}FUT",
+                    hedge_tradingsymbol=f"{symbol}PE",
+                    lot_size=500,
+                    margin_allocated=Decimal("18750"),
+                )
+            )
+            await repository.close_position(
+                symbol, datetime(2026, 8, exit_day, 10, 15, tzinfo=UTC), Decimal("2920")
+            )
+
+        recent = await repository.get_recent_closed_positions(50)
+
+        assert [p.symbol for p in recent] == ["TCS.NS", "RELIANCE.NS"]  # newest exit first
+        assert all(p.status == "closed" for p in recent)
+    finally:
+        await client.close()
