@@ -255,6 +255,35 @@ async def test_paper_position_open_close_round_trip_credits_pnl_to_cash(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_paper_position_peak_price_starts_at_entry_and_can_be_updated(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoPaperAccountRepository(client, Decimal("500000"))
+        await repository.ensure_schema()
+        await repository.open_position(
+            PaperPosition(
+                symbol="AARTIIND.NS",
+                entry_timestamp=datetime(2026, 8, 6, 10, 15, tzinfo=UTC),
+                entry_price=Decimal("100"),
+                quantity=750,
+                capital_allocated=Decimal("75000"),
+            )
+        )
+
+        [opened] = await repository.get_open_positions()
+        assert opened.peak_price == Decimal("100")  # starts at entry, not None
+
+        await repository.update_peak_price("AARTIIND.NS", Decimal("118.5"))
+
+        [updated] = await repository.get_open_positions()
+        assert updated.peak_price == Decimal("118.5")
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_futures_paper_account_initializes_cash_balance_on_first_call(
     tmp_path: Path,
 ) -> None:

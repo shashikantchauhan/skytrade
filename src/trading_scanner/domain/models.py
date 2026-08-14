@@ -95,6 +95,16 @@ class PaperPosition:
     exit_price: Decimal | None = None
     pnl_amount: Decimal | None = None
     status: str = "open"  # "open" | "closed"
+    # Highest price seen since entry -- starts at entry_price, only ever
+    # moves up. Drives the trailing stop (see
+    # ``application/paper_trading.trailing_stop_price``): validated
+    # 2026-08-14 against every real historical trade's candle-by-candle
+    # path (``application/profit_protection_replay.py``) that a trail only
+    # helps once activated well past the median trade's move (>=10-15%) --
+    # a low activation threshold clips the strategy's rare big winners and
+    # *reduces* total return (top 10% of trades produce ~70% of all
+    # profit). None until the live tick-level check starts tracking it.
+    peak_price: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)

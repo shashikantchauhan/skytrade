@@ -80,6 +80,49 @@ def stop_loss_price(entry_price: Decimal) -> Decimal:
     return entry_price * (1 - STOP_LOSS_PCT / 100)
 
 
+# 2026-08-14: like STOP_LOSS_PCT, validated against every real historical
+# trade's actual candle-by-candle path (application/profit_protection_
+# replay.py, 6,292 closed BUY trades) before deploying, not just intuition.
+#
+# The strategy's profit is extremely concentrated in a small number of big
+# winners -- the top 10% of trades produce ~70% of all-time total profit,
+# and just 37 trades (0.6%) that ever ran past +15% are worth 10.6% of it
+# alone. A LOW activation threshold (tested 3-5%) trims that tail short and
+# *reduces* total return (-24% to -35% vs no trailing stop at all) because
+# it fires on ordinary trades that were never going to run big, converting
+# some small losses into small wins while clipping the rare huge winners
+# that actually drive returns.
+#
+# A HIGH activation threshold avoids this: it never engages on a trade
+# until price has already moved up TRAILING_STOP_ACTIVATION_PCT from entry
+# (well past what a typical trade reaches), so it's a no-op for the ~90% of
+# trades that stay small, and only protects gains already banked on the
+# rare big runners -- without capping how far they can still run. Tested
+# 10/15/20/25% activation x 2/3/5% trail, all beat the no-trailing-stop
+# baseline; activate=15%/trail=3% chosen as a solidly-supported middle of
+# that range rather than the single best (most extreme) grid cell, to
+# avoid overfitting a coarse grid search to one dataset snapshot.
+TRAILING_STOP_ACTIVATION_PCT = Decimal(os.getenv("TRADING_SCANNER_TRAILING_STOP_ACTIVATION_PCT", "15"))
+TRAILING_STOP_TRAIL_PCT = Decimal(os.getenv("TRADING_SCANNER_TRAILING_STOP_TRAIL_PCT", "3"))
+
+
+def trailing_stop_price(entry_price: Decimal, peak_price: Decimal) -> Decimal | None:
+    """The trailing-stop exit price for an open BUY position, or None if
+    the trail hasn't activated yet (price never reached
+    ``TRAILING_STOP_ACTIVATION_PCT`` above entry).
+
+    ``peak_price`` is the highest price seen since entry (see
+    ``PaperPosition.peak_price``) -- the trail is anchored to that, not the
+    current price, so it only ever tightens as a position makes new highs
+    and never chases price back down. Checked *after* the hard stop-loss
+    (see ``stop_loss_price``) and *before* the strategy's own exit signal
+    -- see ``live_pipeline.py``'s tick-level check.
+    """
+    if peak_price < entry_price * (1 + TRAILING_STOP_ACTIVATION_PCT / 100):
+        return None
+    return peak_price * (1 - TRAILING_STOP_TRAIL_PCT / 100)
+
+
 async def is_eligible(symbol: str, interval: str, trade_repository: TradeRepository) -> bool:
     """Return whether a symbol's BUY-only track record clears the paper-trading bar.
 

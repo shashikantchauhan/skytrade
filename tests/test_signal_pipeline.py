@@ -123,6 +123,11 @@ class FakePaperAccountRepository:
     async def get_open_positions(self):
         return [p for p in self.opened if p.status == "open"]
 
+    async def update_peak_price(self, symbol, peak_price) -> None:
+        for index, position in enumerate(self.opened):
+            if position.symbol == symbol and position.status == "open":
+                self.opened[index] = replace(position, peak_price=peak_price)
+
 
 class FakeNotifier:
     def __init__(self) -> None:
@@ -1167,13 +1172,13 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
 async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypatch) -> None:
     """A candidate scoring below MIN_SCORE is rejected outright, even with
     plenty of free capital -- distinct from a capacity-driven skip."""
-    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 50.0)
+    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 10.0)
 
-    strong = RankedCandidate(  # score = 8*10 + 0 + 0 = 80
+    strong = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 8*2 + 0*1 = 16
         symbol="A", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=8, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
-    weak = RankedCandidate(  # score = 1*10 + 0 + 0 = 10, below the 50 floor
+    weak = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 1*2 + 0*1 = 2, below the 10 floor
         symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=1, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
@@ -1185,7 +1190,7 @@ async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypat
 
     assert "opened" in notes["A"]
     assert "REJECTED" in notes["B"]
-    assert "below minimum 50" in notes["B"]
+    assert "below minimum 10" in notes["B"]
     # Rejected by policy, not by running out of capital -- must not have
     # even attempted to open a position for it.
     assert all(position.symbol != "B" for position in paper_account_repository.opened)

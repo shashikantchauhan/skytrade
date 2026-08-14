@@ -87,14 +87,38 @@ def test_score_candidate_buy_and_sell_conviction_are_symmetric():
     assert score_candidate(strong_buy) == score_candidate(strong_short)
 
 
-def test_score_candidate_caps_volatility_margin_so_it_only_breaks_ties():
-    # An extreme volatility_margin (real production data reaches into the
-    # thousands) must not let a weak-prediction candidate outrank a
-    # strong-prediction one -- prediction is supposed to dominate.
-    weak_pred_huge_volmargin = _candidate("SPIKY", prediction=1, vol_margin=2000.0)
-    strong_pred_normal_volmargin = _candidate("STRONG", prediction=8, vol_margin=1.0)
+def test_score_candidate_clamps_extreme_volatility_margin_to_top_decile():
+    # A pathological outlier (real production data reaches into the
+    # thousands) must not get an ever-growing score just for being more
+    # extreme -- percentile bucketing clamps anything at/above the p90 cut
+    # point to the same top bucket, same idea as the old hard cap but
+    # derived from the real historical distribution instead of a fixed
+    # number.
+    at_p90_cut = _candidate("AT_P90", prediction=1, vol_margin=57.273)
+    pathological_outlier = _candidate("OUTLIER", prediction=1, vol_margin=50000.0)
 
-    assert score_candidate(strong_pred_normal_volmargin) > score_candidate(weak_pred_huge_volmargin)
+    assert score_candidate(at_p90_cut) == score_candidate(pathological_outlier)
+
+
+def test_score_candidate_weighs_volatility_margin_above_prediction_magnitude():
+    # 2026-08-14: intentional, evidence-based change -- checking real
+    # production outcomes showed volatility_margin has a real win-rate
+    # pattern (weak decile 51.8% win vs strong decile 62.9% win, stable
+    # across both halves of trade history) while prediction_at_entry's
+    # *magnitude* does not (54.6%-60.4%, non-monotonic, no real pattern).
+    # So a candidate with strong historical volatility_margin standing now
+    # legitimately outranks one with only a strong prediction vote and
+    # unremarkable volatility_margin -- this replaces the old "prediction
+    # always dominates" assumption, which real outcomes didn't support.
+    # See ranking.py's block comment above score_candidate for the full
+    # evidence table and the walk-forward caveat (this is a relative sort,
+    # not a validated absolute predictor).
+    strong_volatility_weak_prediction = _candidate("VOL", prediction=1, vol_margin=100.0)
+    weak_volatility_strong_prediction = _candidate("PRED", prediction=8, vol_margin=0.1)
+
+    assert score_candidate(strong_volatility_weak_prediction) > score_candidate(
+        weak_volatility_strong_prediction
+    )
 
 
 def test_score_candidate_volatility_margin_still_breaks_ties_within_the_cap():

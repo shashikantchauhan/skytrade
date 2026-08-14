@@ -59,6 +59,7 @@ from trading_scanner.alpha_engine import (
     _lorentzian_distance,
     _sma,
 )
+from trading_scanner.application.backtest import _regime_normalized, _volatility_margin
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +141,17 @@ class FastPredictResult:
     signal_previous: int  # persist this as next run's `signal_previous` input
     queue_state: QueueState  # persist this as next run's `queue_state` input
     exit_state: ExitState  # persist this as next run's `exit_state` input
+    # 2026-08-14: feature snapshot at this bar, for ranking (see
+    # application/ranking.py) and for logging into Trade.*_at_entry so live
+    # trades carry the same feature data backtest.py's replay already logs.
+    # Cheap to add here: this function already recomputes `features` (which
+    # includes ADX) as a full vectorized pass over the whole accumulated
+    # history every call (see `_calculate_features` below) -- regime and
+    # volatility margin are two more of the same kind of pass, not new
+    # incremental state to persist.
+    adx: float = 0.0
+    regime_normalized: float = 0.0
+    volatility_margin: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -261,6 +273,14 @@ def evaluate_latest_bar(
     labels = _labels(source)
     since_red_exit_all = _bars_since(kernel["alert_bullish"])
     since_green_exit_all = _bars_since(kernel["alert_bearish"])
+    # Same continuous values backtest.py's replay logs per trade (see that
+    # module's build_historical_events) -- computed the same way, on the
+    # same full-history arrays already in scope here, so this stays
+    # consistent with what training/analysis on backtest data assumed.
+    ohlc4 = (open_ + high + low + source) / 4.0
+    adx_all = features[3]  # `_n_adx`, already computed above
+    regime_normalized_all = _regime_normalized(ohlc4, high, low)
+    volatility_margin_all = _volatility_margin(high, low, close)
 
     max_bars_back_index = _max_bars_back_index(engine, length)
     prediction = 0
@@ -308,6 +328,9 @@ def evaluate_latest_bar(
         signal_previous=signal_new,
         queue_state=new_queue_state,
         exit_state=new_exit_state,
+        adx=float(adx_all[bar]),
+        regime_normalized=float(regime_normalized_all[bar]),
+        volatility_margin=float(volatility_margin_all[bar]),
     )
 
 

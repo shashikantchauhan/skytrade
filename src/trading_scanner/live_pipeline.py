@@ -32,7 +32,11 @@ from decimal import Decimal
 from kiteconnect import KiteConnect, KiteTicker
 
 from trading_scanner.alpha_engine import AlphaEngine
-from trading_scanner.application.paper_trading import INITIAL_CAPITAL, stop_loss_price
+from trading_scanner.application.paper_trading import (
+    INITIAL_CAPITAL,
+    stop_loss_price,
+    trailing_stop_price,
+)
 from trading_scanner.application.signal_pipeline import (
     _ENGINE_SETTINGS,
     _close_paper_position,
@@ -125,6 +129,13 @@ class LiveTickerPipeline:
         # here only risks one redundant, no-op close attempt, never a
         # double-close or double-charge.
         self._open_positions_cache: dict[str, Decimal] = {}
+        # symbol -> highest price seen since entry, for the trailing stop
+        # (see application/paper_trading.py's trailing_stop_price). Same
+        # staleness tolerance as _open_positions_cache above -- refreshed
+        # alongside it, and additionally bumped in-memory (+ persisted)
+        # the moment a tick makes a new high, so the trail tightens in
+        # real time rather than only every _POSITIONS_CACHE_REFRESH_SECONDS.
+        self._peak_price_cache: dict[str, Decimal] = {}
 
     async def _setup_repositories(self) -> None:
         if not self._config.turso_database_url:
@@ -230,27 +241,61 @@ class LiveTickerPipeline:
                 await self._check_stop_loss(token, price_decimal)
 
     async def _check_stop_loss(self, token: int, price: Decimal) -> None:
+        """Tick-level price checks for an open position, in order: hard
+        stop-loss first (unconditional downside cap), then the trailing
+        stop (only once activated -- see ``trailing_stop_price``'s
+        docstring for why a high activation threshold is what makes this
+        help rather than hurt)."""
         symbol = self._token_to_symbol.get(token)
         if symbol is None:
             return
         entry_price = self._open_positions_cache.get(symbol)
         if entry_price is None:
             return
-        if price > stop_loss_price(entry_price):
+
+        if price <= stop_loss_price(entry_price):
+            self._close_symbol_caches(symbol)
+            logger.warning(
+                "Stop-loss breached for %s: price=%s <= stop=%s (entry=%s) -- force-closing.",
+                symbol, price, stop_loss_price(entry_price), entry_price,
+            )
+            await _close_paper_position(
+                symbol, datetime.now(UTC), price,
+                self._repos["paper_account"], self._repos["signal"], self._notifier,
+                self._paper_account_lock,
+            )
             return
-        # Drop it from the cache immediately -- a burst of ticks can arrive
-        # for the same symbol before the next cache refresh, and this must
-        # not fire more than once for the same position.
+
+        peak_price = self._peak_price_cache.get(symbol, entry_price)
+        if price > peak_price:
+            peak_price = price
+            self._peak_price_cache[symbol] = peak_price
+            # Only a DB write when price genuinely makes a new high, not
+            # every tick -- infrequent in practice, and this is what makes
+            # the trail survive a mid-day process restart instead of
+            # resetting to entry_price.
+            await self._repos["paper_account"].update_peak_price(symbol, peak_price)
+
+        trail_stop = trailing_stop_price(entry_price, peak_price)
+        if trail_stop is not None and price <= trail_stop:
+            self._close_symbol_caches(symbol)
+            logger.warning(
+                "Trailing stop breached for %s: price=%s <= trail=%s (peak=%s, entry=%s) -- "
+                "force-closing.",
+                symbol, price, trail_stop, peak_price, entry_price,
+            )
+            await _close_paper_position(
+                symbol, datetime.now(UTC), price,
+                self._repos["paper_account"], self._repos["signal"], self._notifier,
+                self._paper_account_lock,
+            )
+
+    def _close_symbol_caches(self, symbol: str) -> None:
+        # Drop from both caches immediately -- a burst of ticks can arrive
+        # for the same symbol before the next cache refresh, and neither
+        # check must fire more than once for the same position.
         self._open_positions_cache.pop(symbol, None)
-        logger.warning(
-            "Stop-loss breached for %s: price=%s <= stop=%s (entry=%s) -- force-closing.",
-            symbol, price, stop_loss_price(entry_price), entry_price,
-        )
-        await _close_paper_position(
-            symbol, datetime.now(UTC), price,
-            self._repos["paper_account"], self._repos["signal"], self._notifier,
-            self._paper_account_lock,
-        )
+        self._peak_price_cache.pop(symbol, None)
 
     async def _refresh_positions_cache_loop(self) -> None:
         """Keeps ``_open_positions_cache`` in sync with the DB every few
@@ -263,6 +308,10 @@ class LiveTickerPipeline:
             try:
                 positions = await self._repos["paper_account"].get_open_positions()
                 self._open_positions_cache = {p.symbol: p.entry_price for p in positions}
+                self._peak_price_cache = {
+                    p.symbol: (p.peak_price if p.peak_price is not None else p.entry_price)
+                    for p in positions
+                }
             except Exception:
                 logger.warning(
                     "Failed to refresh open-positions cache (will retry).", exc_info=True
@@ -421,6 +470,10 @@ class LiveTickerPipeline:
                 try:
                     positions = await self._repos["paper_account"].get_open_positions()
                     self._open_positions_cache = {p.symbol: p.entry_price for p in positions}
+                    self._peak_price_cache = {
+                        p.symbol: (p.peak_price if p.peak_price is not None else p.entry_price)
+                        for p in positions
+                    }
                 except Exception:
                     logger.warning(
                         "Failed to prime open-positions cache on startup.", exc_info=True

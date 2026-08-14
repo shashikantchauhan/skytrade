@@ -269,14 +269,9 @@ async def run_signal_pipeline(
                     entry_timestamp=newest_candle.timestamp,
                     entry_price=_market_price(newest_candle),
                     prediction_at_entry=result.prediction,
-                    # ADX/regime/volatility aren't available from the live
-                    # incremental evaluation path (fast_predict.py) yet --
-                    # only application/backtest.py's full replay computes
-                    # them today. Ranking degrades gracefully to
-                    # prediction_at_entry alone until that gap is closed.
-                    adx=0.0,
-                    regime_normalized=0.0,
-                    volatility_margin=0.0,
+                    adx=result.adx,
+                    regime_normalized=result.regime_normalized,
+                    volatility_margin=result.volatility_margin,
                 ),
             ))
         else:
@@ -610,6 +605,9 @@ async def _process_symbol(
                 entry_price=market_price,
                 prediction_at_entry=result.prediction,
                 is_early_signal_flip=result.is_early_signal_flip,
+                adx_at_entry=result.adx,
+                regime_normalized_at_entry=result.regime_normalized,
+                volatility_margin_at_entry=result.volatility_margin,
             ),
         )
         paper_note = (
@@ -670,6 +668,9 @@ async def _process_symbol(
                 entry_price=market_price,
                 prediction_at_entry=result.prediction,
                 is_early_signal_flip=result.is_early_signal_flip,
+                adx_at_entry=result.adx,
+                regime_normalized_at_entry=result.regime_normalized,
+                volatility_margin_at_entry=result.volatility_margin,
             ),
         )
         derivatives_note = await _open_derivatives_shadow(

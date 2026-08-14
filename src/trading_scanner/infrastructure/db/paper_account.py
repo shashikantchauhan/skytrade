@@ -7,6 +7,7 @@ from decimal import Decimal
 import libsql_client
 
 from trading_scanner.domain.models import PaperPosition
+from trading_scanner.infrastructure.db._shared import add_column_if_missing
 
 _CREATE_PAPER_ACCOUNT_TABLE = """
 CREATE TABLE IF NOT EXISTS paper_account (
@@ -47,6 +48,10 @@ class TursoPaperAccountRepository:
         """Create the paper_account and paper_positions tables if missing."""
         await self._client.execute(_CREATE_PAPER_ACCOUNT_TABLE)
         await self._client.execute(_CREATE_PAPER_POSITIONS_TABLE)
+        # 2026-08-14: trailing stop's high-water mark (see domain/models.py's
+        # PaperPosition.peak_price docstring) -- migrates any already-deployed
+        # table forward.
+        await add_column_if_missing(self._client, "paper_positions", "peak_price", "REAL")
 
     async def get_cash_balance(self) -> Decimal:
         result = await self._client.execute("SELECT cash_balance FROM paper_account WHERE id = 1")
@@ -64,8 +69,8 @@ class TursoPaperAccountRepository:
         await self._client.execute(
             """
             INSERT INTO paper_positions
-                (symbol, entry_timestamp, entry_price, quantity, capital_allocated, status)
-            VALUES (?, ?, ?, ?, ?, 'open')
+                (symbol, entry_timestamp, entry_price, quantity, capital_allocated, status, peak_price)
+            VALUES (?, ?, ?, ?, ?, 'open', ?)
             """,
             [
                 position.symbol,
@@ -73,6 +78,7 @@ class TursoPaperAccountRepository:
                 float(position.entry_price),
                 position.quantity,
                 float(position.capital_allocated),
+                float(position.entry_price),  # peak starts at entry, only ever moves up
             ],
         )
         await self._client.execute(
@@ -127,7 +133,7 @@ class TursoPaperAccountRepository:
     async def get_open_positions(self) -> Sequence[PaperPosition]:
         result = await self._client.execute(
             """
-            SELECT symbol, entry_timestamp, entry_price, quantity, capital_allocated
+            SELECT symbol, entry_timestamp, entry_price, quantity, capital_allocated, peak_price
             FROM paper_positions WHERE status = 'open'
             """
         )
@@ -138,6 +144,17 @@ class TursoPaperAccountRepository:
                 entry_price=Decimal(str(row[2])),
                 quantity=row[3],
                 capital_allocated=Decimal(str(row[4])),
+                # Rows opened before this column existed have no stored peak
+                # yet -- fall back to entry_price (a correct, conservative
+                # starting point: the trailing stop simply hasn't observed
+                # any move above entry yet for them either way).
+                peak_price=Decimal(str(row[5])) if row[5] is not None else Decimal(str(row[2])),
             )
             for row in result.rows
         ]
+
+    async def update_peak_price(self, symbol: str, peak_price: Decimal) -> None:
+        await self._client.execute(
+            "UPDATE paper_positions SET peak_price = ? WHERE symbol = ? AND status = 'open'",
+            [float(peak_price), symbol],
+        )

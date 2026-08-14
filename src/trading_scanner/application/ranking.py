@@ -34,6 +34,7 @@ opening positions for the top N -- a structural change to the scan loop,
 not just an added function call. See NOTES.md for the integration plan.
 """
 
+import bisect
 import os
 from dataclasses import dataclass
 from datetime import datetime
@@ -83,57 +84,83 @@ class RankedCandidate:
     direction: SignalSide = SignalSide.BUY
 
 
-# 2026-08-14: found by hand, checking real trade examples against this
-# formula -- volatility_margin is NOT a small, bounded quantity the way ADX
-# is (see this constant's own reasoning below). Its real distribution across
-# 6,292 production trades: median ~4.9, p90 ~57, p99 ~438, max ~2160. Added
-# uncapped, it silently stopped being a tie-breaker for a meaningful chunk
-# of trades (44.5% of the top score quintile got there mainly *because of*
-# a large volatility_margin, not strong prediction -- directly contradicting
-# this function's own "prediction dominates" claim below, which was true in
-# intent but false in practice until this cap). Capped at 5.0: prediction's
-# own range is 10-80 (neighbors_count=8, so -8..+8 * 10), so a 5-point cap
-# can never outweigh even a single prediction-vote's difference (10 points)
-# -- restores tie-breaker-only behavior for volatility_margin. Chosen close
-# to the real median (4.9) specifically so typical trades are barely
-# affected; only the pathological long tail gets reined in.
-_MAX_VOLATILITY_MARGIN_CONTRIBUTION = 5.0
+# 2026-08-14: which features actually deserve weight, decided by checking
+# real outcomes against each of the 4 entry-time indicators independently,
+# on all 6,292 closed BUY trades (not a trained model -- just win rate per
+# decile bucket of each raw indicator, plus a temporal-stability check
+# splitting the history in half to catch anything that was only true in
+# aggregate). Results:
+#
+#   indicator            weak-bucket win% -> strong-bucket win%   stable across both halves?
+#   volatility_margin      51.8%     ->     62.9%                  yes (holds in older AND newer half)
+#   regime_normalized      54.9%     ->     61.9%                  partially (weak/not-significant in newer half)
+#   adx                    56.4%     ->     60.2%  (non-monotonic) no -- noise
+#   prediction_at_entry    54.6%     ->     60.4%  (non-monotonic) no -- noise
+#
+# So volatility_margin and regime_normalized get real, evidence-weighted
+# priority; adx and prediction_at_entry get folded in at low weight since
+# neither shows a trustworthy pattern on its own -- prediction_at_entry
+# still matters for *direction* (see direction_sign below), just not as a
+# quality signal.
+#
+# IMPORTANT CAVEAT (don't lose this): this ranks candidates *relative to
+# each other* within a scan cycle -- it decides who gets capital first when
+# several signals compete. It is NOT validated as an absolute predictor: a
+# walk-forward test of a logistic-regression version of this same idea
+# (train on past months, score the next unseen month, exactly like Stage
+# B's CatBoost test) came back at mean AUC 0.527 -- barely above random,
+# one month scored *below* random (0.431). That means don't trust this
+# formula to reliably tell you "trade or don't trade" (no floor should be
+# set from it), only to break ties when capital is scarcer than signals.
+#
+# Percentile buckets (deciles, 0/10/.../90) computed from the same 6,292
+# trades' real distributions -- so a new candidate's raw value gets scored
+# by where it falls in the *historical* distribution, not an arbitrary
+# fixed scale.
+_VOLATILITY_MARGIN_DECILE_CUTS = [0.3966, 0.9614, 1.8114, 3.0316, 4.8878, 8.0392, 14.1294, 25.6973, 57.273]
+_REGIME_NORMALIZED_DECILE_CUTS = [0.0667, 0.2351, 0.4403, 0.6821, 0.9504, 1.3043, 1.7584, 2.4345, 3.7582]
+_VOLATILITY_MARGIN_WEIGHT = 1.0  # strongest, stable evidence -- full weight
+_REGIME_NORMALIZED_WEIGHT = 0.5  # real but less stable -- half weight
+_PREDICTION_MAGNITUDE_WEIGHT = 2.0  # no quality signal found -- kept small, mostly for direction (see below)
+_ADX_WEIGHT = 1.0  # no quality signal found -- raw value is already small (~0.07-0.65), stays a minor nudge
+
+
+def _decile_score(value: float, cuts: list[float]) -> float:
+    """0, 10, ..., 90 -- which decile of the real historical distribution
+    ``value`` falls into, per the cut points above. Values beyond the
+    observed historical range clamp to the nearest end bucket rather than
+    extrapolating."""
+    return float(bisect.bisect_right(cuts, value) * 10)
 
 
 def score_candidate(candidate: RankedCandidate) -> float:
     """Stage A heuristic score: higher is a stronger candidate, regardless
     of direction.
 
-    ``prediction_at_entry`` is the kNN vote sum (Pine's own confidence
-    signal -- roughly -neighbors_count..+neighbors_count, positive leaning
-    BUY and negative leaning SELL), so it dominates the score. It's signed
-    by ``direction`` first: a BUY wants a strongly positive vote, a SELL
-    wants a strongly negative one, and without this flip a strongly
-    bearish SELL candidate would score *lower* than a weak one -- exactly
-    backwards. A no-op for today's BUY-only ranking (direction is always
-    BUY live), but correct the moment SELL candidates are ranked too.
+    Weighted by real evidence (see the block comment above this function):
+    ``volatility_margin`` and ``regime_normalized`` are the two indicators
+    that actually showed a real, outcome-correlated pattern in production
+    trade history, scored by percentile against that history and weighted
+    accordingly. ``adx`` and ``prediction_at_entry``'s *magnitude* showed no
+    such pattern, so they're weighted low -- ``prediction_at_entry`` is kept
+    mainly for its *sign*: it's the kNN vote (Pine's own confidence signal,
+    positive leaning BUY and negative leaning SELL), flipped by
+    ``direction`` so a strongly bearish SELL candidate scores as strong, not
+    weak -- a no-op for today's BUY-only ranking, but correct the moment
+    SELL candidates are ranked too.
 
-    ADX and the (capped) volatility margin break ties between similarly-
-    confident signals: prefer a trending market (higher ADX) with
-    volatility clearly above its filter threshold (positive margin) over a
-    borderline one -- capped at ``_MAX_VOLATILITY_MARGIN_CONTRIBUTION`` so
-    an extreme volatility reading can nudge a tie but never override a
-    real prediction-strength difference (see that constant's own docstring
-    for why this cap exists and how it was chosen).
-
-    Replace this function's body with a trained model's ``predict_proba``
-    call once ``train_ranking_model.py`` has one validated -- callers only
-    depend on this signature (``RankedCandidate -> float``), not on how the
-    score is computed.
+    This is a relative sort, not a validated absolute predictor -- see the
+    walk-forward AUC caveat above. Don't derive a rejection floor from this
+    score without new evidence.
     """
     direction_sign = 1.0 if candidate.direction == SignalSide.BUY else -1.0
-    volatility_contribution = min(
-        max(candidate.volatility_margin, 0.0), _MAX_VOLATILITY_MARGIN_CONTRIBUTION
-    )
+    volatility_score = _decile_score(candidate.volatility_margin, _VOLATILITY_MARGIN_DECILE_CUTS)
+    regime_score = _decile_score(candidate.regime_normalized, _REGIME_NORMALIZED_DECILE_CUTS)
     return (
-        float(candidate.prediction_at_entry) * direction_sign * 10.0
-        + candidate.adx
-        + volatility_contribution
+        volatility_score * _VOLATILITY_MARGIN_WEIGHT
+        + regime_score * _REGIME_NORMALIZED_WEIGHT
+        + float(candidate.prediction_at_entry) * direction_sign * _PREDICTION_MAGNITUDE_WEIGHT
+        + candidate.adx * _ADX_WEIGHT
     )
 
 

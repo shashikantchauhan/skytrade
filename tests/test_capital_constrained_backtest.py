@@ -112,19 +112,19 @@ def test_score_floor_rejects_weak_candidate_even_with_free_capital():
     same_time = datetime(2026, 2, 1, tzinfo=UTC)
     strong = Trade(
         symbol="A", side=SignalSide.BUY, entry_timestamp=same_time, entry_price=Decimal("100"),
-        prediction_at_entry=8, is_early_signal_flip=False,  # score = 80
+        prediction_at_entry=8, is_early_signal_flip=False,  # score = 8*2 = 16 (adx/vol/regime all default to 0)
         exit_timestamp=None, exit_price=None, status="open",
     )
     weak = Trade(
         symbol="B", side=SignalSide.BUY, entry_timestamp=same_time, entry_price=Decimal("100"),
-        prediction_at_entry=1, is_early_signal_flip=False,  # score = 10
+        prediction_at_entry=1, is_early_signal_flip=False,  # score = 1*2 = 2
         exit_timestamp=None, exit_price=None, status="open",
     )
     # Plenty of capital for both -- the weak one must be rejected by the
     # floor, not by running out of money.
     config = SimulationConfig(
         initial_capital=Decimal("800000"), target_slots=10, min_position_size=Decimal("75000"),
-        min_score=50.0,
+        min_score=10.0,
     )
     result = simulate([*history_a, *history_b, strong, weak], config)
     assert result.trades_taken == 1

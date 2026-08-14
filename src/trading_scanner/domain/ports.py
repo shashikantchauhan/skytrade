@@ -127,6 +127,14 @@ class PaperAccountRepository(Protocol):
 
     async def get_open_positions(self) -> Sequence[PaperPosition]: ...
 
+    async def update_peak_price(self, symbol: str, peak_price: Decimal) -> None:
+        """Record a new high-water mark for an open position's price, for
+        the trailing stop (see ``application/paper_trading.py``). No-op if
+        nothing is open for ``symbol``. Called only when price actually
+        exceeds the previously stored peak (see
+        ``live_pipeline.py``'s tick-level check) -- not on every tick."""
+        ...
+
 
 class FuturesPaperAccountRepository(Protocol):
     """Tracks the futures paper account's own capital pool and open/closed
