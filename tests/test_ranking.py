@@ -1,13 +1,17 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
+
 from trading_scanner.application.ranking import (
+    MIN_EXPECTANCY_TRADES,
     RankedCandidate,
     rank_candidates,
     score_candidate,
     select_top_n,
+    symbol_expectancy,
 )
-from trading_scanner.domain.models import SignalSide
+from trading_scanner.domain.models import SignalSide, Trade
 
 
 def _candidate(
@@ -16,6 +20,7 @@ def _candidate(
     adx: float = 0.2,
     vol_margin: float = 0.0,
     direction: SignalSide = SignalSide.BUY,
+    expectancy: float | None = None,
 ):
     return RankedCandidate(
         symbol=symbol,
@@ -26,6 +31,43 @@ def _candidate(
         regime_normalized=0.0,
         volatility_margin=vol_margin,
         direction=direction,
+        expectancy=expectancy,
+    )
+
+
+class _FakeTradeRepository:
+    """Minimal in-memory TradeRepository fake -- returns whatever closed
+    trades it was given, ignoring the symbol/interval filter (matches the
+    other fakes' style across this test suite)."""
+
+    def __init__(self, trades: list[Trade]) -> None:
+        self._trades = trades
+
+    async def get_trades(self, symbol, interval):
+        return self._trades
+
+    async def open_trade(self, interval, trade):
+        raise NotImplementedError
+
+    async def close_open_trade(self, symbol, interval, side, exit_timestamp, exit_price):
+        raise NotImplementedError
+
+    async def abandon_open_trade(self, symbol, interval, side):
+        raise NotImplementedError
+
+
+def _closed_trade(side: SignalSide, pnl_percent: str) -> Trade:
+    return Trade(
+        symbol="RELIANCE.NS",
+        side=side,
+        entry_timestamp=datetime(2026, 1, 1, tzinfo=UTC),
+        entry_price=Decimal("100"),
+        prediction_at_entry=1,
+        is_early_signal_flip=False,
+        exit_timestamp=datetime(2026, 1, 2, tzinfo=UTC),
+        exit_price=Decimal("101"),
+        pnl_percent=Decimal(pnl_percent),
+        status="closed",
     )
 
 
@@ -126,3 +168,66 @@ def test_score_candidate_volatility_margin_still_breaks_ties_within_the_cap():
     same_pred_high_vol = _candidate("HIGH_VOL", prediction=5, vol_margin=3.0)
 
     assert score_candidate(same_pred_high_vol) > score_candidate(same_pred_low_vol)
+
+
+def test_score_candidate_rewards_higher_expectancy():
+    # 2026-08-14: expectancy is the one factor here with real walk-forward
+    # support (see the block comment above _EXPECTANCY_WEIGHT) -- a
+    # candidate whose symbol+side has a real track record of strong
+    # expectancy should outrank an otherwise-identical one with weak
+    # expectancy.
+    strong_expectancy = _candidate("STRONG_EXP", prediction=1, expectancy=3.0)
+    weak_expectancy = _candidate("WEAK_EXP", prediction=1, expectancy=-1.0)
+
+    assert score_candidate(strong_expectancy) > score_candidate(weak_expectancy)
+
+
+def test_score_candidate_treats_missing_expectancy_as_neutral_not_penalized():
+    # A brand-new symbol+side with no track record yet (expectancy=None)
+    # should score the same as one sitting exactly at the median of the
+    # real historical expectancy distribution -- "unknown" isn't "bad."
+    no_track_record = _candidate("NEW", prediction=1, expectancy=None)
+    at_median = _candidate("MEDIAN", prediction=1, expectancy=0.9889)  # the median decile cut
+
+    assert score_candidate(no_track_record) == score_candidate(at_median)
+
+    # But a genuinely weak track record should still score below "unknown."
+    weak_track_record = _candidate("WEAK", prediction=1, expectancy=-1.3)
+    assert score_candidate(weak_track_record) < score_candidate(no_track_record)
+
+
+@pytest.mark.asyncio
+async def test_symbol_expectancy_returns_none_below_minimum_trade_count():
+    trades = [_closed_trade(SignalSide.BUY, "5.0") for _ in range(MIN_EXPECTANCY_TRADES - 1)]
+    repo = _FakeTradeRepository(trades)
+
+    result = await symbol_expectancy("RELIANCE.NS", SignalSide.BUY, "1h", repo)
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_symbol_expectancy_computes_win_rate_weighted_average():
+    # 8 wins at +2%, 2 losses at -1% -> win_rate=0.8
+    # expectancy = 0.8*2 + 0.2*(-1) = 1.6 - 0.2 = 1.4
+    trades = [_closed_trade(SignalSide.BUY, "2.0") for _ in range(8)] + [
+        _closed_trade(SignalSide.BUY, "-1.0") for _ in range(2)
+    ]
+    repo = _FakeTradeRepository(trades)
+
+    result = await symbol_expectancy("RELIANCE.NS", SignalSide.BUY, "1h", repo)
+
+    assert result == pytest.approx(1.4)
+
+
+@pytest.mark.asyncio
+async def test_symbol_expectancy_only_counts_matching_side():
+    # SELL trades shouldn't leak into a BUY-side expectancy calculation.
+    trades = [_closed_trade(SignalSide.BUY, "2.0") for _ in range(10)] + [
+        _closed_trade(SignalSide.SELL, "-5.0") for _ in range(10)
+    ]
+    repo = _FakeTradeRepository(trades)
+
+    result = await symbol_expectancy("RELIANCE.NS", SignalSide.BUY, "1h", repo)
+
+    assert result == pytest.approx(2.0)  # all 10 BUY trades won at +2%, SELL losses ignored

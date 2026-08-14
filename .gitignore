@@ -18,3 +18,4 @@ data/ranking_stage_a.cbm
 
 # Full project context/history -- local only, not for GitHub
 NOTES.md
+.venv2/

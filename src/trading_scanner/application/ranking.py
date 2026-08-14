@@ -41,6 +41,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import SignalSide
+from trading_scanner.domain.ports import TradeRepository
 
 # Absolute selectivity floor, on top of (not instead of) relative ranking:
 # a candidate scoring below this gets rejected outright even when capital
@@ -82,6 +83,12 @@ class RankedCandidate:
     regime_normalized: float
     volatility_margin: float
     direction: SignalSide = SignalSide.BUY
+    # This symbol+side's own real expectancy (see symbol_expectancy below),
+    # or None if it doesn't have enough closed trade history yet to compute
+    # one. Unlike adx/regime_normalized/volatility_margin (computed fresh
+    # from the current bar), this is a property of the (symbol, side) pair
+    # itself, fetched once per candidate at ranking time.
+    expectancy: float | None = None
 
 
 # 2026-08-14: which features actually deserve weight, decided by checking
@@ -124,6 +131,32 @@ _REGIME_NORMALIZED_WEIGHT = 0.5  # real but less stable -- half weight
 _PREDICTION_MAGNITUDE_WEIGHT = 2.0  # no quality signal found -- kept small, mostly for direction (see below)
 _ADX_WEIGHT = 1.0  # no quality signal found -- raw value is already small (~0.07-0.65), stays a minor nudge
 
+# 2026-08-14: unlike the four factors above (validated only as "beats
+# random on this one dataset," see the caveat above score_candidate),
+# per-symbol+side EXPECTANCY (win_rate * avg_win + loss_rate * avg_loss,
+# computed from that exact symbol+side's own closed trades) was tested
+# properly walk-forward on the full 220-symbol universe, across THREE
+# independent train/test splits (train cutoffs 2025-12-01, 2026-03-01,
+# 2026-06-01, each tested only on trades *after* its own cutoff):
+#
+#   split date    top-half avg pnl%   bottom-half avg pnl%   gap
+#   2025-12-01        1.278               0.996              +28% relative
+#   2026-03-01        1.174               0.910              +29% relative
+#   2026-06-01        1.104               0.863              +28% relative
+#
+# Consistent every time, not just win-rate-tied but a clear gap in average
+# per-trade return too -- and not driven by a single outlier symbol
+# (removing the single highest-expectancy symbol changed the result by
+# <0.3%). This is the first factor in this formula with real out-of-sample
+# support, so it gets the highest weight here -- still additive with, not a
+# replacement for, the other four.
+#
+# Decile cuts computed from all 433 symbol+side combos in the full 220-
+# symbol universe with >=10 closed trades (MIN_EXPECTANCY_TRADES below).
+_EXPECTANCY_DECILE_CUTS = [0.4427, 0.6147, 0.7405, 0.8666, 0.9889, 1.1112, 1.2793, 1.59, 1.9682]
+_EXPECTANCY_WEIGHT = 1.5  # highest weight -- the one factor with real walk-forward support
+MIN_EXPECTANCY_TRADES = 10  # matches the validation's own minimum-sample threshold
+
 
 def _decile_score(value: float, cuts: list[float]) -> float:
     """0, 10, ..., 90 -- which decile of the real historical distribution
@@ -151,17 +184,58 @@ def score_candidate(candidate: RankedCandidate) -> float:
 
     This is a relative sort, not a validated absolute predictor -- see the
     walk-forward AUC caveat above. Don't derive a rejection floor from this
-    score without new evidence.
+    score without new evidence. The exception is ``expectancy``, which
+    *does* have real walk-forward support (see the block comment above its
+    weight) -- when a candidate has no expectancy yet (new/thin trade
+    history), it's scored at the median decile (50) rather than 0, so
+    "unknown" isn't treated as "bad."
     """
     direction_sign = 1.0 if candidate.direction == SignalSide.BUY else -1.0
     volatility_score = _decile_score(candidate.volatility_margin, _VOLATILITY_MARGIN_DECILE_CUTS)
     regime_score = _decile_score(candidate.regime_normalized, _REGIME_NORMALIZED_DECILE_CUTS)
+    expectancy_score = (
+        50.0
+        if candidate.expectancy is None
+        else _decile_score(candidate.expectancy, _EXPECTANCY_DECILE_CUTS)
+    )
     return (
         volatility_score * _VOLATILITY_MARGIN_WEIGHT
         + regime_score * _REGIME_NORMALIZED_WEIGHT
         + float(candidate.prediction_at_entry) * direction_sign * _PREDICTION_MAGNITUDE_WEIGHT
         + candidate.adx * _ADX_WEIGHT
+        + expectancy_score * _EXPECTANCY_WEIGHT
     )
+
+
+async def symbol_expectancy(
+    symbol: str, side: SignalSide, interval: str, trade_repository: TradeRepository
+) -> float | None:
+    """Real expectancy for this exact symbol+side, from its own closed
+    trade history: ``win_rate * avg_win + loss_rate * avg_loss`` (in
+    percent). None if fewer than ``MIN_EXPECTANCY_TRADES`` closed trades
+    exist yet -- too little history to trust, same reasoning as
+    ``paper_trading.is_eligible``'s ``MIN_CLOSED_TRADES`` gate, just
+    side-aware instead of BUY-only.
+
+    Called once per ranked candidate at ranking time (see
+    ``signal_pipeline.py``), not cached -- one filtered DB query per
+    candidate, same cost pattern as the existing ``is_eligible`` check
+    already made for every candidate right before this.
+    """
+    trades = await trade_repository.get_trades(symbol, interval)
+    closed = [
+        trade
+        for trade in trades
+        if trade.side == side and trade.status == "closed" and trade.pnl_percent is not None
+    ]
+    if len(closed) < MIN_EXPECTANCY_TRADES:
+        return None
+    wins = [trade.pnl_percent for trade in closed if trade.pnl_percent > 0]
+    losses = [trade.pnl_percent for trade in closed if trade.pnl_percent < 0]
+    win_rate = len(wins) / len(closed)
+    avg_win = float(sum(wins) / len(wins)) if wins else 0.0
+    avg_loss = float(sum(losses) / len(losses)) if losses else 0.0
+    return win_rate * avg_win + (1 - win_rate) * avg_loss
 
 
 def rank_candidates(candidates: list[RankedCandidate]) -> list[RankedCandidate]:

@@ -28,6 +28,7 @@ from trading_scanner.application.ranking import (
     RankedCandidate,
     rank_candidates,
     score_candidate,
+    symbol_expectancy,
 )
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
@@ -262,6 +263,9 @@ async def run_signal_pipeline(
         if result.signal != "BUY":
             continue
         if await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
+            expectancy = await symbol_expectancy(
+                symbol, SignalSide.BUY, config.candle_interval, trade_repository
+            )
             ranked_candidates.append((
                 symbol,
                 RankedCandidate(
@@ -272,6 +276,7 @@ async def run_signal_pipeline(
                     adx=result.adx,
                     regime_normalized=result.regime_normalized,
                     volatility_margin=result.volatility_margin,
+                    expectancy=expectancy,
                 ),
             ))
         else:

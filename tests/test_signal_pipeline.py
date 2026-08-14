@@ -1172,13 +1172,16 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
 async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypatch) -> None:
     """A candidate scoring below MIN_SCORE is rejected outright, even with
     plenty of free capital -- distinct from a capacity-driven skip."""
-    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 10.0)
+    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 80.0)
 
-    strong = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 8*2 + 0*1 = 16
+    # Both leave expectancy unset (None), which scores as the neutral
+    # median decile (50 * 1.5 = 75) -- same fixed offset on both, so it
+    # doesn't affect which one wins, only the absolute floor needed here.
+    strong = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 8*2 + 0*1 + 75 = 91
         symbol="A", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=8, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
-    weak = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 1*2 + 0*1 = 2, below the 10 floor
+    weak = RankedCandidate(  # score = decile(0)*1 + decile(0)*0.5 + 1*2 + 0*1 + 75 = 77, below the 80 floor
         symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
         prediction_at_entry=1, adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
     )
@@ -1190,7 +1193,7 @@ async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypat
 
     assert "opened" in notes["A"]
     assert "REJECTED" in notes["B"]
-    assert "below minimum 10" in notes["B"]
+    assert "below minimum 80" in notes["B"]
     # Rejected by policy, not by running out of capital -- must not have
     # even attempted to open a position for it.
     assert all(position.symbol != "B" for position in paper_account_repository.opened)
