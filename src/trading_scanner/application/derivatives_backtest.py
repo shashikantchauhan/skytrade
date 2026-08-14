@@ -29,7 +29,7 @@ import logging
 from datetime import date, datetime
 from decimal import Decimal
 
-from trading_scanner.domain.models import FuturesShadowTrade, OptionsShadowTrade, Trade
+from trading_scanner.domain.models import FuturesShadowTrade, OptionsShadowTrade, SignalSide, Trade
 from trading_scanner.infrastructure.kite import KiteDerivativesChain
 from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
@@ -89,11 +89,17 @@ async def _backtest_one_trade(
 ) -> list[str]:
     assert trade.exit_timestamp is not None and trade.exit_price is not None
     notes: list[str] = []
-    side = trade.side.value  # "BUY" | "SELL"
 
-    # Futures position, hedged by an option (~2% OTM, see _HEDGE_OTM_PCT).
-    # No standalone naked-option leg -- dropped after review.
-    futures_side = "long" if side == "BUY" else "short"
+    # 2026-08-14: was comparing trade.side.value (SignalSide is a StrEnum
+    # whose values are lowercase, "buy"/"sell" -- see domain/models.py)
+    # against the uppercase literals "BUY"/"SELL", which never matched --
+    # every trade silently fell through to the else branch and was
+    # backtested as a SHORT future regardless of its real side. Found by
+    # hand-checking this module's output against known BUY signals during
+    # a Nifty50 analysis session; comparing against the enum member
+    # directly instead of a string literal makes this class of mismatch
+    # impossible to reintroduce.
+    futures_side = "long" if trade.side == SignalSide.BUY else "short"
     future_note = await _backtest_future(
         trade.symbol, futures_side, "primary",
         trade.entry_timestamp, trade.exit_timestamp,
