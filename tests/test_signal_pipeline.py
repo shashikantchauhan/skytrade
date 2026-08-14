@@ -1234,6 +1234,9 @@ async def test_rank_and_open_paper_positions_default_floor_is_a_no_op(monkeypatc
 
 
 class _FakeFuturesDerivativesChain:
+    def ltp(self, exchange_tradingsymbol):
+        return 2910.0
+
     def margin_benefit(self, legs):
         return {
             "primary_only_margin": 15000.0, "combined_margin": 10000.0, "margin_benefit": 5000.0,

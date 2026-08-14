@@ -76,10 +76,15 @@ class FakeDerivativesChain:
         combined_margin: Decimal | None,
         has_future: bool = True,
         has_hedge_option: bool = True,
+        futures_ltp: float | None = 2910.0,
     ):
         self._combined_margin = combined_margin
         self._has_future = has_future
         self._has_hedge_option = has_hedge_option
+        self._futures_ltp = futures_ltp
+
+    def ltp(self, exchange_tradingsymbol):
+        return self._futures_ltp
 
     def margin_benefit(self, legs):
         if self._combined_margin is None:
@@ -285,17 +290,22 @@ async def test_open_futures_paper_position_skips_when_no_hedge_option():
 
 @pytest.mark.asyncio
 async def test_close_futures_paper_position_closes_the_open_combo():
+    # Entry and exit use SEPARATE chain instances with different live LTPs
+    # -- the futures leg's own price, not the equity market_price passed
+    # to open_futures_paper_position (which is only used for the hedge
+    # strike target -- see that function's docstring).
     trades = [_closed_trade("RELIANCE.NS", SignalSide.BUY, win=True) for _ in range(5)]
     repo = FakeTradeRepository(trades)
     account = FakeFuturesPaperAccountRepository()
-    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
+    entry_chain = FakeDerivativesChain(combined_margin=Decimal("10000"), futures_ltp=2900.0)
     await futures_trading.open_futures_paper_position(
         "RELIANCE.NS", SignalSide.BUY, datetime(2026, 2, 1, tzinfo=UTC), Decimal("2900"),
-        "60minute", chain, repo, account,
+        "60minute", entry_chain, repo, account,
     )
 
+    exit_chain = FakeDerivativesChain(combined_margin=Decimal("10000"), futures_ltp=2950.0)
     note = await futures_trading.close_futures_paper_position(
-        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account,
+        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), exit_chain, account,
     )
 
     assert note is not None
@@ -306,9 +316,10 @@ async def test_close_futures_paper_position_closes_the_open_combo():
 @pytest.mark.asyncio
 async def test_close_futures_paper_position_is_a_noop_when_nothing_open():
     account = FakeFuturesPaperAccountRepository()
+    chain = FakeDerivativesChain(combined_margin=Decimal("10000"))
 
     note = await futures_trading.close_futures_paper_position(
-        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), Decimal("2950"), account,
+        "RELIANCE.NS", datetime(2026, 2, 5, tzinfo=UTC), chain, account,
     )
 
     assert note is None

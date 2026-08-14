@@ -141,7 +141,6 @@
 <div class="tabnav">
   <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
-  <button class="tab-btn" data-tab="derivatives" onclick="switchTab('derivatives')">Derivatives</button>
   <button class="tab-btn" data-tab="futures-paper" onclick="switchTab('futures-paper')">Futures (Nifty50)</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
 </div>
@@ -164,43 +163,6 @@
   </div>
   <div class="panel table-wrap">
     <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
-  </div>
-</section>
-
-<section class="tab-panel" data-tab="derivatives" hidden>
-  <h2>Derivatives shadow analysis <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(Kite only, never a real order)</span></h2>
-  <div class="cards" id="derivatives-cards"></div>
-  <div class="panel row admin-only" style="margin-top: 0.8rem; align-items: flex-end;">
-    <label class="field">Symbol (e.g. RELIANCE.NS)<input id="margin-symbol" placeholder="RELIANCE.NS" /></label>
-    <button class="primary" onclick="checkMarginBenefit()">Check live margin benefit</button>
-    <span class="msg" id="margin-msg"></span>
-  </div>
-  <div class="row" style="margin-top: 0.8rem;">
-    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
-      <table id="options-shadow-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="futures-shadow-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
-    </div>
-  </div>
-
-  <h2 style="margin-top: 1.5rem;">Current-month derivatives backtest <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(replays this month's closed trades against Kite historical data -- expired contracts can't be reached, so only the current month works)</span></h2>
-  <div class="panel row admin-only" style="margin-bottom: 0.8rem;">
-    <button class="primary" onclick="runBacktest()">Run backtest</button>
-    <span class="msg" id="backtest-msg"></span>
-  </div>
-  <div class="cards" id="backtest-cards"></div>
-  <div class="row" style="margin-top: 0.8rem;">
-    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Hedge options (protecting the future)</div>
-      <table id="backtest-options-table"><thead><tr><th>Symbol</th><th>Type</th><th>Purpose</th><th>Strike/Moneyness</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th><th>Greeks (entry → exit)</th></tr></thead><tbody></tbody></table>
-    </div>
-    <div class="panel table-wrap" style="flex: 1; min-width: 300px;">
-      <div style="font-weight: 600; font-size: 0.8rem; margin-bottom: 0.5rem;">Futures</div>
-      <table id="backtest-futures-table"><thead><tr><th>Symbol</th><th>Side</th><th>Purpose</th><th>Entry time</th><th>Entry price</th><th>Exit price</th><th>Price diff</th><th>PnL</th></tr></thead><tbody></tbody></table>
-    </div>
   </div>
 </section>
 
@@ -252,22 +214,6 @@ async function logout() {
 }
 
 function fmt(n) { return n === null || n === undefined ? "-" : Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
-
-// One side (entry or exit) of a greeks snapshot -- null means the
-// Black-Scholes computation couldn't resolve for that row (see
-// application/options_analytics.py), shown as "-" rather than hidden so
-// it's clear the column was checked, not skipped.
-function formatGreeksSide(g) {
-  if (!g) return "-";
-  return `IV ${fmt(g.implied_volatility)}% · Δ ${fmt(g.delta)} · Θ ${fmt(g.theta)}/day`;
-}
-
-function formatGreeksCell(greeks) {
-  if (!greeks) return "-";
-  const entry = formatGreeksSide(greeks.entry);
-  if (!greeks.exit) return entry;
-  return `${entry} → ${formatGreeksSide(greeks.exit)}`;
-}
 
 // Every timestamp from the API is UTC ISO -- displayed in IST throughout
 // this dashboard since that's the timezone the strategy/market actually
@@ -393,56 +339,6 @@ async function loadKiteStatus() {
   }
 }
 
-function renderDerivativesShadow(d, cardsId, optionsTableId, futuresTableId) {
-  const pnlPill = (v) => v === null || v === undefined ? "-" : `<span class="pill ${v >= 0 ? "green" : "red"}">₹${fmt(v)}</span>`;
-  document.getElementById(cardsId).innerHTML = `
-    <div class="card"><div class="label">Futures -- the trade (${d.primary_futures.closed_count} closed, ${fmt(d.primary_futures.win_rate)}% win)</div><div class="value">${pnlPill(d.primary_futures.total_pnl)}</div></div>
-    <div class="card"><div class="label">Hedge option on the future (${d.hedge_options.closed_count} closed, ${fmt(d.hedge_options.win_rate)}% win)</div><div class="value">${pnlPill(d.hedge_options.total_pnl)}</div></div>
-  `;
-  document.querySelector(`#${optionsTableId} tbody`).innerHTML = d.recent_options.map(o => {
-    const cls = o.pnl_percent === null ? "" : (o.pnl_percent >= 0 ? "green" : "red");
-    const pnl = o.pnl_percent === null ? o.status : `<span class="pill ${cls}">${fmt(o.pnl_percent)}% (₹${fmt(o.pnl_amount)})</span>`;
-    const known = o.exit_premium !== null && o.exit_premium !== undefined;
-    // Buying an option profits when its premium rises, whether it's a
-    // CALL or a PUT -- see options_shadow.py's own pnl_amount comment.
-    const diff = known ? `₹${fmt(o.exit_premium - o.entry_premium)}` : "-";
-    const exitCell = known ? `₹${fmt(o.exit_premium)}` : "-";
-    const greeksCell = formatGreeksCell(o.greeks);
-    return `<tr><td>${o.symbol}</td><td>${o.option_type}</td><td>${o.purpose}</td><td>${o.moneyness} (strike ₹${fmt(o.strike)}, spot ₹${fmt(o.underlying_price_at_entry)})</td><td>${fmtTime(o.entry_timestamp)}</td><td>₹${fmt(o.entry_premium)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td><td>${greeksCell}</td></tr>`;
-  }).join("") || "<tr><td colspan=10>No trades yet</td></tr>";
-  document.querySelector(`#${futuresTableId} tbody`).innerHTML = d.recent_futures.map(f => {
-    const cls = f.pnl_percent === null ? "" : (f.pnl_percent >= 0 ? "green" : "red");
-    const pnl = f.pnl_percent === null ? f.status : `<span class="pill ${cls}">${fmt(f.pnl_percent)}% (₹${fmt(f.pnl_amount)})</span>`;
-    const known = f.exit_price !== null && f.exit_price !== undefined;
-    // long profits when price rises (exit - entry), short profits when it
-    // falls (entry - exit) -- same convention as futures_shadow.py.
-    const rawDiff = known ? (f.side === "long" ? f.exit_price - f.entry_price : f.entry_price - f.exit_price) : null;
-    const diff = known ? `₹${fmt(rawDiff)}` : "-";
-    const exitCell = known ? `₹${fmt(f.exit_price)}` : "-";
-    return `<tr><td>${f.symbol}</td><td>${f.side}</td><td>${f.purpose}</td><td>${fmtTime(f.entry_timestamp)}</td><td>₹${fmt(f.entry_price)}</td><td>${exitCell}</td><td>${diff}</td><td>${pnl}</td></tr>`;
-  }).join("") || "<tr><td colspan=8>No trades yet</td></tr>";
-}
-
-async function loadDerivativesShadow() {
-  const d = await api("/api/derivatives-shadow");
-  renderDerivativesShadow(d, "derivatives-cards", "options-shadow-table", "futures-shadow-table");
-}
-
-async function loadDerivativesBacktest() {
-  const d = await api("/api/derivatives-backtest");
-  renderDerivativesShadow(d, "backtest-cards", "backtest-options-table", "backtest-futures-table");
-}
-
-async function runBacktest() {
-  const el = document.getElementById("backtest-msg");
-  el.textContent = "Running (uses this month's closed trades + Kite historical data, may take a bit)...";
-  await api("/api/trigger-backtest", { method: "POST" });
-  setTimeout(async () => {
-    await loadDerivativesBacktest();
-    el.textContent = "Done -- refresh in a few seconds if you triggered it just now and don't see results yet.";
-  }, 5000);
-}
-
 async function loadFuturesPaper() {
   const f = await api("/api/futures-paper");
   const pnlClass = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
@@ -468,24 +364,6 @@ async function loadFuturesPaper() {
   }).join("") || "<tr><td colspan=8>No closed combos yet</td></tr>";
 }
 
-async function checkMarginBenefit() {
-  const symbol = document.getElementById("margin-symbol").value.trim();
-  const el = document.getElementById("margin-msg");
-  if (!symbol) { el.textContent = "Enter a symbol first."; return; }
-  el.textContent = "Checking live margin via Kite...";
-  try {
-    const r = await api(`/api/margin-benefit?symbol=${encodeURIComponent(symbol)}`);
-    if (!r.has_hedge) {
-      el.textContent = `${symbol}: primary future open, no hedge option open yet -- margin ₹${fmt(r.primary_only_margin)}.`;
-      return;
-    }
-    el.innerHTML = `${symbol}: future alone ₹${fmt(r.primary_only_margin)} &rarr; with hedge ₹${fmt(r.combined_margin)} ` +
-      `(<span class="pill ${r.margin_benefit >= 0 ? "green" : "red"}">benefit ₹${fmt(r.margin_benefit)}</span>)`;
-  } catch (e) {
-    el.textContent = `Couldn't check: ${e.message}`;
-  }
-}
-
 let myRole = null;
 
 async function applyRole() {
@@ -503,7 +381,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadDerivativesShadow(), loadDerivativesBacktest(), loadFuturesPaper()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadFuturesPaper()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus());
   }

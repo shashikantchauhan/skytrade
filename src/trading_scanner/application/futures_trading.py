@@ -170,24 +170,40 @@ async def open_futures_paper_position(
     55%-win-rate track record (``is_eligible``), then hands off to
     ``try_open_futures_position`` for the real margin check.
 
+    ``market_price`` (the underlying/equity price) is used ONLY to target
+    the hedge option's OTM strike, never as the futures leg's own entry
+    price -- a futures contract trades at its own basis to spot (confirmed
+    with real data this session: on real August trades, cash and futures
+    P&L on the *same* signal diverged by up to tens of thousands of rupees,
+    sometimes even opposite signs). The futures leg's real entry price is
+    this contract's own live LTP (``derivatives_chain.ltp``), fetched here
+    -- using the equity price as a stand-in would silently defeat the
+    entire point of a *futures* paper account.
+
     Caller (``signal_pipeline.py``) is responsible for only calling this
     for symbols on the futures-paper allowlist (see ``AppConfig.
     futures_paper_symbols_file`` -- Nifty50 today) -- this function itself
     is symbol-agnostic, same as every other function in this module.
 
     Best-effort: returns None (nothing opened) on missing eligibility, a
-    missing futures/options contract, or a margin-check failure, matching
-    ``try_open_futures_position``'s own silent-on-failure convention. Never
-    raises into the caller.
+    missing futures/options contract, a missing live futures quote, or a
+    margin-check failure, matching ``try_open_futures_position``'s own
+    silent-on-failure convention. Never raises into the caller.
     """
     if not await is_eligible(symbol, side, interval, trade_repository):
         return None
     futures_contract = derivatives_chain.nearest_future(symbol)
     if futures_contract is None:
         return None
+    futures_ltp = derivatives_chain.ltp(f"NFO:{futures_contract['tradingsymbol']}")
+    if futures_ltp is None:
+        return None
+    futures_entry_price = Decimal(str(futures_ltp))
     futures_side = "long" if side == SignalSide.BUY else "short"
     hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
     # PE is OTM below spot, CE is OTM above spot -- see _HEDGE_OTM_PCT.
+    # Deliberately still keyed off market_price (spot), not futures_entry_price
+    # -- OTM hedge strikes are conventionally set relative to the underlying.
     hedge_strike_target = (
         market_price * (1 - _HEDGE_OTM_PCT)
         if side == SignalSide.BUY
@@ -202,7 +218,7 @@ async def open_futures_paper_position(
         symbol,
         futures_side,
         entry_timestamp,
-        market_price,
+        futures_entry_price,
         futures_contract["tradingsymbol"],
         hedge_contract["tradingsymbol"],
         int(futures_contract["lot_size"]),
@@ -220,16 +236,31 @@ async def open_futures_paper_position(
 async def close_futures_paper_position(
     symbol: str,
     exit_timestamp: datetime,
-    futures_exit_price: Decimal,
+    derivatives_chain: KiteDerivativesChain,
     futures_account_repository: FuturesPaperAccountRepository,
 ) -> str | None:
     """Close whatever ``open_futures_paper_position`` opened for ``symbol``,
     if anything did. None (no-op) if this symbol has no open combo in the
     futures paper account -- most signals never clear eligibility/margin in
     the first place, so this is the common case, not an error.
+
+    Exit price is this contract's own live LTP (``derivatives_chain.ltp``),
+    same reasoning as ``open_futures_paper_position``'s entry price -- NOT
+    the underlying equity price the caller's cash-side exit uses. Using the
+    equity price here would silently price every futures exit off the
+    wrong instrument (this was a real bug, fixed 2026-08-14, caught by the
+    user noticing futures P&L wasn't tracking the underlying's real move --
+    which is exactly correct behavior once this used the real futures
+    price; it just wasn't, until this fix).
     """
+    contract = derivatives_chain.nearest_future(symbol)
+    if contract is None:
+        return None
+    futures_ltp = derivatives_chain.ltp(f"NFO:{contract['tradingsymbol']}")
+    if futures_ltp is None:
+        return None
     position = await futures_account_repository.close_position(
-        symbol, exit_timestamp, futures_exit_price
+        symbol, exit_timestamp, Decimal(str(futures_ltp))
     )
     if position is None:
         return None

@@ -593,6 +593,7 @@ async def _process_symbol(
     market_price = _market_price(newest_candle)
     paper_note = None
     derivatives_note = None
+    futures_note = None
 
     if result.signal == "BUY":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.SELL)
@@ -623,12 +624,15 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
-        if precomputed_futures_note is None:
-            await _open_futures_paper(
+        futures_note = (
+            precomputed_futures_note
+            if precomputed_futures_note is not None
+            else await _open_futures_paper(
                 symbol, SignalSide.BUY, newest_candle.timestamp, market_price,
                 config.candle_interval, trade_repository, derivatives_chain,
                 futures_account_repository, futures_paper_symbols,
             )
+        )
     if result.end_long:
         # Notification failures (e.g. a Telegram network timeout) must never
         # block actually recording the close -- this was a real bug: a
@@ -664,7 +668,7 @@ async def _process_symbol(
             config, order_executor, live_order_repository, notifier,
         )
         await _close_futures_paper(
-            symbol, newest_candle.timestamp, market_price,
+            symbol, newest_candle.timestamp, derivatives_chain,
             futures_account_repository, futures_paper_symbols,
         )
     if result.signal == "SELL":
@@ -688,12 +692,15 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
-        if precomputed_futures_note is None:
-            await _open_futures_paper(
+        futures_note = (
+            precomputed_futures_note
+            if precomputed_futures_note is not None
+            else await _open_futures_paper(
                 symbol, SignalSide.SELL, newest_candle.timestamp, market_price,
                 config.candle_interval, trade_repository, derivatives_chain,
                 futures_account_repository, futures_paper_symbols,
             )
+        )
     if result.end_short:
         # See the end_long branch above for why this is wrapped -- a
         # notification failure must never block recording the actual close.
@@ -716,7 +723,7 @@ async def _process_symbol(
             config, order_executor, live_order_repository, notifier,
         )
         await _close_futures_paper(
-            symbol, newest_candle.timestamp, market_price,
+            symbol, newest_candle.timestamp, derivatives_chain,
             futures_account_repository, futures_paper_symbols,
         )
 
@@ -732,6 +739,10 @@ async def _process_symbol(
         rationale += "; informational only -- not tradeable in NSE cash market"
     elif paper_note is not None:
         rationale += f"; {paper_note}"
+    # Unlike paper_note (cash, BUY-only), futures_note applies to both
+    # sides -- futures are the real short mechanism, see futures_trading.py.
+    if futures_note is not None:
+        rationale += f"; {futures_note}"
     if derivatives_note is not None:
         rationale += f"; {derivatives_note}"
     if index_result is not None:
@@ -1253,25 +1264,33 @@ async def _open_futures_paper(
 async def _close_futures_paper(
     symbol: str,
     exit_timestamp: datetime,
-    market_price: Decimal,
+    derivatives_chain: KiteDerivativesChain | None,
     futures_account_repository: FuturesPaperAccountRepository | None,
     futures_paper_symbols: frozenset[str],
-) -> None:
+) -> str | None:
     """Best-effort close of whatever ``_open_futures_paper`` opened -- see
-    that function's docstring."""
-    if futures_account_repository is None or symbol not in futures_paper_symbols:
-        return
+    that function's docstring. Exit price is resolved internally from the
+    real futures contract's live LTP, not the equity price -- see
+    ``close_futures_paper_position``'s docstring."""
+    if (
+        futures_account_repository is None
+        or derivatives_chain is None
+        or symbol not in futures_paper_symbols
+    ):
+        return None
     try:
         note = await futures_trading.close_futures_paper_position(
-            symbol, exit_timestamp, market_price, futures_account_repository,
+            symbol, exit_timestamp, derivatives_chain, futures_account_repository,
         )
         if note is not None:
             logging.getLogger(__name__).info(note)
+        return note
     except Exception:
         logging.getLogger(__name__).warning(
             "Futures paper close failed for %s -- continuing without it.",
             symbol, exc_info=True,
         )
+        return None
 
 
 async def _win_rate_summary(
