@@ -61,6 +61,22 @@ _BACKTEST_LOG_PATH = _LOG_PATH.with_name("derivatives-backtest.log")
 _SESSION_COOKIE = "ptrade_session"
 _SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
+# 2026-08-16: skytrade-smallcap (Nifty Smallcap 250, weekly signals) is a
+# separate fork deployed as a subfolder alongside this app (/opt/p-trade/
+# smallcap), with its own local SQLite file, own daily crontab, own paper
+# account -- entirely independent of the cash/futures books above. This
+# dashboard just reads its DB read-only to fold it into one URL/login
+# rather than standing up a second dashboard. If that fork's own .env ever
+# changes PAPER_CAPITAL/_SLOTS/_MIN_POSITION, these three must be updated
+# to match by hand -- they're read from a different process's environment,
+# so they can't be imported/shared automatically.
+_SMALLCAP_DB_PATH = os.getenv(
+    "TRADING_SCANNER_SMALLCAP_DB_PATH", "/opt/p-trade/smallcap/data/skytrade-smallcap.db"
+)
+_SMALLCAP_INITIAL_CAPITAL = Decimal("500000")
+_SMALLCAP_TARGET_SLOTS = 10
+_SMALLCAP_MIN_POSITION_SIZE = Decimal("50000")
+
 app = FastAPI(title="SkyTrade dashboard")
 
 # token -> {expiry, role, name}. In-memory: fine for a single-process
@@ -484,6 +500,119 @@ async def futures_paper(_: None = Depends(_require_session)) -> JSONResponse:
                         "pnl_amount": _decimal(p.pnl_amount),
                     }
                     for p in recent_closed
+                ],
+            }
+        )
+    finally:
+        await client.close()
+
+
+def _smallcap_client():
+    """Separate client for the skytrade-smallcap fork's own local SQLite
+    file -- not the main app's Turso database. Returns None if the fork
+    hasn't been deployed yet (e.g. local dev), so these endpoints degrade
+    to an empty/absent state instead of throwing."""
+    if not Path(_SMALLCAP_DB_PATH).exists():
+        return None
+    return create_turso_client(f"file:{_SMALLCAP_DB_PATH}", None)
+
+
+@app.get("/api/smallcap-status")
+async def smallcap_status(_: None = Depends(_require_session)) -> JSONResponse:
+    """Nifty Smallcap 250 weekly-signal paper account (skytrade-smallcap
+    fork, see application/signal_pipeline.py's docstring there) -- its own
+    Rs 5L/10-slot capital pool, entirely separate from the cash and futures
+    books above."""
+    client = _smallcap_client()
+    if client is None:
+        return JSONResponse({"deployed": False})
+    try:
+        repository = TursoPaperAccountRepository(client, _SMALLCAP_INITIAL_CAPITAL)
+        await repository.ensure_schema()
+        cash_balance = await repository.get_cash_balance()
+        open_positions = list(await repository.get_open_positions())
+        total_equity = cash_balance + sum(
+            (p.capital_allocated for p in open_positions), start=Decimal("0")
+        )
+        position_size = max(total_equity / _SMALLCAP_TARGET_SLOTS, _SMALLCAP_MIN_POSITION_SIZE)
+        return JSONResponse(
+            {
+                "deployed": True,
+                "cash_balance": _decimal(cash_balance),
+                "total_equity": _decimal(total_equity),
+                "open_position_count": len(open_positions),
+                "target_slots": _SMALLCAP_TARGET_SLOTS,
+                "current_slot_size": _decimal(position_size),
+                "pnl_since_start": _decimal(total_equity - _SMALLCAP_INITIAL_CAPITAL),
+                "pnl_since_start_pct": _decimal(
+                    (total_equity - _SMALLCAP_INITIAL_CAPITAL) / _SMALLCAP_INITIAL_CAPITAL * 100
+                ),
+            }
+        )
+    finally:
+        await client.close()
+
+
+@app.get("/api/smallcap-positions")
+async def smallcap_positions(_: None = Depends(_require_session)) -> JSONResponse:
+    client = _smallcap_client()
+    if client is None:
+        return JSONResponse([])
+    try:
+        repository = TursoPaperAccountRepository(client, _SMALLCAP_INITIAL_CAPITAL)
+        open_positions = list(await repository.get_open_positions())
+        # Yahoo only, display purposes -- this fork's own daily pipeline is
+        # Kite-only (no fallback, see its signal_pipeline.py); this is just
+        # the dashboard's live-quote convenience, same as the main app's
+        # own Yahoo fallback in _last_prices above.
+        symbols = [p.symbol for p in open_positions]
+        last_prices = await asyncio.to_thread(_yahoo.get_last_prices, symbols) if symbols else {}
+        return JSONResponse(
+            [
+                {
+                    "symbol": p.symbol,
+                    "entry_timestamp": p.entry_timestamp.isoformat(),
+                    "entry_price": _decimal(p.entry_price),
+                    "quantity": p.quantity,
+                    "capital_allocated": _decimal(p.capital_allocated),
+                    **_unrealized_pnl(p, last_prices),
+                }
+                for p in sorted(open_positions, key=lambda p: p.entry_timestamp, reverse=True)
+            ]
+        )
+    finally:
+        await client.close()
+
+
+@app.get("/api/smallcap-trades")
+async def smallcap_trades(limit: int = 50, _: None = Depends(_require_session)) -> JSONResponse:
+    client = _smallcap_client()
+    if client is None:
+        return JSONResponse({"overall_win_rate": None, "closed_buy_count": 0, "recent": []})
+    try:
+        repository = TursoTradeRepository(client)
+        all_trades = await repository.get_trades(None, "week")
+        closed_buys = [t for t in all_trades if t.side.value == "buy" and t.status == "closed"]
+        closed_all = [t for t in all_trades if t.status == "closed"]
+        closed_all.sort(key=lambda t: t.exit_timestamp or t.entry_timestamp, reverse=True)
+        wins = sum(1 for t in closed_buys if t.pnl_percent is not None and t.pnl_percent > 0)
+        return JSONResponse(
+            {
+                "overall_win_rate": _decimal(
+                    Decimal(100 * wins) / len(closed_buys) if closed_buys else None
+                ),
+                "closed_buy_count": len(closed_buys),
+                "recent": [
+                    {
+                        "symbol": t.symbol,
+                        "side": t.side.value,
+                        "entry_timestamp": t.entry_timestamp.isoformat(),
+                        "entry_price": _decimal(t.entry_price),
+                        "exit_timestamp": t.exit_timestamp.isoformat() if t.exit_timestamp else None,
+                        "exit_price": _decimal(t.exit_price),
+                        "pnl_percent": _decimal(t.pnl_percent),
+                    }
+                    for t in closed_all[:limit]
                 ],
             }
         )
