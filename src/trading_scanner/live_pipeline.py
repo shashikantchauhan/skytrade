@@ -116,7 +116,9 @@ _TICKER_WATCHDOG_CHECK_SECONDS = 60
 
 def _build_notifier(config: AppConfig):
     if config.telegram_bot_token and config.telegram_chat_id:
-        return TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id)
+        return TelegramNotifier(
+            config.telegram_bot_token, config.telegram_chat_id, config.notification_label
+        )
     return LoggingNotifier()
 
 
