@@ -553,6 +553,34 @@ async def smallcap_status(_: None = Depends(_require_session)) -> JSONResponse:
         await client.close()
 
 
+async def _smallcap_last_prices(symbols: list[str]) -> dict[str, float]:
+    """Live quotes for smallcap symbols via the *parent* app's own Kite
+    session -- same Zerodha account/api_key (see run_daily.sh's docstring),
+    so no separate login is needed just to price a dashboard column. No
+    Yahoo fallback here on purpose, unlike the main dashboard's
+    ``_last_prices``: a day-old Yahoo close next to a smallcap table is more
+    likely to mislead than a blank cell, and this is exactly the data-source
+    boundary the 2026-08-13 cross-contamination bug taught us to keep
+    strict about -- Kite or nothing, never silently something else."""
+    if not symbols:
+        return {}
+    client, config = _client()
+    try:
+        if not config.kite_api_key:
+            return {}
+        repository = TursoKiteSessionRepository(client)
+        await repository.ensure_schema()
+        token_row = await repository.get_token()
+        if token_row is None:
+            return {}
+        access_token, _obtained_at = token_row
+        kite = KiteConnect(api_key=config.kite_api_key)
+        kite.set_access_token(access_token)
+        return await asyncio.to_thread(kite_get_last_prices, kite, symbols) or {}
+    finally:
+        await client.close()
+
+
 @app.get("/api/smallcap-positions")
 async def smallcap_positions(_: None = Depends(_require_session)) -> JSONResponse:
     client = _smallcap_client()
@@ -561,12 +589,8 @@ async def smallcap_positions(_: None = Depends(_require_session)) -> JSONRespons
     try:
         repository = TursoPaperAccountRepository(client, _SMALLCAP_INITIAL_CAPITAL)
         open_positions = list(await repository.get_open_positions())
-        # Yahoo only, display purposes -- this fork's own daily pipeline is
-        # Kite-only (no fallback, see its signal_pipeline.py); this is just
-        # the dashboard's live-quote convenience, same as the main app's
-        # own Yahoo fallback in _last_prices above.
         symbols = [p.symbol for p in open_positions]
-        last_prices = await asyncio.to_thread(_yahoo.get_last_prices, symbols) if symbols else {}
+        last_prices = await _smallcap_last_prices(symbols)
         return JSONResponse(
             [
                 {
@@ -642,7 +666,7 @@ async def smallcap_open_signals(_: None = Depends(_require_session)) -> JSONResp
         open_buys = [t for t in all_trades if t.side.value == "buy" and t.status == "open"]
         open_buys.sort(key=lambda t: t.entry_timestamp, reverse=True)
         symbols = [t.symbol for t in open_buys]
-        last_prices = await asyncio.to_thread(_yahoo.get_last_prices, symbols) if symbols else {}
+        last_prices = await _smallcap_last_prices(symbols)
         return JSONResponse(
             [
                 {
