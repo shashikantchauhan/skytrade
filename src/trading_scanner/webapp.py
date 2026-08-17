@@ -585,7 +585,10 @@ async def smallcap_positions(_: None = Depends(_require_session)) -> JSONRespons
 
 
 @app.get("/api/smallcap-trades")
-async def smallcap_trades(limit: int = 50, _: None = Depends(_require_session)) -> JSONResponse:
+async def smallcap_trades(_: None = Depends(_require_session)) -> JSONResponse:
+    """Full closed trade history (no recent-N cap, unlike the main /api/trades)
+    -- this fork's total trade count is small enough (low hundreds, weekly
+    cadence) that there's no need to hide anything behind a limit."""
     client = _smallcap_client()
     if client is None:
         return JSONResponse({"overall_win_rate": None, "closed_buy_count": 0, "recent": []})
@@ -612,9 +615,53 @@ async def smallcap_trades(limit: int = 50, _: None = Depends(_require_session)) 
                         "exit_price": _decimal(t.exit_price),
                         "pnl_percent": _decimal(t.pnl_percent),
                     }
-                    for t in closed_all[:limit]
+                    for t in closed_all
                 ],
             }
+        )
+    finally:
+        await client.close()
+
+
+@app.get("/api/smallcap-open-signals")
+async def smallcap_open_signals(_: None = Depends(_require_session)) -> JSONResponse:
+    """Symbols the model currently has an open BUY signal on (entered, no
+    SELL reversal yet) -- separate from /api/smallcap-positions, which only
+    shows *real* paper positions. A symbol can show here with no matching
+    real position if its entry happened before this fork went live (no
+    retroactive catch-up, see application/signal_pipeline.py) -- this list
+    is what lets you judge those cases and decide whether to enter by hand.
+    SELL-side opens are never real trade candidates in the NSE cash market
+    (see is_eligible's own BUY-only framing), so this only ever shows buys."""
+    client = _smallcap_client()
+    if client is None:
+        return JSONResponse([])
+    try:
+        repository = TursoTradeRepository(client)
+        all_trades = await repository.get_trades(None, "week")
+        open_buys = [t for t in all_trades if t.side.value == "buy" and t.status == "open"]
+        open_buys.sort(key=lambda t: t.entry_timestamp, reverse=True)
+        symbols = [t.symbol for t in open_buys]
+        last_prices = await asyncio.to_thread(_yahoo.get_last_prices, symbols) if symbols else {}
+        return JSONResponse(
+            [
+                {
+                    "symbol": t.symbol,
+                    "entry_timestamp": t.entry_timestamp.isoformat(),
+                    "entry_price": _decimal(t.entry_price),
+                    "current_price": last_prices.get(t.symbol),
+                    "price_change_pct": (
+                        _decimal(
+                            (Decimal(str(last_prices[t.symbol])) - t.entry_price)
+                            / t.entry_price
+                            * 100
+                        )
+                        if t.symbol in last_prices
+                        else None
+                    ),
+                }
+                for t in open_buys
+            ]
         )
     finally:
         await client.close()
