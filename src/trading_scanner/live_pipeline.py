@@ -43,6 +43,7 @@ from trading_scanner.application.signal_pipeline import (
     _close_paper_position,
     _collect_and_open_ranked_positions,
     _evaluate_from_stored_candles,
+    _notify_kite_expired_once_per_day,
     _process_symbol,
 )
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
@@ -525,13 +526,28 @@ class LiveTickerPipeline:
         out of run_forever's asyncio.gather and into _run()'s own
         try/except, which already does the one thing proven to work: tear
         this pipeline instance down and call run_forever() again from
-        scratch, including a brand new KiteTicker."""
+        scratch, including a brand new KiteTicker.
+
+        Also fixes a second gap from the same incident: this run never got
+        a Telegram alert that the Kite session needed attention, because
+        _notify_kite_expired_once_per_day was only ever wired into the old
+        download-based run_signal_pipeline() path, not this always-on one
+        -- so staleness here was invisible except in the server's own log.
+        Reused directly (same once-per-calendar-day dedup via
+        kite_session_repository.expiry_notified_date) rather than
+        reinventing it."""
         while True:
             await asyncio.sleep(_TICKER_WATCHDOG_CHECK_SECONDS)
             if not is_market_hours(datetime.now(UTC)):
                 continue
             stale_for = (datetime.now(UTC) - self._last_tick_at).total_seconds()
             if stale_for > _TICKER_STALE_SECONDS:
+                try:
+                    await _notify_kite_expired_once_per_day(
+                        self._repos["kite_session"], self._notifier
+                    )
+                except Exception:
+                    logger.exception("Failed to send ticker-stale notification")
                 raise RuntimeError(
                     f"KiteTicker appears dead: no tick or (re)connect in "
                     f"{stale_for:.0f}s during market hours -- forcing a full reconnect."
