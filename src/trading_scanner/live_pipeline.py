@@ -612,14 +612,14 @@ class LiveTickerPipeline:
                 # never fires at all.
                 self._last_tick_at = datetime.now(UTC)
                 try:
-                    await asyncio.gather(
+                    await _run_until_first_exit((
                         self._drain_ticks_loop(),
                         self._boundary_loop(),
                         self._token_refresh_loop(),
                         self._refresh_positions_cache_loop(),
                         self._ticker_watchdog_loop(),
                         self._run_until_market_close(),
-                    )
+                    ))
                 finally:
                     self._disconnect_ticker()
         finally:
@@ -640,11 +640,57 @@ class _MarketClosed(Exception):
     session's loops and let run_forever's outer loop take over."""
 
 
+async def _run_until_first_exit(coros) -> None:
+    """Run several long-running loops concurrently; the moment ANY one of
+    them returns or raises, cancel the rest and propagate that one's
+    outcome (raising if it raised).
+
+    2026-08-18: replaces a plain ``asyncio.gather(*coros)`` here, found
+    responsible for a real ~2 hour silent outage. ``gather()`` without
+    ``return_exceptions=True`` propagates the FIRST exception to its
+    caller the moment one coroutine raises -- but it does NOT cancel the
+    other still-running coroutines; they keep executing as orphaned
+    background tasks the caller no longer has any reference to or control
+    over. Every one of ``run_forever``'s crash-and-retry cycles was
+    therefore leaking its previous cycle's 5 other loops (ticker drain,
+    boundary, token refresh, positions-cache refresh, watchdog) instead of
+    tearing them down -- confirmed live: after 5 crashes in ~40 minutes,
+    the process had accumulated that many orphaned copies of each loop,
+    all mutating the same ``self`` (ticker, caches, DB client/repos)
+    concurrently and unpredictably, which is what actually produced the
+    frozen-but-not-crashed state systemd saw as healthy (near-zero CPU,
+    sockets stuck in CLOSE-WAIT) -- including the watchdog itself being
+    one of the leaked, no-longer-effective copies.
+    """
+    tasks = [asyncio.ensure_future(coro) for coro in coros]
+    try:
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    for task in pending:
+        task.cancel()
+    if pending:
+        await asyncio.gather(*pending, return_exceptions=True)
+    # Surface the first-finished task's outcome -- if it raised, re-raise
+    # here so run_forever's own try/finally (ticker disconnect) and _run's
+    # except clauses see the same exception they always have.
+    (first,) = done
+    first.result()
+
+
 async def _run(config: AppConfig) -> None:
     symbols = SymbolLoader().load(config.symbols_file)
     logger.info("Loaded %d symbols for live ticker pipeline", len(symbols))
-    pipeline = LiveTickerPipeline(config, symbols)
     while True:
+        # A fresh LiveTickerPipeline every cycle, not one reused instance
+        # -- belt-and-suspenders alongside _run_until_first_exit above:
+        # even if some future loop leaks a task, it can no longer share
+        # mutable state (ticker, caches, DB client) with the new cycle's
+        # instance.
+        pipeline = LiveTickerPipeline(config, symbols)
         try:
             await pipeline.run_forever()
         except _MarketClosed:
