@@ -113,6 +113,12 @@ _POSITIONS_CACHE_REFRESH_SECONDS = 5
 _TICKER_STALE_SECONDS = 600
 _TICKER_WATCHDOG_CHECK_SECONDS = 60
 
+# How often the heartbeat loop wakes up to check whether a new calendar
+# hour has started (see _heartbeat_loop) -- doesn't need to be frequent,
+# just frequent enough that the actual send happens close to the top of
+# the hour rather than drifting.
+_HEARTBEAT_CHECK_SECONDS = 60
+
 
 def _build_notifier(config: AppConfig):
     if config.telegram_bot_token and config.telegram_chat_id:
@@ -519,6 +525,60 @@ class LiveTickerPipeline:
                 self._disconnect_ticker()
                 self._connect_ticker(token)
 
+    async def _heartbeat_loop(self) -> None:
+        """Sends one Telegram message per calendar hour during market
+        hours confirming the system is actually alive -- requested
+        2026-08-19 after a silent multi-hour freeze went unnoticed until
+        asked about directly: an absence of alerts is not the same as
+        confirmation of health, and this makes "still working" a positive
+        signal instead of something inferred from silence.
+
+        Keyed to wall-clock hour (``strftime("%Y-%m-%d %H")``), not a bare
+        ``asyncio.sleep(3600)`` -- a watchdog-triggered or crash restart
+        mid-hour must not reset an hour-long wait and go quiet even
+        longer; a fresh loop instance still only sends once per real
+        clock hour.
+
+        Deliberately a dead-man's-switch as much as a status message: if
+        the event loop itself ever freezes again (this loop's own
+        ``asyncio.sleep`` never getting to resume, exactly what happened
+        2026-08-19), the heartbeat stops arriving too -- a missing hourly
+        message is itself the signal something is wrong, same as the
+        watchdog's own check would be silenced by the same freeze.
+        """
+        last_sent_hour: str | None = None
+        while True:
+            await asyncio.sleep(_HEARTBEAT_CHECK_SECONDS)
+            now = datetime.now(UTC)
+            if not is_market_hours(now):
+                continue
+            hour_key = now.strftime("%Y-%m-%d %H")
+            if hour_key == last_sent_hour:
+                continue
+            stale_for = (now - self._last_tick_at).total_seconds()
+            try:
+                open_positions = await self._repos["paper_account"].get_open_positions()
+                open_count: int | None = len(open_positions)
+            except Exception:
+                logger.warning("Heartbeat: failed to read open positions.", exc_info=True)
+                open_count = None
+            message = (
+                "✅ Heartbeat: system running, working perfectly\n"
+                f"Symbols tracked: {len(self._token_to_symbol)}/{len(self._symbols)} | "
+                f"Last tick: {stale_for:.0f}s ago"
+                + (f" | Open cash positions: {open_count}" if open_count is not None else "")
+            )
+            if self._notifier is not None:
+                try:
+                    await self._notifier.send_text(message)
+                except Exception:
+                    logger.exception("Failed to send heartbeat notification")
+            # Marked as sent regardless of outcome above -- a single failed
+            # send this hour isn't retried until next hour's tick, same
+            # best-effort convention as every other notification in this
+            # module (never blocks/crashes the pipeline over Telegram).
+            last_sent_hour = hour_key
+
     async def _ticker_watchdog_loop(self) -> None:
         """Guaranteed fallback if the ticker goes dead and stays dead --
         see _TICKER_STALE_SECONDS above for the 2026-08-17 incident this
@@ -618,6 +678,7 @@ class LiveTickerPipeline:
                         self._token_refresh_loop(),
                         self._refresh_positions_cache_loop(),
                         self._ticker_watchdog_loop(),
+                        self._heartbeat_loop(),
                         self._run_until_market_close(),
                     ))
                 finally:
