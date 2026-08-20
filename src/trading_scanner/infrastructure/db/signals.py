@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-import libsql_client
+from trading_scanner.infrastructure.db._shared import DbClient
 
 _CREATE_SIGNALS_TABLE = """
 CREATE TABLE IF NOT EXISTS sent_signals (
@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS sent_signals (
 class TursoSignalRepository:
     """Track which signal fingerprints have already been notified."""
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:

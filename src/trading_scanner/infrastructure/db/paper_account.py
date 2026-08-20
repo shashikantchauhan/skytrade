@@ -4,10 +4,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
-import libsql_client
-
 from trading_scanner.domain.models import PaperPosition
-from trading_scanner.infrastructure.db._shared import add_column_if_missing
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_PAPER_ACCOUNT_TABLE = """
 CREATE TABLE IF NOT EXISTS paper_account (
@@ -40,7 +38,7 @@ class TursoPaperAccountRepository:
     ``get_cash_balance`` runs and left untouched on every call after that.
     """
 
-    def __init__(self, client: libsql_client.Client, initial_capital: Decimal) -> None:
+    def __init__(self, client: DbClient, initial_capital: Decimal) -> None:
         self._client = client
         self._initial_capital = initial_capital
 

@@ -1,8 +1,6 @@
 """The single day-long Kite Connect access token."""
 
-import libsql_client
-
-from trading_scanner.infrastructure.db._shared import add_column_if_missing
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_KITE_SESSION_TABLE = """
 CREATE TABLE IF NOT EXISTS kite_session (
@@ -24,7 +22,7 @@ class TursoKiteSessionRepository:
     no fallback data source; a missing/expired session just skips the run).
     """
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:

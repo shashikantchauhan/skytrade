@@ -1,10 +1,12 @@
-"""Turso (hosted libSQL) storage, split into one focused module per
-repository -- was previously a single 1,300+ line ``turso.py``.
+"""Local SQLite storage (via ``aiosqlite``), split into one focused module
+per repository -- was previously a single 1,300+ line ``turso.py``.
 
-The same ``libsql_client`` connection works against a local ``file:``
-database (no account, no network -- used for tests and local development)
-or a hosted ``libsql://...`` database with an auth token (production). No
-repository depends on which one is in use.
+Hosted Turso is no longer supported (2026-08-20 decision -- production
+never actually used it, see ``_shared.py``'s module docstring for the real
+history and the freeze it caused). Every deployment uses a local ``file:``
+database now. Class/function names below keep their historical "Turso"
+naming -- a purely cosmetic mismatch with zero functional effect, not
+worth the churn of renaming across this package's own 20+ call sites.
 
 Every repository class is re-exported here so callers can still do
 ``from trading_scanner.infrastructure.db import TursoTradeRepository`` etc.

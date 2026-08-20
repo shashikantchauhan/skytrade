@@ -1,8 +1,7 @@
 """AlphaEngine's carry-forward incremental-prediction state."""
 
-import libsql_client
-
 from trading_scanner.domain.ports import EngineState
+from trading_scanner.infrastructure.db._shared import DbClient
 
 _CREATE_ENGINE_STATE_TABLE = """
 CREATE TABLE IF NOT EXISTS engine_state (
@@ -21,7 +20,7 @@ class TursoEngineStateRepository:
     """Persist the small carry-forward state AlphaEngine's fast incremental
     evaluation needs between hourly runs (see application/fast_predict.py)."""
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:

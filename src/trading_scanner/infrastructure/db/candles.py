@@ -4,9 +4,8 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
-import libsql_client
-
 from trading_scanner.domain.models import Candle
+from trading_scanner.infrastructure.db._shared import DbClient, Statement
 
 _CREATE_CANDLES_TABLE = """
 CREATE TABLE IF NOT EXISTS candles (
@@ -43,7 +42,7 @@ ORDER BY timestamp DESC
 class TursoCandleRepository:
     """Persist and retrieve accumulated OHLCV candles in Turso/libSQL."""
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:
@@ -65,7 +64,7 @@ class TursoCandleRepository:
         if not candles:
             return
         statements = [
-            libsql_client.Statement(
+            Statement(
                 _UPSERT_CANDLE,
                 [
                     symbol,

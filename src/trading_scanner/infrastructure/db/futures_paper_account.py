@@ -5,10 +5,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
-import libsql_client
-
 from trading_scanner.domain.models import FuturesPaperPosition
-from trading_scanner.infrastructure.db._shared import add_column_if_missing
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_FUTURES_PAPER_ACCOUNT_TABLE = """
 CREATE TABLE IF NOT EXISTS futures_paper_account (
@@ -42,7 +40,7 @@ class TursoFuturesPaperAccountRepository:
     pool (see ``domain/models.py``'s ``FuturesPaperPosition`` docstring for
     why). Same one-row-account pattern as the cash paper account."""
 
-    def __init__(self, client: libsql_client.Client, initial_capital: Decimal) -> None:
+    def __init__(self, client: DbClient, initial_capital: Decimal) -> None:
         self._client = client
         self._initial_capital = initial_capital
 

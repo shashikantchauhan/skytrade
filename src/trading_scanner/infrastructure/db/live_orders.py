@@ -4,9 +4,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
-import libsql_client
-
 from trading_scanner.domain.models import LiveOrderLeg
+from trading_scanner.infrastructure.db._shared import DbClient
 
 _CREATE_LIVE_ORDER_LEGS_TABLE = """
 CREATE TABLE IF NOT EXISTS live_order_legs (
@@ -33,7 +32,7 @@ class TursoLiveOrderRepository:
     here decides whether to place an order.
     """
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:

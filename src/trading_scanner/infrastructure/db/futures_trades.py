@@ -4,10 +4,8 @@ from collections.abc import Sequence
 from datetime import datetime
 from decimal import Decimal
 
-import libsql_client
-
 from trading_scanner.domain.models import FuturesShadowTrade
-from trading_scanner.infrastructure.db._shared import add_column_if_missing
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_FUTURES_TRADES_TABLE = """
 CREATE TABLE IF NOT EXISTS futures_trades (
@@ -41,7 +39,7 @@ class TursoFuturesTradeRepository:
     separate from the paper account's capital.
     """
 
-    def __init__(self, client: libsql_client.Client) -> None:
+    def __init__(self, client: DbClient) -> None:
         self._client = client
 
     async def ensure_schema(self) -> None:
