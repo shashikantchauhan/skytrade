@@ -1173,7 +1173,12 @@ async def get_live_cash_trading(_: None = Depends(_require_admin)) -> JSONRespon
             sorted(
                 line.strip()
                 for line in universe_path.read_text().splitlines()
-                if line.strip()
+                # symbols_file also carries sector index tickers (e.g.
+                # ^NSEBANK, ^CNXAUTO) for breadth/relative-strength
+                # tracking -- not real equities, can't be bought as cash
+                # shares on Kite. Excluded from what "Use full universe"
+                # offers for real-money trading.
+                if line.strip() and not line.strip().startswith("^")
             )
             if universe_path.exists()
             else []
