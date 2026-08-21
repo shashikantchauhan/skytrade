@@ -22,6 +22,7 @@ import time
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
@@ -36,8 +37,10 @@ from trading_scanner.infrastructure.db import (
     LiveCashToggleState,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
+    TursoGttRepository,
     TursoKiteSessionRepository,
     TursoLiveCashToggleRepository,
+    TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
     TursoTradeRepository,
@@ -402,6 +405,56 @@ async def positions(_: None = Depends(_require_session)) -> JSONResponse:
                 for p in sorted(open_positions, key=lambda p: p.entry_timestamp, reverse=True)
             ]
         )
+    finally:
+        await client.close()
+
+
+@app.get("/api/live-cash-positions")
+async def live_cash_positions(_: None = Depends(_require_session)) -> JSONResponse:
+    """Real open cash-equity positions (application/live_cash_execution.py
+    + gtt_bracket.py) -- what /api/positions used to show before the paper
+    simulator was retired (see PAPER_TRADING_ENABLED). Shows the GTT's
+    current target/stop alongside live mark-to-market, since those move
+    (extension) independently of the entry itself."""
+    client, config = _client()
+    try:
+        live_order_repository = TursoLiveOrderRepository(client)
+        await live_order_repository.ensure_schema()
+        gtt_repository = TursoGttRepository(client)
+        await gtt_repository.ensure_schema()
+
+        legs = await live_order_repository.get_all_open_cash_legs()
+        brackets = {leg.symbol: await gtt_repository.get_active(leg.symbol) for leg in legs}
+        last_prices = await _last_prices(
+            [SimpleNamespace(symbol=leg.symbol) for leg in legs], client, config
+        )
+
+        rows = []
+        for leg in sorted(legs, key=lambda leg: leg.placed_at, reverse=True):
+            entry_price = leg.average_price
+            current_price = last_prices.get(leg.symbol)
+            unrealized = None
+            unrealized_pct = None
+            if entry_price is not None and current_price is not None:
+                unrealized = (Decimal(str(current_price)) - entry_price) * leg.quantity
+                unrealized_pct = (Decimal(str(current_price)) / entry_price - 1) * 100
+            bracket = brackets.get(leg.symbol)
+            rows.append(
+                {
+                    "symbol": leg.symbol,
+                    "tradingsymbol": leg.tradingsymbol,
+                    "entry_timestamp": leg.placed_at.isoformat(),
+                    "entry_price": _decimal(entry_price),
+                    "quantity": leg.quantity,
+                    "current_price": current_price,
+                    "unrealized_pnl": _decimal(unrealized),
+                    "unrealized_pnl_pct": _decimal(unrealized_pct),
+                    "target_price": _decimal(bracket.target_price) if bracket else None,
+                    "stop_price": _decimal(bracket.stop_price) if bracket else None,
+                    "gtt_status": bracket.status if bracket else None,
+                }
+            )
+        return JSONResponse(rows)
     finally:
         await client.close()
 

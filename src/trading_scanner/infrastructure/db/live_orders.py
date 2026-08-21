@@ -87,6 +87,46 @@ class TursoLiveOrderRepository:
             for row in result.rows
         ]
 
+    async def get_all_open_cash_legs(self) -> Sequence[LiveOrderLeg]:
+        """Every currently-open ``purpose='cash'`` leg across all symbols --
+        same open/closed logic as ``get_open_cash_legs``, just not scoped to
+        one symbol. Used by the dashboard's real-positions view (see
+        webapp.py's /api/live-cash-positions), which needs to list all of
+        them, not check one at a time."""
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason
+            FROM live_order_legs
+            WHERE purpose = 'cash' AND status = 'COMPLETE'
+              AND tradingsymbol NOT IN (
+                  SELECT tradingsymbol FROM live_order_legs AS closer
+                  WHERE closer.symbol = live_order_legs.symbol
+                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
+                    AND closer.purpose = 'cash'
+                    AND closer.transaction_type != live_order_legs.transaction_type
+                    AND closer.status = 'COMPLETE'
+              )
+            ORDER BY placed_at ASC
+            """
+        )
+        return [
+            LiveOrderLeg(
+                basket_id=row[0],
+                symbol=row[1],
+                purpose=row[2],
+                tradingsymbol=row[3],
+                transaction_type=row[4],
+                quantity=int(row[5]),
+                order_id=row[6],
+                status=row[7],
+                placed_at=datetime.fromisoformat(row[8]),
+                average_price=Decimal(str(row[9])) if row[9] is not None else None,
+                rejection_reason=row[10],
+            )
+            for row in result.rows
+        ]
+
     async def get_open_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
         """Every currently-open ``purpose='cash'`` leg for ``symbol`` -- see
         ``application/live_cash_execution.py``. Same open/closed logic as

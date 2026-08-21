@@ -147,9 +147,10 @@
 </div>
 
 <section class="tab-panel" data-tab="positions">
-  <h2>Open positions</h2>
+  <h2>Live cash positions <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real Kite orders -- see Config &amp; logs to turn this on/off)</span></h2>
   <div class="panel table-wrap">
-    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Price diff</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
+    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Current price</th><th>Unrealized P&amp;L</th><th>GTT target</th><th>GTT stop</th><th>GTT status</th></tr></thead><tbody></tbody></table>
+    <div class="sub" id="positions-empty-note" style="margin-top: 0.5rem;" hidden>No real positions open. The old paper-trading simulator's history is retired but not deleted -- ask if you want to see it.</div>
   </div>
 </section>
 
@@ -292,7 +293,8 @@ async function loadStatus() {
 }
 
 async function loadPositions() {
-  const rows = await api("/api/positions");
+  const rows = await api("/api/live-cash-positions");
+  document.getElementById("positions-empty-note").hidden = rows.length > 0;
   document.querySelector("#positions-table tbody").innerHTML = rows.map(p => {
     const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
     const cls = known && p.unrealized_pnl >= 0 ? "green" : "red";
@@ -300,9 +302,10 @@ async function loadPositions() {
       ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
       : `<td>-</td>`;
     const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    const diffCell = known ? `₹${fmt(p.current_price - p.entry_price)}` : "-";
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td><td>${diffCell}</td>${pnlCell}</tr>`;
-  }).join("") || "<tr><td colspan=8>No open positions</td></tr>";
+    const targetCell = p.target_price !== null ? `₹${fmt(p.target_price)}` : "-";
+    const stopCell = p.stop_price !== null ? `₹${fmt(p.stop_price)}` : "-";
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>${priceCell}</td>${pnlCell}<td>${targetCell}</td><td>${stopCell}</td><td>${p.gtt_status || "-"}</td></tr>`;
+  }).join("") || "<tr><td colspan=9>No real positions open</td></tr>";
 }
 
 let symbolsLoaded = false;
