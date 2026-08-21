@@ -250,3 +250,29 @@ class LiveOrderLeg:
     placed_at: datetime
     average_price: Decimal | None = None
     rejection_reason: str | None = None
+
+
+@dataclass(slots=True)
+class GttBracket:
+    """A real target+stop-loss OCO GTT placed on a live cash-equity
+    position -- see ``application/gtt_bracket.py``. Mutable (unlike
+    ``LiveOrderLeg``, a pure audit record): ``extended``/``status`` change
+    in place as the position's lifecycle progresses, one row per real cash
+    entry rather than one row per state transition.
+
+    ``status``: "active" (GTT live on the exchange, neither leg fired) |
+    "extended" (target/stop-loss both moved once, still active) |
+    "closed" (the exchange triggered target or stop-loss) | "cancelled"
+    (a strategy exit signal fired first, so this was deleted and the
+    position was market-exited instead).
+    """
+
+    symbol: str
+    trigger_id: int
+    tradingsymbol: str
+    quantity: int
+    entry_price: Decimal
+    stop_price: Decimal
+    target_price: Decimal
+    created_at: datetime
+    status: str = "active"

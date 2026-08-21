@@ -1,0 +1,271 @@
+"""Tests for the real cash-equity order-execution flow (BUY/SELL trial,
+see application/live_cash_execution.py). Everything here uses fakes -- no
+real Kite connection, no real money.
+
+Focus: the kill switch (its own -- live_cash_trading_enabled/symbols, not
+the futures one) actually gates, quantity is sized from a fixed rupee
+notional / market price (not a fixed share count), a real position is
+never stacked, and a failed order still notifies without raising.
+"""
+
+from datetime import UTC, datetime
+from decimal import Decimal
+
+import pytest
+
+from trading_scanner.application import live_cash_execution
+from trading_scanner.config.settings import AppConfig
+from trading_scanner.domain.models import LiveOrderLeg
+
+_PRICE = Decimal("1000")  # Rs5,000 notional / Rs1,000 price = 5 shares, clean numbers
+
+
+def _config(
+    *, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"}),
+    notional: Decimal = Decimal("5000"),
+) -> AppConfig:
+    return AppConfig(
+        scan_interval_hours=1,
+        candle_interval="1h",
+        candle_history=300,
+        symbols_file=None,
+        logging_level=20,
+        turso_database_url=None,
+        turso_auth_token=None,
+        telegram_bot_token=None,
+        telegram_chat_id=None,
+        index_symbol=None,
+        kite_api_key=None,
+        kite_api_secret=None,
+        live_trading_enabled=False,
+        live_trading_symbols=frozenset(),
+        live_trading_max_lots=1,
+        futures_paper_symbols_file=None,
+        live_cash_trading_enabled=enabled,
+        live_cash_trading_symbols=symbols,
+        live_cash_trading_notional=notional,
+    )
+
+
+class FakeOrderExecutor:
+    """Scripted fill outcomes keyed by (tradingsymbol, transaction_type) --
+    mirrors test_live_execution.py's fake exactly, just against
+    place_cash_market_order instead of place_market_order."""
+
+    def __init__(self, scripted: dict[tuple[str, str], list[str]]) -> None:
+        self._scripted = {key: list(values) for key, values in scripted.items()}
+        self.calls: list[tuple[str, str, int]] = []
+        self._order_counter = 0
+
+    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity):
+        self.calls.append((tradingsymbol, transaction_type, quantity))
+        self._order_counter += 1
+        return f"order-{self._order_counter}"
+
+    def wait_for_fill(self, order_id, timeout_seconds, poll_interval=1.0):
+        index = self._order_counter - 1
+        tradingsymbol, transaction_type, _ = self.calls[index]
+        key = (tradingsymbol, transaction_type)
+        status = self._scripted[key].pop(0)
+        return {"status": status, "average_price": 1000.0, "status_message": None}
+
+
+class FakeLiveOrderRepository:
+    def __init__(self, open_cash: list[LiveOrderLeg] | None = None) -> None:
+        self.recorded: list[LiveOrderLeg] = []
+        self._open_cash = open_cash or []
+
+    async def record_leg(self, leg: LiveOrderLeg) -> None:
+        self.recorded.append(leg)
+
+    async def get_open_cash_legs(self, symbol: str):
+        return self._open_cash
+
+
+class FakeNotifier:
+    def __init__(self) -> None:
+        self.texts: list[str] = []
+
+    async def send_signal(self, signal) -> None:
+        pass
+
+    async def send_text(self, message: str) -> None:
+        self.texts.append(message)
+
+
+@pytest.mark.asyncio
+async def test_entry_noop_when_cash_trading_disabled():
+    config = _config(enabled=False)
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+    )
+
+    assert result is None
+    assert executor.calls == []
+    assert notifier.texts == []
+
+
+@pytest.mark.asyncio
+async def test_entry_noop_when_symbol_not_allowlisted():
+    config = _config(enabled=True, symbols=frozenset({"TCS.NS"}))
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_sizes_quantity_from_notional_over_price():
+    config = _config(enabled=True, notional=Decimal("5000"))
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    # Rs5,000 / Rs1,000 = 5 shares, .NS stripped to the Kite tradingsymbol.
+    assert executor.calls == [("RELIANCE", "BUY", 5)]
+    assert [leg.purpose for leg in repo.recorded] == ["cash"]
+    assert any("LIVE CASH ORDER PLACED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_sizing_floors_to_at_least_one_share():
+    # Rs5,000 notional against a Rs12,000 stock would floor to 0 -- must
+    # still buy 1 share rather than skip the trade silently.
+    config = _config(enabled=True, notional=Decimal("5000"))
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+
+    await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", Decimal("12000"), config, executor, repo, FakeNotifier()
+    )
+
+    assert executor.calls == [("RELIANCE", "BUY", 1)]
+
+
+@pytest.mark.asyncio
+async def test_entry_refuses_to_stack_a_second_position():
+    config = _config(enabled=True)
+    already_open = [
+        LiveOrderLeg(
+            basket_id="x", symbol="RELIANCE.NS", purpose="cash", tradingsymbol="RELIANCE",
+            transaction_type="BUY", quantity=5, order_id="o1", status="COMPLETE",
+            placed_at=datetime.now(UTC),
+        )
+    ]
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository(open_cash=already_open)
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_failure_notifies_but_does_not_raise():
+    config = _config(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert repo.recorded[0].status == "REJECTED"
+    assert any("LIVE CASH ORDER FAILED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_exit_still_fires_when_toggle_is_disabled():
+    # A "Stop" click (enabled=False) must never strand a real open
+    # position with no way to be closed -- exit is gated on "is anything
+    # actually open," not on the current toggle state.
+    config = _config(enabled=False)
+    open_leg = LiveOrderLeg(
+        basket_id="RELIANCE.NS-cash-entry-x", symbol="RELIANCE.NS", purpose="cash",
+        tradingsymbol="RELIANCE", transaction_type="BUY", quantity=5, order_id="o1",
+        status="COMPLETE", placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({("RELIANCE", "SELL"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository(open_cash=[open_leg])
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_exit(
+        "RELIANCE.NS", config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert executor.calls == [("RELIANCE", "SELL", 5)]
+
+
+@pytest.mark.asyncio
+async def test_exit_noop_when_nothing_open():
+    config = _config(enabled=True)
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository(open_cash=[])
+
+    result = await live_cash_execution.execute_cash_exit(
+        "RELIANCE.NS", config, executor, repo, FakeNotifier()
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_exit_squares_off_the_open_buy_leg_with_a_sell():
+    config = _config(enabled=True)
+    open_leg = LiveOrderLeg(
+        basket_id="RELIANCE.NS-cash-entry-x", symbol="RELIANCE.NS", purpose="cash",
+        tradingsymbol="RELIANCE", transaction_type="BUY", quantity=5, order_id="o1",
+        status="COMPLETE", placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({("RELIANCE", "SELL"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository(open_cash=[open_leg])
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_exit(
+        "RELIANCE.NS", config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert executor.calls == [("RELIANCE", "SELL", 5)]
+    assert any("LIVE CASH POSITION CLOSED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_exit_incomplete_notifies_distinctly():
+    config = _config(enabled=True)
+    open_leg = LiveOrderLeg(
+        basket_id="RELIANCE.NS-cash-entry-x", symbol="RELIANCE.NS", purpose="cash",
+        tradingsymbol="RELIANCE", transaction_type="BUY", quantity=5, order_id="o1",
+        status="COMPLETE", placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({("RELIANCE", "SELL"): ["REJECTED"]})
+    repo = FakeLiveOrderRepository(open_cash=[open_leg])
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_exit(
+        "RELIANCE.NS", config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert any("LIVE CASH EXIT INCOMPLETE" in t for t in notifier.texts)

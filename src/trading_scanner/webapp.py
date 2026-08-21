@@ -19,7 +19,7 @@ import secrets
 import subprocess
 import sys
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -33,9 +33,11 @@ from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
 from trading_scanner.infrastructure.db import (
+    LiveCashToggleState,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
     TursoKiteSessionRepository,
+    TursoLiveCashToggleRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
     TursoTradeRepository,
@@ -1089,6 +1091,79 @@ async def update_config(update: ConfigUpdate, _: None = Depends(_require_admin))
     return JSONResponse({"updated": updates, "note": "Takes effect on the next pipeline run."})
 
 
+class LiveCashTradingUpdate(BaseModel):
+    enabled: bool
+    symbols: list[str]
+    notional: str
+
+
+@app.get("/api/live-cash-trading")
+async def get_live_cash_trading(_: None = Depends(_require_admin)) -> JSONResponse:
+    """Current "Go Live" state -- DB-backed (not .env), so this reflects
+    exactly what the running live_pipeline.py will see next cycle. See
+    infrastructure/db/live_cash_toggle.py."""
+    client, config = _client()
+    try:
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()
+        state = await repository.get_state(
+            LiveCashToggleState(
+                enabled=config.live_cash_trading_enabled,
+                symbols=config.live_cash_trading_symbols,
+                notional=config.live_cash_trading_notional,
+            )
+        )
+        return JSONResponse(
+            {
+                "enabled": state.enabled,
+                "symbols": sorted(state.symbols),
+                "notional": str(state.notional),
+                "updated_at": state.updated_at.isoformat() if state.updated_at else None,
+                "todays_error_count": _todays_error_count(),
+            }
+        )
+    finally:
+        await client.close()
+
+
+@app.post("/api/live-cash-trading")
+async def update_live_cash_trading(
+    update: LiveCashTradingUpdate, _: None = Depends(_require_admin)
+) -> JSONResponse:
+    """Flips the real cash-order kill switch -- takes effect on the very
+    next scan cycle of the already-running live_pipeline.py, no restart.
+    Real money moves once ``enabled`` is true and ``symbols`` is non-empty
+    -- see application/live_cash_execution.py / gtt_bracket.py."""
+    try:
+        notional = Decimal(update.notional)
+    except InvalidOperation as error:
+        raise HTTPException(status_code=400, detail="notional must be numeric.") from error
+    if notional <= 0:
+        raise HTTPException(status_code=400, detail="notional must be positive.")
+    symbols = frozenset(s.strip() for s in update.symbols if s.strip())
+    if update.enabled and not symbols:
+        raise HTTPException(
+            status_code=400, detail="Cannot enable live trading with an empty symbol list."
+        )
+
+    client, _config = _client()
+    try:
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()
+        new_state = LiveCashToggleState(enabled=update.enabled, symbols=symbols, notional=notional)
+        await repository.set_state(new_state)
+        return JSONResponse(
+            {
+                "enabled": new_state.enabled,
+                "symbols": sorted(new_state.symbols),
+                "notional": str(new_state.notional),
+                "note": "Takes effect on the next scan cycle -- no restart needed.",
+            }
+        )
+    finally:
+        await client.close()
+
+
 @app.post("/api/trigger")
 async def trigger(_: None = Depends(_require_admin)) -> JSONResponse:
     """Kick off one manual pipeline run in the background, same command cron uses."""
@@ -1149,6 +1224,23 @@ def _last_run_summary() -> dict | None:
         "status": "finished" if "finished" in last_line else "started",
         "raw": last_line.split(":", 1)[-1].strip() if ":" in last_line else last_line,
     }
+
+
+def _todays_error_count() -> int:
+    """Rough count of ERROR-level log lines from today (server-local date)
+    -- shown next to the "Go Live" toggle so there's a quick sanity check
+    of today's pipeline health before flipping real trading on. Not a
+    precise error audit -- see /api/logs for the actual lines."""
+    if not _LOG_PATH.exists():
+        return 0
+    today = date.today().isoformat()
+    result = subprocess.run(
+        ["grep", "-c", f"^{today}.*ERROR", str(_LOG_PATH)], capture_output=True, text=True
+    )
+    try:
+        return int(result.stdout.strip())
+    except ValueError:
+        return 0
 
 
 def _write_env_updates(updates: dict[str, str]) -> None:

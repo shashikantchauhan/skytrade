@@ -61,6 +61,19 @@ MIN_POSITION_SIZE = Decimal(os.getenv("TRADING_SCANNER_PAPER_MIN_POSITION", "250
 MIN_WIN_RATE = Decimal("55")
 MIN_CLOSED_TRADES = 5
 
+# 2026-08-21: superseded by application/live_cash_execution.py + gtt_bracket.py
+# (real orders, real GTT brackets) as the thing actually being tracked and
+# decided from going forward -- this simulator is being retired, not reset.
+# Defaults True so nothing changes for existing deployments/tests; the VPS
+# sets this False explicitly once the new flow is confirmed working. Only
+# stops *new* positions from being opened -- existing open paper positions
+# are left completely alone and still resolve normally via their own exit
+# signal, exactly like the live_cash_trading_enabled kill switch's own
+# "never strand an already-open position" rule.
+PAPER_TRADING_ENABLED = os.getenv(
+    "TRADING_SCANNER_PAPER_TRADING_ENABLED", "true"
+).strip().lower() not in ("false", "0", "no")
+
 # The strategy has no price-based risk control of its own -- a losing
 # position only closes when the model's opposite signal eventually fires,
 # however far price has moved by then. application/stop_loss_replay.py
@@ -149,8 +162,11 @@ async def try_open_position(
     going stale. Returns None (no position opened) if the remaining cash
     balance can't cover one more slot -- the caller is responsible for
     notifying that the signal was skipped for lack of capital, not silently
-    dropping it.
+    dropping it. Also returns None, same as a capital skip, if
+    ``PAPER_TRADING_ENABLED`` is off -- see its own docstring.
     """
+    if not PAPER_TRADING_ENABLED:
+        return None
     cash_balance = await paper_account_repository.get_cash_balance()
     open_positions = await paper_account_repository.get_open_positions()
     total_equity = cash_balance + sum(

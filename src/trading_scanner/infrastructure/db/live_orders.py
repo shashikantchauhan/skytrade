@@ -87,6 +87,47 @@ class TursoLiveOrderRepository:
             for row in result.rows
         ]
 
+    async def get_open_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
+        """Every currently-open ``purpose='cash'`` leg for ``symbol`` -- see
+        ``application/live_cash_execution.py``. Same open/closed logic as
+        ``get_open_primary_legs`` below, just scoped to the cash-order
+        purpose instead of the futures-basket ``'primary'`` purpose; the two
+        never see each other's rows."""
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason
+            FROM live_order_legs
+            WHERE symbol = ? AND purpose = 'cash' AND status = 'COMPLETE'
+              AND tradingsymbol NOT IN (
+                  SELECT tradingsymbol FROM live_order_legs AS closer
+                  WHERE closer.symbol = live_order_legs.symbol
+                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
+                    AND closer.purpose = 'cash'
+                    AND closer.transaction_type != live_order_legs.transaction_type
+                    AND closer.status = 'COMPLETE'
+              )
+            ORDER BY placed_at ASC
+            """,
+            [symbol],
+        )
+        return [
+            LiveOrderLeg(
+                basket_id=row[0],
+                symbol=row[1],
+                purpose=row[2],
+                tradingsymbol=row[3],
+                transaction_type=row[4],
+                quantity=int(row[5]),
+                order_id=row[6],
+                status=row[7],
+                placed_at=datetime.fromisoformat(row[8]),
+                average_price=Decimal(str(row[9])) if row[9] is not None else None,
+                rejection_reason=row[10],
+            )
+            for row in result.rows
+        ]
+
     async def get_open_primary_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
         """Every currently-open (no matching closing leg yet) real
         ``purpose="primary"`` futures leg for ``symbol`` -- used to check

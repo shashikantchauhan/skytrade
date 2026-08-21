@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from decimal import Decimal
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -47,6 +48,27 @@ class AppConfig:
     # call sites -- test fixtures mostly -- don't all need updating just
     # for this; load_config() below still sets it explicitly from env.
     notification_label: str = "Cash"
+    # A second, independent kill switch for real NSE cash-equity orders
+    # (application/live_cash_execution.py) -- deliberately its own flag/
+    # allowlist, not reused from live_trading_* above, since that one gates
+    # the futures+hedge basket. Same no-wildcard-default philosophy: empty
+    # symbols means nothing trades. These three are the *startup* defaults
+    # -- live_pipeline.py overrides them every cycle from the DB-backed
+    # ``live_cash_toggle`` repository (see webapp.py's "Go Live" endpoint),
+    # so the dashboard toggle takes effect immediately, no restart needed.
+    # ``signals.py``'s plain hourly CLI has no such per-cycle refresh and
+    # just uses these static values as-is.
+    # 2026-08-21: quantity is sized from a fixed rupee amount per symbol
+    # (``live_cash_trading_notional`` / that bar's price), not a fixed
+    # share count -- a flat share count meant wildly different real risk
+    # across a Rs50 stock and a Rs3,000 stock. Rs5,000/symbol is this
+    # week's trial size; scales up once the trial validates timing.
+    # Defaulted (like notification_label above) so existing AppConfig(...)
+    # call sites -- test fixtures mostly -- don't all need updating just
+    # for this; load_config() below still sets them explicitly from env.
+    live_cash_trading_enabled: bool = False
+    live_cash_trading_symbols: frozenset[str] = frozenset()
+    live_cash_trading_notional: Decimal = Decimal("5000")
 
 
 def load_config() -> AppConfig:
@@ -77,6 +99,17 @@ def load_config() -> AppConfig:
             if s.strip()
         ),
         live_trading_max_lots=_positive_int("TRADING_SCANNER_LIVE_TRADING_MAX_LOTS", 1),
+        live_cash_trading_enabled=_bool_flag(
+            "TRADING_SCANNER_LIVE_CASH_TRADING_ENABLED", default=False
+        ),
+        live_cash_trading_symbols=frozenset(
+            s.strip()
+            for s in os.getenv("TRADING_SCANNER_LIVE_CASH_TRADING_SYMBOLS", "").split(",")
+            if s.strip()
+        ),
+        live_cash_trading_notional=Decimal(
+            os.getenv("TRADING_SCANNER_LIVE_CASH_TRADING_NOTIONAL", "5000")
+        ),
         futures_paper_symbols_file=Path(
             os.getenv(
                 "TRADING_SCANNER_FUTURES_PAPER_SYMBOLS_FILE", "config/nifty50_symbols.txt"

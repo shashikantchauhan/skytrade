@@ -57,6 +57,14 @@ FUTURES_MIN_SLOT_MARGIN = Decimal(os.getenv("TRADING_SCANNER_FUTURES_MIN_MARGIN"
 # the kind of buffer Zerodha itself recommends holding above the bare SPAN+
 # exposure figure for exactly this reason.
 FUTURES_MARGIN_BUFFER_PCT = Decimal(os.getenv("TRADING_SCANNER_FUTURES_MARGIN_BUFFER", "0.25"))
+# 2026-08-21: same retirement as paper_trading.PAPER_TRADING_ENABLED --
+# superseded by the real live-cash-order + GTT flow as what's actually
+# being tracked going forward. Defaults True so nothing changes for
+# existing deployments/tests; only stops *new* combos from being opened,
+# existing open ones are left alone and still resolve via their own exit.
+FUTURES_PAPER_TRADING_ENABLED = os.getenv(
+    "TRADING_SCANNER_FUTURES_PAPER_TRADING_ENABLED", "true"
+).strip().lower() not in ("false", "0", "no")
 
 MIN_WIN_RATE = Decimal("55")
 MIN_CLOSED_TRADES = 5
@@ -193,8 +201,12 @@ async def open_futures_paper_position(
     Best-effort: returns None (nothing opened) on missing eligibility, a
     missing futures/options contract, a missing live futures quote, or a
     margin-check failure, matching ``try_open_futures_position``'s own
-    silent-on-failure convention. Never raises into the caller.
+    silent-on-failure convention. Never raises into the caller. Also
+    returns None, same as any other skip, if ``FUTURES_PAPER_TRADING_ENABLED``
+    is off -- see its own docstring.
     """
+    if not FUTURES_PAPER_TRADING_ENABLED:
+        return None
     if not await is_eligible(symbol, side, interval, trade_repository):
         return None
     futures_contract = derivatives_chain.nearest_future(symbol)

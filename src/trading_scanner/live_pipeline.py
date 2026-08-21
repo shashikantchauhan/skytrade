@@ -24,6 +24,7 @@ enqueues (cheap, thread-safe), and an asyncio task drains it.
 """
 
 import asyncio
+import dataclasses
 import logging
 import queue
 from datetime import UTC, datetime
@@ -50,11 +51,14 @@ from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
 from trading_scanner.config.settings import AppConfig, load_config
 from trading_scanner.domain.models import Candle
 from trading_scanner.infrastructure.db import (
+    LiveCashToggleState,
     TursoCandleRepository,
     TursoEngineStateRepository,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
+    TursoGttRepository,
     TursoKiteSessionRepository,
+    TursoLiveCashToggleRepository,
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
@@ -187,6 +191,8 @@ class LiveTickerPipeline:
             "options_trade": TursoOptionsTradeRepository(self._client),
             "futures_trade": TursoFuturesTradeRepository(self._client),
             "live_order": TursoLiveOrderRepository(self._client),
+            "gtt": TursoGttRepository(self._client),
+            "live_cash_toggle": TursoLiveCashToggleRepository(self._client),
             "futures_paper_account": TursoFuturesPaperAccountRepository(
                 self._client, FUTURES_INITIAL_CAPITAL
             ),
@@ -423,6 +429,26 @@ class LiveTickerPipeline:
         derivatives_chain = KiteDerivativesChain(kite)
         order_executor = KiteOrderExecutor(kite)
 
+        # "Go Live" dashboard toggle -- refreshed fresh every cycle from the
+        # DB (not the static AppConfig loaded once at process start), so a
+        # click on the dashboard takes effect on the very next cycle with
+        # no service restart. Everything else about config stays exactly
+        # as configured; only these three cash-trading fields can differ
+        # from self._config. See infrastructure/db/live_cash_toggle.py.
+        toggle_state = await self._repos["live_cash_toggle"].get_state(
+            LiveCashToggleState(
+                enabled=self._config.live_cash_trading_enabled,
+                symbols=self._config.live_cash_trading_symbols,
+                notional=self._config.live_cash_trading_notional,
+            )
+        )
+        effective_config = dataclasses.replace(
+            self._config,
+            live_cash_trading_enabled=toggle_state.enabled,
+            live_cash_trading_symbols=toggle_state.symbols,
+            live_cash_trading_notional=toggle_state.notional,
+        )
+
         index_result = None
         if self._config.index_symbol and self._config.index_symbol in candles:
             index_candle = candles[self._config.index_symbol]
@@ -484,7 +510,7 @@ class LiveTickerPipeline:
             async with semaphore:
                 try:
                     await _process_symbol(
-                        symbol, self._config, None, self._engine,
+                        symbol, effective_config, None, self._engine,
                         self._repos["candle"], self._repos["signal"], self._repos["engine_state"],
                         self._repos["trade"], self._repos["paper_account"], self._notifier,
                         index_result, self._paper_account_lock,
@@ -497,6 +523,7 @@ class LiveTickerPipeline:
                         futures_account_repository=self._repos["futures_paper_account"],
                         futures_paper_symbols=self._futures_paper_symbols,
                         precomputed_futures_note=futures_notes.get(symbol),
+                        gtt_repository=self._repos["gtt"],
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)
