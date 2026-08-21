@@ -69,6 +69,13 @@ class AppConfig:
     live_cash_trading_enabled: bool = False
     live_cash_trading_symbols: frozenset[str] = frozenset()
     live_cash_trading_notional: Decimal = Decimal("5000")
+    # 2026-08-21: caps real positions open at once *across the whole
+    # allowlist*, not per symbol -- lets live_cash_trading_symbols be wide
+    # (the full universe) without waiting on one specific symbol's signal,
+    # while still bounding total real capital at risk to this * notional.
+    # See infrastructure/db/live_cash_toggle.py (the dashboard toggle
+    # overrides this at runtime, same as the three fields above it).
+    live_cash_trading_max_positions: int = 8
 
 
 def load_config() -> AppConfig:
@@ -109,6 +116,9 @@ def load_config() -> AppConfig:
         ),
         live_cash_trading_notional=Decimal(
             os.getenv("TRADING_SCANNER_LIVE_CASH_TRADING_NOTIONAL", "5000")
+        ),
+        live_cash_trading_max_positions=_positive_int(
+            "TRADING_SCANNER_LIVE_CASH_TRADING_MAX_POSITIONS", 8
         ),
         futures_paper_symbols_file=Path(
             os.getenv(

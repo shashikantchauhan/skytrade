@@ -22,7 +22,7 @@ _PRICE = Decimal("1000")  # Rs5,000 notional / Rs1,000 price = 5 shares, clean n
 
 def _config(
     *, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"}),
-    notional: Decimal = Decimal("5000"),
+    notional: Decimal = Decimal("5000"), max_positions: int = 8,
 ) -> AppConfig:
     return AppConfig(
         scan_interval_hours=1,
@@ -44,6 +44,7 @@ def _config(
         live_cash_trading_enabled=enabled,
         live_cash_trading_symbols=symbols,
         live_cash_trading_notional=notional,
+        live_cash_trading_max_positions=max_positions,
     )
 
 
@@ -71,15 +72,25 @@ class FakeOrderExecutor:
 
 
 class FakeLiveOrderRepository:
-    def __init__(self, open_cash: list[LiveOrderLeg] | None = None) -> None:
+    def __init__(
+        self, open_cash: list[LiveOrderLeg] | None = None,
+        all_open_cash: list[LiveOrderLeg] | None = None,
+    ) -> None:
         self.recorded: list[LiveOrderLeg] = []
         self._open_cash = open_cash or []
+        # Defaults to the same list as get_open_cash_legs -- fine for
+        # single-symbol tests; pass all_open_cash explicitly to simulate
+        # other symbols' positions also being open (max_positions tests).
+        self._all_open_cash = all_open_cash if all_open_cash is not None else self._open_cash
 
     async def record_leg(self, leg: LiveOrderLeg) -> None:
         self.recorded.append(leg)
 
     async def get_open_cash_legs(self, symbol: str):
         return self._open_cash
+
+    async def get_all_open_cash_legs(self):
+        return self._all_open_cash
 
 
 class FakeNotifier:
@@ -175,6 +186,52 @@ async def test_entry_refuses_to_stack_a_second_position():
 
     assert result is None
     assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_blocked_when_max_positions_already_open():
+    # A wide allowlist (e.g. the full universe) must not widen real capital
+    # at risk -- once max_positions real positions are open *anywhere*,
+    # a new symbol (itself not yet open) still gets refused.
+    config = _config(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
+    other_symbols_open = [
+        LiveOrderLeg(
+            basket_id=f"x{i}", symbol=f"SYM{i}.NS", purpose="cash", tradingsymbol=f"SYM{i}",
+            transaction_type="BUY", quantity=5, order_id=f"o{i}", status="COMPLETE",
+            placed_at=datetime.now(UTC),
+        )
+        for i in range(2)
+    ]
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository(open_cash=[], all_open_cash=other_symbols_open)
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_allowed_when_under_max_positions():
+    config = _config(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
+    one_other_open = [
+        LiveOrderLeg(
+            basket_id="x", symbol="TCS.NS", purpose="cash", tradingsymbol="TCS",
+            transaction_type="BUY", quantity=5, order_id="o1", status="COMPLETE",
+            placed_at=datetime.now(UTC),
+        )
+    ]
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository(open_cash=[], all_open_cash=one_other_open)
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]
 
 
 @pytest.mark.asyncio

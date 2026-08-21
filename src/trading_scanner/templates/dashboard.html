@@ -228,13 +228,18 @@
     <div class="row" style="margin-top: 0.75rem;">
       <label class="field" style="flex: 2;">Symbols (comma-separated)<input id="live-cash-symbols" placeholder="RELIANCE.NS,HDFCBANK.NS,ICICIBANK.NS,INFY.NS,TCS.NS" /></label>
       <label class="field">Rs per symbol<input id="live-cash-notional" placeholder="5000" /></label>
+      <label class="field">Max concurrent positions<input id="live-cash-max-positions" placeholder="8" /></label>
+    </div>
+    <div class="row" style="margin-top: 0.5rem;">
+      <button onclick="useFullUniverse()">Use full symbol universe</button>
+      <span class="sub" id="live-cash-universe-count"></span>
     </div>
     <div class="row" style="margin-top: 0.75rem;">
       <button class="primary" onclick="setLiveCashTrading(true)">Go Live</button>
       <button onclick="setLiveCashTrading(false)">Stop -- go flat gate</button>
       <span class="msg" id="live-cash-msg"></span>
     </div>
-    <div class="sub" style="margin-top: 0.5rem;">"Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded.</div>
+    <div class="sub" style="margin-top: 0.5rem;">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded.</div>
   </div>
 
   <h2 style="margin-top: 1.5rem;">Recent logs</h2>
@@ -362,29 +367,42 @@ async function saveConfig() {
   document.getElementById("config-msg").textContent = "Saved - takes effect next pipeline run.";
 }
 
+let _liveCashUniverse = [];
+
 async function loadLiveCashTrading() {
   const s = await api("/api/live-cash-trading");
+  _liveCashUniverse = s.universe_symbols || [];
   const pill = document.getElementById("live-cash-status-pill");
   pill.textContent = s.enabled ? "LIVE" : "OFF";
   pill.className = "pill " + (s.enabled ? "green" : "red");
   // Don't stomp what the admin is actively typing.
   const symbolsEl = document.getElementById("live-cash-symbols");
   const notionalEl = document.getElementById("live-cash-notional");
+  const maxPosEl = document.getElementById("live-cash-max-positions");
   if (document.activeElement !== symbolsEl) symbolsEl.value = s.symbols.join(",");
   if (document.activeElement !== notionalEl) notionalEl.value = s.notional;
+  if (document.activeElement !== maxPosEl) maxPosEl.value = s.max_positions;
   const errCls = s.todays_error_count > 0 ? "red" : "";
   document.getElementById("live-cash-error-count").innerHTML =
     `<span class="${errCls}">Today's errors: ${s.todays_error_count}</span>`;
+  document.getElementById("live-cash-universe-count").textContent =
+    `${_liveCashUniverse.length} symbols in the tracked universe`;
+}
+
+function useFullUniverse() {
+  document.getElementById("live-cash-symbols").value = _liveCashUniverse.join(",");
 }
 
 async function setLiveCashTrading(enable) {
   const symbols = document.getElementById("live-cash-symbols").value
     .split(",").map(s => s.trim()).filter(Boolean);
   const notional = document.getElementById("live-cash-notional").value;
+  const maxPositions = parseInt(document.getElementById("live-cash-max-positions").value, 10) || 8;
   if (enable) {
     const ok = window.confirm(
-      `This places REAL Kite orders with real money for: ${symbols.join(", ") || "(none)"}, ` +
-      `Rs${notional} per symbol. Confirm?`
+      `This places REAL Kite orders with real money. Eligible symbols: ${symbols.length}, ` +
+      `Rs${notional} per symbol, max ${maxPositions} concurrent positions ` +
+      `(max capital at risk: Rs${(notional * maxPositions).toLocaleString("en-IN")}). Confirm?`
     );
     if (!ok) return;
   }
@@ -393,7 +411,7 @@ async function setLiveCashTrading(enable) {
     await api("/api/live-cash-trading", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({enabled: enable, symbols, notional}),
+      body: JSON.stringify({enabled: enable, symbols, notional, max_positions: maxPositions}),
     });
     document.getElementById("live-cash-msg").textContent =
       "Saved -- takes effect next scan cycle.";

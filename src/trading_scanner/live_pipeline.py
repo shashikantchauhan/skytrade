@@ -440,6 +440,7 @@ class LiveTickerPipeline:
                 enabled=self._config.live_cash_trading_enabled,
                 symbols=self._config.live_cash_trading_symbols,
                 notional=self._config.live_cash_trading_notional,
+                max_positions=self._config.live_cash_trading_max_positions,
             )
         )
         effective_config = dataclasses.replace(
@@ -447,6 +448,7 @@ class LiveTickerPipeline:
             live_cash_trading_enabled=toggle_state.enabled,
             live_cash_trading_symbols=toggle_state.symbols,
             live_cash_trading_notional=toggle_state.notional,
+            live_cash_trading_max_positions=toggle_state.max_positions,
         )
 
         index_result = None
