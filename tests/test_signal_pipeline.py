@@ -460,7 +460,10 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
     assert trade.prediction_at_entry == 6
     assert trade.is_early_signal_flip is True
     assert trade.entry_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
-    assert notifier.sent  # entry still notifies as before
+    # 2026-08-21: entry-signal Telegram notifications are off entirely --
+    # follow only real cash-market order events now.
+    assert notifier.sent == []
+    assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
 
 
 @pytest.mark.asyncio
@@ -564,10 +567,11 @@ async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(mon
 
 
 @pytest.mark.asyncio
-async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None:
-    """A dynamic exit must notify too (not just silently close the trade),
-    showing the realized pnl_percent, using a fingerprint distinct from any
-    entry notification at the same symbol/side/timestamp."""
+async def test_end_long_is_fingerprint_recorded_but_not_notified(monkeypatch) -> None:
+    """A dynamic exit must still be recorded (fingerprint distinct from any
+    entry at the same symbol/side/timestamp) even though, as of 2026-08-21,
+    it no longer sends a Telegram notification -- follow only real
+    cash-market order events now."""
     monkeypatch.setattr(
         YahooProvider,
         "get_recent_history",
@@ -613,47 +617,22 @@ async def test_end_long_sends_an_exit_notification_with_pnl(monkeypatch) -> None
         market_data_provider=YahooProvider(),
     )
 
-    assert len(notifier.sent) == 1
-    exit_signal = notifier.sent[0]
-    assert exit_signal.strategy == "lorentzian-exit"
-    assert exit_signal.side == SignalSide.BUY
-    assert "pnl=25.00%" in exit_signal.rationale  # (100-80)/80*100, market_price=100
+    assert notifier.sent == []
+    assert len(trade_repository.closed) == 1
+    assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
 
 
 @pytest.mark.asyncio
-async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None:
-    """Prior closed trades for this symbol must be summarized in the
-    notification's rationale, so a signal is never sent without context on
-    how this symbol has actually performed historically.
+async def test_win_rate_summary_is_buy_only_and_matches_eligibility_gate() -> None:
+    """``_win_rate_summary`` -- BUY-only, matching the paper account's
+    eligibility gate exactly, so its number is never a healthier combined
+    BUY+SELL figure that would misrepresent what eligibility actually used.
 
-    BUY-only, matching the paper account's eligibility gate exactly -- a
-    seeded SELL-side loss must not drag the shown number away from what
-    eligibility actually used, or the rationale would misrepresent why a
-    signal was (or wasn't) paper-traded."""
-    monkeypatch.setattr(
-        YahooProvider,
-        "get_recent_history",
-        lambda self, symbol, interval, days: _small_recent_download(),
-    )
-    monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
-        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
-            signal="BUY",
-            prediction=6,
-            end_long=False,
-            end_short=False,
-            is_early_signal_flip=False,
-            signal_previous=1,
-            queue_state=QueueState(),
-            exit_state=ExitState(),
-        ),
-    )
-    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
-    candle_repository = FakeCandleRepository(seed=seed)
-    signal_repository = FakeSignalRepository()
-    engine_state_repository = FakeEngineStateRepository()
+    2026-08-21: tested directly rather than through the pipeline's
+    notification, now that entry-signal Telegram notifications (the only
+    place this summary used to surface) are off entirely -- follow only
+    real cash-market order events now."""
     trade_repository = FakeTradeRepository()
-    paper_account_repository = FakePaperAccountRepository()
     # Pre-existing closed trade history: 2 wins, 1 loss.
     trade_repository.opened = [
         Trade(
@@ -678,24 +657,14 @@ async def test_win_rate_summary_is_attached_to_notification(monkeypatch) -> None
             pnl_percent=Decimal("8"), status="closed",
         ),
     ]
-    notifier = FakeNotifier()
 
-    await run_signal_pipeline(
-        _config(),
-        ["AARTIIND.NS"],
-        candle_repository,
-        signal_repository,
-        engine_state_repository,
-        trade_repository,
-        paper_account_repository,
-        notifier,
-        market_data_provider=YahooProvider(),
+    summary = await signal_pipeline_module._win_rate_summary(
+        "AARTIIND.NS", _config(), trade_repository
     )
 
-    assert notifier.sent
     # BUY-only: the two seeded BUY trades (+10%, +8%) are both wins; the
     # seeded SELL loss is excluded, matching paper_trading's eligibility gate.
-    assert "win_rate=100.0%(2W/0L)" in notifier.sent[0].rationale
+    assert summary == "win_rate=100.0%(2W/0L)"
 
 
 @pytest.mark.asyncio
@@ -758,81 +727,40 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
     # total_equity(500000, no open positions)/TARGET_SLOTS(32) = 15625, floored
     # to MIN_POSITION_SIZE(25000) -> quantity = 25000/entry_price(100) = 250.
     assert position.quantity == 250
-    assert "paper: opened 250 qty" in notifier.sent[0].rationale
+    # 2026-08-21: entry-signal Telegram notifications are off entirely --
+    # follow only real cash-market order events now; the quantity/capital
+    # assertions above already confirm the position opened correctly.
+    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
-async def test_buy_entry_skips_paper_position_when_not_eligible(monkeypatch) -> None:
+async def test_open_paper_position_skips_when_not_eligible() -> None:
     """A symbol with no (or insufficient) closed BUY track record must not
-    open a paper position -- still notifies, tagged as not eligible."""
-    monkeypatch.setattr(
-        YahooProvider,
-        "get_recent_history",
-        lambda self, symbol, interval, days: _small_recent_download(),
-    )
-    monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
-        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
-            signal="BUY",
-            prediction=6,
-            end_long=False,
-            end_short=False,
-            is_early_signal_flip=False,
-            signal_previous=1,
-            queue_state=QueueState(),
-            exit_state=ExitState(),
-        ),
-    )
-    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
-    candle_repository = FakeCandleRepository(seed=seed)
-    signal_repository = FakeSignalRepository()
-    engine_state_repository = FakeEngineStateRepository()
+    open a paper position -- tagged as not eligible in the returned note.
+
+    2026-08-21: called directly rather than through the pipeline's
+    notification, now that entry-signal Telegram notifications (the only
+    place this note used to surface) are off entirely."""
     trade_repository = FakeTradeRepository()  # no closed trade history at all
     paper_account_repository = FakePaperAccountRepository()
-    notifier = FakeNotifier()
 
-    await run_signal_pipeline(
-        _config(),
-        ["AARTIIND.NS"],
-        candle_repository,
-        signal_repository,
-        engine_state_repository,
-        trade_repository,
-        paper_account_repository,
-        notifier,
-        market_data_provider=YahooProvider(),
+    note = await signal_pipeline_module._open_paper_position(
+        "AARTIIND.NS", _config(), datetime(2026, 1, 1, tzinfo=UTC), Decimal("100"),
+        trade_repository, paper_account_repository, asyncio.Lock(),
     )
 
     assert paper_account_repository.opened == []
-    assert "paper: not eligible" in notifier.sent[0].rationale
+    assert note is not None and "paper: not eligible" in note
 
 
 @pytest.mark.asyncio
-async def test_buy_entry_skips_paper_position_when_no_capital(monkeypatch) -> None:
-    """An eligible symbol must still be skipped (not notified as opened) once
-    the account's cash balance can't cover one more position slot."""
-    monkeypatch.setattr(
-        YahooProvider,
-        "get_recent_history",
-        lambda self, symbol, interval, days: _small_recent_download(),
-    )
-    monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
-        lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
-            signal="BUY",
-            prediction=6,
-            end_long=False,
-            end_short=False,
-            is_early_signal_flip=False,
-            signal_previous=1,
-            queue_state=QueueState(),
-            exit_state=ExitState(),
-        ),
-    )
-    seed = {"AARTIIND.NS": _seed_candles("AARTIIND.NS", 200)}
-    candle_repository = FakeCandleRepository(seed=seed)
-    signal_repository = FakeSignalRepository()
-    engine_state_repository = FakeEngineStateRepository()
+async def test_open_paper_position_skips_when_no_capital() -> None:
+    """An eligible symbol must still be skipped once the account's cash
+    balance can't cover one more position slot.
+
+    2026-08-21: called directly rather than through the pipeline's
+    notification, now that entry-signal Telegram notifications (the only
+    place this note used to surface) are off entirely."""
     trade_repository = FakeTradeRepository()
     trade_repository.opened = [
         Trade(
@@ -845,22 +773,14 @@ async def test_buy_entry_skips_paper_position_when_no_capital(monkeypatch) -> No
         for index in range(1, 6)
     ]
     paper_account_repository = FakePaperAccountRepository(cash_balance=Decimal("1000"))
-    notifier = FakeNotifier()
 
-    await run_signal_pipeline(
-        _config(),
-        ["AARTIIND.NS"],
-        candle_repository,
-        signal_repository,
-        engine_state_repository,
-        trade_repository,
-        paper_account_repository,
-        notifier,
-        market_data_provider=YahooProvider(),
+    note = await signal_pipeline_module._open_paper_position(
+        "AARTIIND.NS", _config(), datetime(2026, 1, 6, tzinfo=UTC), Decimal("100"),
+        trade_repository, paper_account_repository, asyncio.Lock(),
     )
 
     assert paper_account_repository.opened == []
-    assert "paper: SKIPPED (no capital available)" in notifier.sent[0].rationale
+    assert note is not None and "paper: SKIPPED (no capital available)" in note
 
 
 class _DelayedPaperAccountRepository(FakePaperAccountRepository):
@@ -968,25 +888,23 @@ async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypat
     # interleaved.
     assert total_allocated <= starting_cash
     assert len(paper_account_repository.opened) == 2
-    # Positions are now opened in ranked order (see application/ranking.py),
-    # not first-come-first-served -- once capital runs out, everything after
-    # the first exhausted slot is tagged "ranked below capacity" rather than
-    # the plain no-capital message, which only the very first exhausted
-    # candidate (if any) would ever see.
-    skipped_count = sum(
-        1
-        for signal in notifier.sent
-        if "SKIPPED (no capital available)" in signal.rationale
-        or "SKIPPED (ranked below capacity" in signal.rationale
-    )
-    assert skipped_count == len(symbols) - 2
+    # 2026-08-21: entry-signal Telegram notifications are off entirely, so
+    # the per-symbol skip-reason tagging ("SKIPPED (no capital available)"
+    # vs "SKIPPED (ranked below capacity...)") is no longer independently
+    # observable here -- the capital-safety invariant above (never
+    # collectively commit more than the account had, exactly 2 of 20
+    # symbols afforded) is this test's actual point and is unaffected.
+    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
-async def test_end_long_closes_the_paper_position_and_notifies_pnl(monkeypatch) -> None:
+async def test_end_long_closes_the_paper_position_with_realized_pnl(monkeypatch) -> None:
     """A dynamic exit must close the matching open paper position (crediting
-    cash back) and send a distinct paper-exit notification with the realized
-    rupee P&L."""
+    cash back) with the realized rupee P&L.
+
+    2026-08-21: no longer sends a distinct paper-exit Telegram notification
+    -- follow only real cash-market order events now. P&L is verified via
+    the closed position itself rather than a notification's rationale."""
     monkeypatch.setattr(
         YahooProvider,
         "get_recent_history",
@@ -1035,11 +953,9 @@ async def test_end_long_closes_the_paper_position_and_notifies_pnl(monkeypatch) 
     )
 
     assert len(paper_account_repository.closed) == 1
-    exit_signal = next(
-        s for s in notifier.sent if s.strategy == "lorentzian-paper-exit"
-    )
-    assert exit_signal.side == SignalSide.BUY
-    assert "pnl=₹2000" in exit_signal.rationale  # (100-80)*100 qty
+    closed_position = paper_account_repository.closed[0]
+    assert closed_position.pnl_amount == Decimal("2000")  # (100-80)*100 qty
+    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
@@ -1092,12 +1008,16 @@ async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_index_context_is_attached_to_notification_but_never_suppresses_it(
+async def test_index_disagreement_never_blocks_the_stock_signal(
     monkeypatch,
 ) -> None:
-    """When index_symbol is configured, its current state is appended to the
-    notified signal's rationale purely for the user's own judgment -- it must
-    never block a stock signal from notifying, even when the two disagree."""
+    """When index_symbol is configured, its current state must never block a
+    stock signal from being processed, even when the two disagree.
+
+    2026-08-21: no longer verified via a notification's rationale --
+    entry-signal Telegram notifications are off entirely (follow only real
+    cash-market order events now) -- verified instead via the trade
+    actually opening and the signal being fingerprint-recorded."""
     monkeypatch.setattr(
         YahooProvider,
         "get_recent_history",
@@ -1177,10 +1097,10 @@ async def test_index_context_is_attached_to_notification_but_never_suppresses_it
         market_data_provider=YahooProvider(),
     )
 
-    assert len(notifier.sent) == 1  # stock BUY still notifies despite index disagreeing
-    assert "index(^NSEI)=SELL" in notifier.sent[0].rationale
-    assert "pred=-4" in notifier.sent[0].rationale
-    assert "early_flip=True" in notifier.sent[0].rationale
+    assert notifier.sent == []
+    assert len(trade_repository.opened) == 1  # stock BUY still processed despite index disagreeing
+    assert trade_repository.opened[0].symbol == "AARTIIND.NS"
+    assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
 
 
 async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypatch) -> None:
