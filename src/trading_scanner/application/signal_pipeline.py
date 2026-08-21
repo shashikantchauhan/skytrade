@@ -678,13 +678,10 @@ async def _process_symbol(
         # decided to exit. _notify_exit still has to run *before* the close
         # below (it reads the still-open entry price), just no longer
         # allowed to prevent the close from happening.
-        open_paper_positions = await paper_account_repository.get_open_positions()
-        has_open_paper_position = any(p.symbol == symbol for p in open_paper_positions)
         try:
             await _notify_exit(
                 symbol, config, SignalSide.BUY, newest_candle.timestamp, market_price,
                 trade_repository, signal_repository, notifier,
-                suppress_telegram=has_open_paper_position,
             )
         except Exception:
             logging.getLogger(__name__).warning(
@@ -759,7 +756,6 @@ async def _process_symbol(
             await _notify_exit(
                 symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
                 trade_repository, signal_repository, notifier,
-                suppress_telegram=True,  # long-only: no SELL-side notifications at all
             )
         except Exception:
             logging.getLogger(__name__).warning(
@@ -813,8 +809,12 @@ async def _process_symbol(
     )
     if await signal_repository.contains(signal.fingerprint):
         return
-    if side != SignalSide.SELL:  # long-only: no SELL signal notifications at all
-        await notifier.send_signal(signal)
+    # 2026-08-21: entry-signal Telegram notifications turned off entirely --
+    # follow only real cash-market order events (see live_cash_execution.py)
+    # from here on; everything else (this informational strategy signal,
+    # paper/futures-paper/derivatives-shadow tracking) is analysis-only and
+    # was flooding Telegram once paper trading's own suppression logic
+    # stopped covering it. Still recorded for the dashboard's signal history.
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
@@ -827,22 +827,23 @@ async def _notify_exit(
     trade_repository: TradeRepository,
     signal_repository: SignalRepository,
     notifier: Notifier,
-    suppress_telegram: bool = False,
 ) -> None:
-    """Notify that an open position closed, with its realized pnl_percent.
+    """Record that an open position closed, with its realized pnl_percent.
 
     Reads the still-open trade's entry price before ``close_open_trade`` is
     called, so this must run first. A distinct ``strategy`` tag keeps this
     signal's fingerprint from ever colliding with an entry notification at
     the same symbol/side/timestamp (see Signal.fingerprint).
 
-    ``suppress_telegram``: when a real paper position is about to close for
-    this same symbol/exit (see the ``end_long`` branch in ``_process_symbol``),
-    that closure sends its own, more detailed "PAPER TRADE CLOSED" message
-    with quantity and ₹ P&L -- sending this raw strategy-exit message too
-    used to mean two Telegram messages for the same event, which is exactly
-    the "which one matters" confusion reported. The fingerprint is still
-    recorded either way, so dedup/backfill behavior is unchanged.
+    2026-08-21: never sends via Telegram any more -- only real cash-market
+    order events (see live_cash_execution.py) are notified now. Retiring
+    paper trading meant the old suppress-when-a-paper-close-covers-it logic
+    almost never suppressed any more (no new paper positions exist to cover
+    it), so every strategy exit across the whole universe started notifying
+    -- exactly the notification flood reported. Still recorded here (and
+    ``notifier`` kept as a parameter, unused, for interface parity with the
+    entry path) so fingerprint/dedup and dashboard signal history are
+    unaffected.
     """
     trades = await trade_repository.get_trades(symbol, config.candle_interval)
     open_trade = next(
@@ -869,8 +870,6 @@ async def _notify_exit(
     )
     if await signal_repository.contains(signal.fingerprint):
         return
-    if not suppress_telegram:
-        await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
@@ -1129,7 +1128,15 @@ async def _close_paper_position(
     notifier: Notifier,
     paper_account_lock: asyncio.Lock,
 ) -> None:
-    """Close an open paper position (if any) and notify the realized P&L."""
+    """Close an open paper position (if any) and record the realized P&L.
+
+    2026-08-21: never sends via Telegram any more -- follow only real
+    cash-market order events now (see live_cash_execution.py). Paper
+    trading itself is retired (no new positions open), so this only ever
+    fires for whatever was still open from before retirement; ``notifier``
+    stays a parameter, unused, for interface parity with the other close
+    paths.
+    """
     async with paper_account_lock:
         closed = await paper_account_repository.close_position(symbol, exit_timestamp, exit_price)
     if closed is None:
@@ -1149,7 +1156,6 @@ async def _close_paper_position(
     )
     if await signal_repository.contains(signal.fingerprint):
         return
-    await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
@@ -1341,13 +1347,11 @@ async def _close_futures_paper(
     real futures contract's live LTP, not the equity price -- see
     ``close_futures_paper_position``'s docstring.
 
-    2026-08-17: this used to return the note but nothing ever sent it
-    anywhere -- both call sites discarded the return value, so a real
-    futures position closing (with real P&L) never reached Telegram at
-    all, only the server's own log. Now sends its own message here,
-    mirroring ``_close_paper_position``'s pattern exactly (own strategy
-    tag so the fingerprint can't collide with the entry signal at the same
-    symbol/side/timestamp)."""
+    2026-08-21: never sends via Telegram any more -- follow only real
+    cash-market order events now (see live_cash_execution.py); ``notifier``
+    stays a parameter, unused, for interface parity with the other close
+    paths. Own strategy tag so the fingerprint can't collide with the
+    entry signal at the same symbol/side/timestamp."""
     if (
         futures_account_repository is None
         or derivatives_chain is None
@@ -1371,8 +1375,6 @@ async def _close_futures_paper(
             category="futures_exit",
         )
         if not await signal_repository.contains(signal.fingerprint):
-            if side != SignalSide.SELL:  # long-only: no SELL-side notifications at all
-                await notifier.send_signal(signal)
             await signal_repository.record(signal.fingerprint, signal.timestamp)
         return note
     except Exception:
