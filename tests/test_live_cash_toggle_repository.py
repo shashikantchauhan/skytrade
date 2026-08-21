@@ -88,3 +88,60 @@ async def test_set_state_overwrites_not_duplicates(tmp_path: Path) -> None:
         assert stored.symbols == frozenset({"B.NS"})
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_max_positions_round_trips(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()
+
+        await repository.set_state(
+            LiveCashToggleState(
+                enabled=True, symbols=frozenset({"A.NS"}), notional=Decimal("5000"),
+                max_positions=8,
+            )
+        )
+        defaults = LiveCashToggleState(enabled=False, symbols=frozenset(), notional=Decimal("0"))
+        stored = await repository.get_state(defaults)
+
+        assert stored.max_positions == 8
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_migrates_a_table_created_before_max_positions_existed(
+    tmp_path: Path,
+) -> None:
+    """A production DB that already has this table (from before
+    max_positions was added) must not break -- ensure_schema has to add
+    the column via ALTER TABLE, not just CREATE TABLE IF NOT EXISTS."""
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        await client.execute(
+            """
+            CREATE TABLE live_cash_toggle (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL,
+                symbols TEXT NOT NULL,
+                notional REAL NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await client.execute(
+            "INSERT INTO live_cash_toggle (id, enabled, symbols, notional, updated_at) "
+            "VALUES (1, 0, 'RELIANCE.NS', 5000, '2026-08-21T00:00:00')"
+        )
+
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()  # must not raise
+
+        defaults = LiveCashToggleState(enabled=False, symbols=frozenset(), notional=Decimal("0"))
+        stored = await repository.get_state(defaults)
+        assert stored.symbols == frozenset({"RELIANCE.NS"})
+        assert stored.max_positions == 8  # column default for pre-existing rows
+    finally:
+        await client.close()

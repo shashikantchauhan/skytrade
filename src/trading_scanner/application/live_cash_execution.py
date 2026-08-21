@@ -123,13 +123,25 @@ async def execute_cash_entry(
     / ``market_price`` (a fixed rupee amount per symbol, not a fixed share
     count -- a flat share count would mean wildly different real risk
     across a Rs50 stock and a Rs3,000 stock). Returns the basket_id if an
-    order was placed, None if the gate was closed or a real position for
-    this symbol is already open (refuses to stack a second one)."""
+    order was placed, None if the gate was closed, a real position for this
+    symbol is already open (refuses to stack a second one), or
+    ``live_cash_trading_max_positions`` real positions are already open
+    across the whole allowlist (this is what makes a wide allowlist -- e.g.
+    the full symbol universe -- safe to run: breadth of what's *eligible*
+    to trade doesn't widen how much real capital can be at risk at once)."""
     if not _is_gated_in(symbol, config):
         return None
     already_open = await live_order_repository.get_open_cash_legs(symbol)
     if already_open:
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
+        return None
+    all_open = await live_order_repository.get_all_open_cash_legs()
+    if len(all_open) >= config.live_cash_trading_max_positions:
+        logger.info(
+            "Live cash entry skipped for %s -- max_positions (%d) already open.",
+            symbol,
+            config.live_cash_trading_max_positions,
+        )
         return None
 
     tradingsymbol = to_kite_tradingsymbol(symbol)

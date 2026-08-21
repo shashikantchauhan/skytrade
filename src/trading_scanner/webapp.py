@@ -1148,6 +1148,7 @@ class LiveCashTradingUpdate(BaseModel):
     enabled: bool
     symbols: list[str]
     notional: str
+    max_positions: int = 8
 
 
 @app.get("/api/live-cash-trading")
@@ -1164,15 +1165,28 @@ async def get_live_cash_trading(_: None = Depends(_require_admin)) -> JSONRespon
                 enabled=config.live_cash_trading_enabled,
                 symbols=config.live_cash_trading_symbols,
                 notional=config.live_cash_trading_notional,
+                max_positions=config.live_cash_trading_max_positions,
             )
+        )
+        universe_path = _REPO_ROOT / config.symbols_file
+        universe_symbols = (
+            sorted(
+                line.strip()
+                for line in universe_path.read_text().splitlines()
+                if line.strip()
+            )
+            if universe_path.exists()
+            else []
         )
         return JSONResponse(
             {
                 "enabled": state.enabled,
                 "symbols": sorted(state.symbols),
                 "notional": str(state.notional),
+                "max_positions": state.max_positions,
                 "updated_at": state.updated_at.isoformat() if state.updated_at else None,
                 "todays_error_count": _todays_error_count(),
+                "universe_symbols": universe_symbols,
             }
         )
     finally:
@@ -1193,6 +1207,8 @@ async def update_live_cash_trading(
         raise HTTPException(status_code=400, detail="notional must be numeric.") from error
     if notional <= 0:
         raise HTTPException(status_code=400, detail="notional must be positive.")
+    if update.max_positions <= 0:
+        raise HTTPException(status_code=400, detail="max_positions must be positive.")
     symbols = frozenset(s.strip() for s in update.symbols if s.strip())
     if update.enabled and not symbols:
         raise HTTPException(
@@ -1203,13 +1219,19 @@ async def update_live_cash_trading(
     try:
         repository = TursoLiveCashToggleRepository(client)
         await repository.ensure_schema()
-        new_state = LiveCashToggleState(enabled=update.enabled, symbols=symbols, notional=notional)
+        new_state = LiveCashToggleState(
+            enabled=update.enabled,
+            symbols=symbols,
+            notional=notional,
+            max_positions=update.max_positions,
+        )
         await repository.set_state(new_state)
         return JSONResponse(
             {
                 "enabled": new_state.enabled,
                 "symbols": sorted(new_state.symbols),
                 "notional": str(new_state.notional),
+                "max_positions": new_state.max_positions,
                 "note": "Takes effect on the next scan cycle -- no restart needed.",
             }
         )
