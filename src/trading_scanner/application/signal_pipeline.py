@@ -709,7 +709,8 @@ async def _process_symbol(
                     )
                 if should_exit:
                     await live_cash_execution.execute_cash_exit(
-                        symbol, config, order_executor, live_order_repository, notifier,
+                        symbol, market_price, config, order_executor, live_order_repository,
+                        notifier,
                     )
             except Exception:
                 logging.getLogger(__name__).exception(

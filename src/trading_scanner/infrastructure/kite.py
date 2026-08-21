@@ -70,6 +70,18 @@ INDEX_SYMBOL_MAP = {
     "^NSMIDCP": "NIFTY MIDCAP 50",
 }
 
+# 2026-08-21: Kite rejects a plain market order placed via the API
+# ("Market orders without market protection are not allowed via API"),
+# discovered when the very first real order this system ever placed
+# failed on it. There's no separate "market protection" parameter exposed
+# on place_order() -- the documented workaround is a limit order priced
+# past the reference price by a small protection margin, so it still fills
+# immediately against available liquidity (matching a market order in
+# practice) while satisfying the exchange's requirement for an explicit
+# price. 0.5% matches Zerodha's own Kite web/app UI default market-
+# protection setting.
+_MARKET_PROTECTION_PCT = Decimal("0.5")
+
 
 def to_kite_tradingsymbol(symbol: str) -> str:
     """Yahoo-style symbol -> Kite tradingsymbol, without needing an
@@ -389,23 +401,39 @@ class KiteOrderExecutor:
         )
 
     def place_cash_market_order(
-        self, tradingsymbol: str, transaction_type: str, quantity: int
+        self,
+        tradingsymbol: str,
+        transaction_type: str,
+        quantity: int,
+        reference_price: Decimal,
     ) -> str:
-        """Places a real NSE cash-equity market order, product CNC
-        (delivery -- carries the position overnight, matching this
-        strategy's multi-day swing holds; MIS would auto-square-off the
-        same day, which is wrong here). ``tradingsymbol`` must already be
-        Kite's own form (no ``.NS`` suffix -- see ``_kite_symbol``).
-        Returns Kite's order_id; does not wait for a fill -- see
-        ``poll_order_status``/``wait_for_fill`` for that."""
+        """Places a real NSE cash-equity order, product CNC (delivery --
+        carries the position overnight, matching this strategy's multi-day
+        swing holds; MIS would auto-square-off the same day, which is
+        wrong here). ``tradingsymbol`` must already be Kite's own form (no
+        ``.NS`` suffix -- see ``_kite_symbol``). Returns Kite's order_id;
+        does not wait for a fill -- see ``poll_order_status``/
+        ``wait_for_fill`` for that.
+
+        A protected LIMIT order, not a true MARKET order -- see
+        ``_MARKET_PROTECTION_PCT``'s module-level docstring for why plain
+        market orders are rejected. ``reference_price`` should be this
+        symbol's current price (e.g. the bar close/LTP that triggered this
+        order), not the original entry price on an exit."""
+        protected_price = (
+            reference_price * (1 + _MARKET_PROTECTION_PCT / 100)
+            if transaction_type == self._kite.TRANSACTION_TYPE_BUY
+            else reference_price * (1 - _MARKET_PROTECTION_PCT / 100)
+        )
         return self._kite.place_order(
             variety=self._kite.VARIETY_REGULAR,
             exchange="NSE",
             tradingsymbol=tradingsymbol,
             transaction_type=transaction_type,
             quantity=quantity,
-            order_type=self._kite.ORDER_TYPE_MARKET,
+            order_type=self._kite.ORDER_TYPE_LIMIT,
             product=self._kite.PRODUCT_CNC,
+            price=float(round(protected_price, 2)),
         )
 
     def place_cash_bracket_gtt(
