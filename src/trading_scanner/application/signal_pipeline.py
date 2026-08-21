@@ -13,6 +13,8 @@ from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
     futures_shadow,
     futures_trading,
+    gtt_bracket,
+    live_cash_execution,
     live_execution,
     options_shadow,
     paper_trading,
@@ -45,6 +47,7 @@ from trading_scanner.domain.ports import (
 )
 from trading_scanner.infrastructure.db import (
     TursoFuturesTradeRepository,
+    TursoGttRepository,
     TursoKiteSessionRepository,
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
@@ -134,6 +137,7 @@ async def run_signal_pipeline(
     market_data_provider: MarketDataProvider | None = None,
     futures_account_repository: FuturesPaperAccountRepository | None = None,
     futures_paper_symbols: frozenset[str] = frozenset(),
+    gtt_repository: TursoGttRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -292,6 +296,7 @@ async def run_signal_pipeline(
                     futures_account_repository=futures_account_repository,
                     futures_paper_symbols=futures_paper_symbols,
                     precomputed_futures_note=futures_notes.get(symbol),
+                    gtt_repository=gtt_repository,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -531,6 +536,7 @@ async def _process_symbol(
     futures_account_repository: FuturesPaperAccountRepository | None = None,
     futures_paper_symbols: frozenset[str] = frozenset(),
     precomputed_futures_note: str | None = None,
+    gtt_repository: TursoGttRepository | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -595,6 +601,17 @@ async def _process_symbol(
     derivatives_note = None
     futures_note = None
 
+    if order_executor is not None and gtt_repository is not None:
+        try:
+            await gtt_bracket.check_and_extend(
+                symbol, market_price, config, order_executor, gtt_repository, notifier,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "GTT extension check raised for %s -- original bracket (if any) left in place.",
+                symbol,
+            )
+
     if result.signal == "BUY":
         await trade_repository.abandon_open_trade(symbol, config.candle_interval, SignalSide.SELL)
         await trade_repository.open_trade(
@@ -624,6 +641,25 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
+        if order_executor is not None and live_order_repository is not None:
+            try:
+                await live_cash_execution.execute_cash_entry(
+                    symbol, market_price, config, order_executor, live_order_repository, notifier,
+                )
+                if gtt_repository is not None:
+                    opened = await live_order_repository.get_open_cash_legs(symbol)
+                    if opened:
+                        leg = opened[0]
+                        await gtt_bracket.place_bracket(
+                            symbol, leg.tradingsymbol, leg.quantity,
+                            leg.average_price or market_price,
+                            config, order_executor, gtt_repository, notifier,
+                        )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Live cash order entry raised for %s -- rest of signal handling still stands.",
+                    symbol,
+                )
         futures_note = (
             precomputed_futures_note
             if precomputed_futures_note is not None
@@ -667,6 +703,21 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
+        if order_executor is not None and live_order_repository is not None:
+            try:
+                should_exit = True
+                if gtt_repository is not None:
+                    should_exit = await gtt_bracket.reconcile_before_exit(
+                        symbol, config, order_executor, gtt_repository,
+                    )
+                if should_exit:
+                    await live_cash_execution.execute_cash_exit(
+                        symbol, config, order_executor, live_order_repository, notifier,
+                    )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Live cash order exit raised for %s -- close above still stands.", symbol,
+                )
         await _close_futures_paper(
             symbol, SignalSide.BUY, newest_candle.timestamp, market_price, derivatives_chain,
             futures_account_repository, futures_paper_symbols, signal_repository, notifier,
@@ -708,6 +759,7 @@ async def _process_symbol(
             await _notify_exit(
                 symbol, config, SignalSide.SELL, newest_candle.timestamp, market_price,
                 trade_repository, signal_repository, notifier,
+                suppress_telegram=True,  # long-only: no SELL-side notifications at all
             )
         except Exception:
             logging.getLogger(__name__).warning(
@@ -761,7 +813,8 @@ async def _process_symbol(
     )
     if await signal_repository.contains(signal.fingerprint):
         return
-    await notifier.send_signal(signal)
+    if side != SignalSide.SELL:  # long-only: no SELL signal notifications at all
+        await notifier.send_signal(signal)
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
@@ -1318,7 +1371,8 @@ async def _close_futures_paper(
             category="futures_exit",
         )
         if not await signal_repository.contains(signal.fingerprint):
-            await notifier.send_signal(signal)
+            if side != SignalSide.SELL:  # long-only: no SELL-side notifications at all
+                await notifier.send_signal(signal)
             await signal_repository.record(signal.fingerprint, signal.timestamp)
         return note
     except Exception:

@@ -1045,8 +1045,9 @@ async def test_end_long_closes_the_paper_position_and_notifies_pnl(monkeypatch) 
 @pytest.mark.asyncio
 async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
     """SELL signals must never touch the paper account -- NSE cash market
-    doesn't allow short selling for multi-day holds -- and must be tagged
-    as informational only in the notification."""
+    doesn't allow short selling for multi-day holds. Long-only: a SELL
+    signal is still recorded (fingerprint dedup/backfill unaffected) but
+    never sent to Telegram."""
     monkeypatch.setattr(
         YahooProvider,
         "get_recent_history",
@@ -1086,7 +1087,8 @@ async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
     )
 
     assert paper_account_repository.opened == []
-    assert "informational only -- not tradeable in NSE cash market" in notifier.sent[0].rationale
+    assert notifier.sent == []  # long-only: SELL never reaches Telegram
+    assert len(signal_repository.recorded) == 1  # but is still fingerprint-recorded
 
 
 @pytest.mark.asyncio

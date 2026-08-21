@@ -16,6 +16,7 @@ see ``TursoKiteSessionRepository``).
 
 import time
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -70,7 +71,7 @@ INDEX_SYMBOL_MAP = {
 }
 
 
-def _to_kite_tradingsymbol(symbol: str) -> str:
+def to_kite_tradingsymbol(symbol: str) -> str:
     """Yahoo-style symbol -> Kite tradingsymbol, without needing an
     instrument token (``kite.ltp`` accepts ``"NSE:TRADINGSYMBOL"`` strings
     directly) -- shared by ``get_last_prices`` below."""
@@ -87,7 +88,7 @@ def get_last_prices(kite: KiteConnect, symbols: list[str]) -> dict[str, float]:
     can't currently price is simply left out, matching Yahoo's version."""
     if not symbols:
         return {}
-    keys = {symbol: f"NSE:{_to_kite_tradingsymbol(symbol)}" for symbol in symbols}
+    keys = {symbol: f"NSE:{to_kite_tradingsymbol(symbol)}" for symbol in symbols}
     try:
         quote = kite.ltp(list(keys.values()))
     except Exception:
@@ -386,6 +387,123 @@ class KiteOrderExecutor:
             order_type=self._kite.ORDER_TYPE_MARKET,
             product=self._kite.PRODUCT_NRML,
         )
+
+    def place_cash_market_order(
+        self, tradingsymbol: str, transaction_type: str, quantity: int
+    ) -> str:
+        """Places a real NSE cash-equity market order, product CNC
+        (delivery -- carries the position overnight, matching this
+        strategy's multi-day swing holds; MIS would auto-square-off the
+        same day, which is wrong here). ``tradingsymbol`` must already be
+        Kite's own form (no ``.NS`` suffix -- see ``_kite_symbol``).
+        Returns Kite's order_id; does not wait for a fill -- see
+        ``poll_order_status``/``wait_for_fill`` for that."""
+        return self._kite.place_order(
+            variety=self._kite.VARIETY_REGULAR,
+            exchange="NSE",
+            tradingsymbol=tradingsymbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_type=self._kite.ORDER_TYPE_MARKET,
+            product=self._kite.PRODUCT_CNC,
+        )
+
+    def place_cash_bracket_gtt(
+        self,
+        tradingsymbol: str,
+        quantity: int,
+        last_price: Decimal,
+        stop_price: Decimal,
+        target_price: Decimal,
+    ) -> int:
+        """Places a two-leg OCO GTT (Good-Till-Triggered) on NSE cash: a
+        SELL LIMIT at ``target_price`` and a SELL LIMIT at ``stop_price``.
+        Whichever triggers first cancels the other automatically at the
+        exchange -- see ``application/gtt_bracket.py`` for the entry/exit
+        lifecycle this belongs to. Kite requires ``trigger_values`` sorted
+        ascending; the order list itself doesn't need to match that order,
+        each leg carries its own ``trigger_price``/``price``. Returns the
+        GTT's ``trigger_id`` for later ``modify``/``delete``."""
+        response = self._kite.place_gtt(
+            trigger_type=self._kite.GTT_TYPE_OCO,
+            tradingsymbol=tradingsymbol,
+            exchange="NSE",
+            trigger_values=[float(stop_price), float(target_price)],
+            last_price=float(last_price),
+            orders=[
+                {
+                    "transaction_type": self._kite.TRANSACTION_TYPE_SELL,
+                    "quantity": quantity,
+                    "order_type": self._kite.ORDER_TYPE_LIMIT,
+                    "product": self._kite.PRODUCT_CNC,
+                    "price": float(stop_price),
+                },
+                {
+                    "transaction_type": self._kite.TRANSACTION_TYPE_SELL,
+                    "quantity": quantity,
+                    "order_type": self._kite.ORDER_TYPE_LIMIT,
+                    "product": self._kite.PRODUCT_CNC,
+                    "price": float(target_price),
+                },
+            ],
+        )
+        return int(response["trigger_id"])
+
+    def modify_cash_bracket_gtt(
+        self,
+        trigger_id: int,
+        tradingsymbol: str,
+        quantity: int,
+        last_price: Decimal,
+        stop_price: Decimal,
+        target_price: Decimal,
+    ) -> None:
+        """Replaces both trigger prices on an existing OCO GTT (e.g.
+        extending the target and trailing the stop-loss up -- see
+        ``application/gtt_bracket.py``). Same leg shape as
+        ``place_cash_bracket_gtt``, just re-sent against ``trigger_id``."""
+        self._kite.modify_gtt(
+            trigger_id=trigger_id,
+            trigger_type=self._kite.GTT_TYPE_OCO,
+            tradingsymbol=tradingsymbol,
+            exchange="NSE",
+            trigger_values=[float(stop_price), float(target_price)],
+            last_price=float(last_price),
+            orders=[
+                {
+                    "transaction_type": self._kite.TRANSACTION_TYPE_SELL,
+                    "quantity": quantity,
+                    "order_type": self._kite.ORDER_TYPE_LIMIT,
+                    "product": self._kite.PRODUCT_CNC,
+                    "price": float(stop_price),
+                },
+                {
+                    "transaction_type": self._kite.TRANSACTION_TYPE_SELL,
+                    "quantity": quantity,
+                    "order_type": self._kite.ORDER_TYPE_LIMIT,
+                    "product": self._kite.PRODUCT_CNC,
+                    "price": float(target_price),
+                },
+            ],
+        )
+
+    def gtt_status(self, trigger_id: int) -> str:
+        """Kite's own current status string for a GTT ("active",
+        "triggered", "deleted", "expired", ...) -- used to tell "still
+        live, safe to cancel + market-exit" apart from "already fired, the
+        real position is already flat, a market SELL now would just get
+        rejected/be wrong" (see ``application/gtt_bracket.py``'s
+        reconcile-before-exit flow)."""
+        return self._kite.get_gtt(trigger_id)["status"]
+
+    def delete_gtt(self, trigger_id: int) -> None:
+        """Cancels a GTT outright -- used when a strategy exit signal fires
+        while the bracket is still open (see ``application/
+        gtt_bracket.py``'s cancel-before-market-exit flow). Best-effort at
+        the call site: Kite raises if the trigger already fired/was
+        deleted, which the caller treats the same as "already gone,"
+        never as a reason to skip the market exit."""
+        self._kite.delete_gtt(trigger_id)
 
     def order_status(self, order_id: str) -> dict:
         """The most recent status entry for ``order_id`` -- Kite's
