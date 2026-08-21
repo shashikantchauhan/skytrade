@@ -58,7 +58,7 @@ class FakeOrderExecutor:
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
 
-    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity):
+    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity, reference_price):
         self.calls.append((tradingsymbol, transaction_type, quantity))
         self._order_counter += 1
         return f"order-{self._order_counter}"
@@ -266,7 +266,7 @@ async def test_exit_still_fires_when_toggle_is_disabled():
     notifier = FakeNotifier()
 
     basket_id = await live_cash_execution.execute_cash_exit(
-        "RELIANCE.NS", config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
     )
 
     assert basket_id is not None
@@ -280,7 +280,7 @@ async def test_exit_noop_when_nothing_open():
     repo = FakeLiveOrderRepository(open_cash=[])
 
     result = await live_cash_execution.execute_cash_exit(
-        "RELIANCE.NS", config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
     )
 
     assert result is None
@@ -300,7 +300,7 @@ async def test_exit_squares_off_the_open_buy_leg_with_a_sell():
     notifier = FakeNotifier()
 
     basket_id = await live_cash_execution.execute_cash_exit(
-        "RELIANCE.NS", config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
     )
 
     assert basket_id is not None
@@ -321,7 +321,7 @@ async def test_exit_incomplete_notifies_distinctly():
     notifier = FakeNotifier()
 
     basket_id = await live_cash_execution.execute_cash_exit(
-        "RELIANCE.NS", config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
     )
 
     assert basket_id is not None

@@ -54,14 +54,28 @@ def _is_gated_in(symbol: str, config: AppConfig) -> bool:
 
 
 async def _place_and_wait(
-    order_executor: KiteOrderExecutor, tradingsymbol: str, transaction_type: str, quantity: int
+    order_executor: KiteOrderExecutor,
+    tradingsymbol: str,
+    transaction_type: str,
+    quantity: int,
+    reference_price: Decimal,
 ) -> CashLegResult:
     """Places one real cash order and blocks (off the event loop) until it
     fills or times out. Never raises -- same "treat an exception as a
-    REJECTED order" discipline as live_execution.py's basket flow."""
+    REJECTED order" discipline as live_execution.py's basket flow.
+
+    ``reference_price`` -- 2026-08-21: Kite now rejects a plain market
+    order placed via the API ("Market orders without market protection are
+    not allowed via API"), discovered when the very first real order this
+    system ever placed failed on it. ``place_cash_market_order`` uses this
+    to price a protected limit order instead (see its own docstring)."""
     try:
         order_id = await asyncio.to_thread(
-            order_executor.place_cash_market_order, tradingsymbol, transaction_type, quantity
+            order_executor.place_cash_market_order,
+            tradingsymbol,
+            transaction_type,
+            quantity,
+            reference_price,
         )
     except Exception:
         logger.exception(
@@ -148,7 +162,7 @@ async def execute_cash_entry(
     quantity = max(1, int(config.live_cash_trading_notional / market_price))
     basket_id = f"{symbol}-cash-entry-{datetime.now(UTC).isoformat()}"
 
-    leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity)
+    leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)
     await _record(live_order_repository, basket_id, symbol, leg)
 
     if leg.status != "COMPLETE":
@@ -168,6 +182,7 @@ async def execute_cash_entry(
 
 async def execute_cash_exit(
     symbol: str,
+    market_price: Decimal,
     config: AppConfig,
     order_executor: KiteOrderExecutor,
     live_order_repository: TursoLiveOrderRepository,
@@ -181,7 +196,11 @@ async def execute_cash_exit(
     only ever stop *new* entries, never strand an already-open real
     position with no way to be closed. Whether to exit is a fact about
     what's actually open (``live_order_repository``), not about the
-    current toggle state."""
+    current toggle state.
+
+    ``market_price`` -- reference price for the protected limit order
+    ``_place_and_wait`` places (see its own docstring); this symbol's
+    current bar close/candle price, not the original entry price."""
     open_legs = await live_order_repository.get_open_cash_legs(symbol)
     if not open_legs:
         return None
@@ -190,7 +209,7 @@ async def execute_cash_exit(
 
     close_txn = "SELL" if open_leg.transaction_type == "BUY" else "BUY"
     leg = await _place_and_wait(
-        order_executor, open_leg.tradingsymbol, close_txn, open_leg.quantity
+        order_executor, open_leg.tradingsymbol, close_txn, open_leg.quantity, market_price
     )
     await _record(live_order_repository, basket_id, symbol, leg)
 
