@@ -252,6 +252,38 @@ class LiveOrderLeg:
     rejection_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class PaperBenchmarkPosition:
+    """A paper-simulated position run 1:1 alongside a real live-cash trade,
+    purely to measure execution quality/slippage -- see
+    ``application/paper_benchmark.py``. The paper "fill" is always the
+    decision price the real order was priced off of (no friction); the real
+    fill is Kite's own ``average_price`` for the same basket. Strictly
+    paired with a real live-cash entry/exit (see
+    ``application/live_cash_execution.py``) -- never opened standalone, and
+    never for a symbol that isn't already live. Not the retired
+    ``paper_trading.py``/``paper_account`` system -- a fresh, independent
+    table.
+
+    ``basket_id`` is the real entry's own basket_id (from
+    ``TursoLiveOrderRepository``), not a new one -- lets this row be traced
+    back to the exact real order pair it benchmarks.
+    """
+
+    symbol: str
+    basket_id: str
+    quantity: int
+    entry_timestamp: datetime
+    paper_entry_price: Decimal
+    real_entry_price: Decimal
+    exit_timestamp: datetime | None = None
+    paper_exit_price: Decimal | None = None
+    real_exit_price: Decimal | None = None
+    paper_pnl_amount: Decimal | None = None
+    real_pnl_amount: Decimal | None = None
+    status: str = "open"  # "open" | "closed"
+
+
 @dataclass(slots=True)
 class GttBracket:
     """A real target+stop-loss OCO GTT placed on a live cash-equity

@@ -29,6 +29,7 @@ from trading_scanner.infrastructure.db.live_cash_toggle import (
 from trading_scanner.infrastructure.db.live_orders import TursoLiveOrderRepository
 from trading_scanner.infrastructure.db.options_trades import TursoOptionsTradeRepository
 from trading_scanner.infrastructure.db.paper_account import TursoPaperAccountRepository
+from trading_scanner.infrastructure.db.paper_benchmark import TursoPaperBenchmarkRepository
 from trading_scanner.infrastructure.db.signals import TursoSignalRepository
 from trading_scanner.infrastructure.db.trades import TursoTradeRepository
 
@@ -46,6 +47,7 @@ __all__ = [
     "TursoLiveOrderRepository",
     "TursoOptionsTradeRepository",
     "TursoPaperAccountRepository",
+    "TursoPaperBenchmarkRepository",
     "TursoSignalRepository",
     "TursoTradeRepository",
 ]

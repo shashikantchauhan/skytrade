@@ -43,6 +43,7 @@ from trading_scanner.infrastructure.db import (
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
+    TursoPaperBenchmarkRepository,
     TursoTradeRepository,
     create_turso_client,
 )
@@ -455,6 +456,85 @@ async def live_cash_positions(_: None = Depends(_require_session)) -> JSONRespon
                 }
             )
         return JSONResponse(rows)
+    finally:
+        await client.close()
+
+
+def _paper_benchmark_summary(closed: list) -> dict:
+    """Slippage/PnL rollup across closed paper-benchmark pairs -- same
+    "compute in Python over the closed list" pattern as
+    _futures_monthly_summary. Entry slippage is always computable for a
+    closed pair (a paper-benchmark row is only ever opened once a real fill
+    happened); exit slippage is skipped for the rare row with no
+    paper_exit_price recorded."""
+    if not closed:
+        return {
+            "count": 0,
+            "avg_entry_slippage_pct": None,
+            "avg_exit_slippage_pct": None,
+            "total_paper_pnl": None,
+            "total_real_pnl": None,
+        }
+    entry_slippages = [
+        float((p.real_entry_price - p.paper_entry_price) / p.paper_entry_price * 100)
+        for p in closed
+    ]
+    exit_slippages = [
+        float((p.real_exit_price - p.paper_exit_price) / p.paper_exit_price * 100)
+        for p in closed
+        if p.paper_exit_price is not None and p.real_exit_price is not None
+    ]
+    total_paper = sum((p.paper_pnl_amount or Decimal("0") for p in closed), start=Decimal("0"))
+    total_real = sum((p.real_pnl_amount or Decimal("0") for p in closed), start=Decimal("0"))
+    return {
+        "count": len(closed),
+        "avg_entry_slippage_pct": sum(entry_slippages) / len(entry_slippages),
+        "avg_exit_slippage_pct": (
+            sum(exit_slippages) / len(exit_slippages) if exit_slippages else None
+        ),
+        "total_paper_pnl": _decimal(total_paper),
+        "total_real_pnl": _decimal(total_real),
+    }
+
+
+@app.get("/api/paper-benchmark")
+async def paper_benchmark_positions(_: None = Depends(_require_session)) -> JSONResponse:
+    """Paper-simulated benchmark run 1:1 alongside every real live-cash
+    trade (see application/paper_benchmark.py) -- measures execution
+    quality/slippage: paper "fill" = decision price (no friction) vs. real
+    fill = Kite's actual average_price, same symbol/qty/signal. Strictly
+    paired with real trades, not a general paper-trading system -- fresh
+    table, unrelated to the retired paper_trading.py/paper_account system."""
+    client, _config = _client()
+    try:
+        repository = TursoPaperBenchmarkRepository(client)
+        await repository.ensure_schema()
+        open_positions = list(await repository.get_open_positions())
+        recent_closed = list(await repository.get_recent_closed_positions(200))
+
+        def _row(p) -> dict:
+            return {
+                "symbol": p.symbol,
+                "basket_id": p.basket_id,
+                "quantity": p.quantity,
+                "entry_timestamp": p.entry_timestamp.isoformat(),
+                "paper_entry_price": _decimal(p.paper_entry_price),
+                "real_entry_price": _decimal(p.real_entry_price),
+                "exit_timestamp": p.exit_timestamp.isoformat() if p.exit_timestamp else None,
+                "paper_exit_price": _decimal(p.paper_exit_price),
+                "real_exit_price": _decimal(p.real_exit_price),
+                "paper_pnl_amount": _decimal(p.paper_pnl_amount),
+                "real_pnl_amount": _decimal(p.real_pnl_amount),
+                "status": p.status,
+            }
+
+        return JSONResponse(
+            {
+                "open_positions": [_row(p) for p in open_positions],
+                "recent_closed": [_row(p) for p in recent_closed],
+                "summary": _paper_benchmark_summary(recent_closed),
+            }
+        )
     finally:
         await client.close()
 

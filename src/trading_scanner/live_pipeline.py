@@ -62,6 +62,7 @@ from trading_scanner.infrastructure.db import (
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
+    TursoPaperBenchmarkRepository,
     TursoSignalRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -192,6 +193,7 @@ class LiveTickerPipeline:
             "futures_trade": TursoFuturesTradeRepository(self._client),
             "live_order": TursoLiveOrderRepository(self._client),
             "gtt": TursoGttRepository(self._client),
+            "paper_benchmark": TursoPaperBenchmarkRepository(self._client),
             "live_cash_toggle": TursoLiveCashToggleRepository(self._client),
             "futures_paper_account": TursoFuturesPaperAccountRepository(
                 self._client, FUTURES_INITIAL_CAPITAL
@@ -526,6 +528,7 @@ class LiveTickerPipeline:
                         futures_paper_symbols=self._futures_paper_symbols,
                         precomputed_futures_note=futures_notes.get(symbol),
                         gtt_repository=self._repos["gtt"],
+                        paper_benchmark_repository=self._repos["paper_benchmark"],
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)

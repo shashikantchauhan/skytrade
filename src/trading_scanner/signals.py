@@ -16,6 +16,7 @@ from trading_scanner.infrastructure.db import (
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
     TursoPaperAccountRepository,
+    TursoPaperBenchmarkRepository,
     TursoSignalRepository,
     TursoTradeRepository,
     create_turso_client,
@@ -54,6 +55,7 @@ async def _run(config: AppConfig) -> None:
         futures_trade_repository = TursoFuturesTradeRepository(client)
         live_order_repository = TursoLiveOrderRepository(client)
         gtt_repository = TursoGttRepository(client)
+        paper_benchmark_repository = TursoPaperBenchmarkRepository(client)
         await candle_repository.ensure_schema()
         await signal_repository.ensure_schema()
         await engine_state_repository.ensure_schema()
@@ -64,6 +66,7 @@ async def _run(config: AppConfig) -> None:
         await futures_trade_repository.ensure_schema()
         await live_order_repository.ensure_schema()
         await gtt_repository.ensure_schema()
+        await paper_benchmark_repository.ensure_schema()
 
         notifier = _build_notifier(config)
         await run_signal_pipeline(
@@ -80,6 +83,7 @@ async def _run(config: AppConfig) -> None:
             futures_trade_repository,
             live_order_repository,
             gtt_repository=gtt_repository,
+            paper_benchmark_repository=paper_benchmark_repository,
         )
     finally:
         await client.close()

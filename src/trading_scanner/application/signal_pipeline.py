@@ -17,6 +17,7 @@ from trading_scanner.application import (
     live_cash_execution,
     live_execution,
     options_shadow,
+    paper_benchmark,
     paper_trading,
 )
 from trading_scanner.application.fast_predict import (
@@ -51,6 +52,7 @@ from trading_scanner.infrastructure.db import (
     TursoKiteSessionRepository,
     TursoLiveOrderRepository,
     TursoOptionsTradeRepository,
+    TursoPaperBenchmarkRepository,
 )
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
@@ -138,6 +140,7 @@ async def run_signal_pipeline(
     futures_account_repository: FuturesPaperAccountRepository | None = None,
     futures_paper_symbols: frozenset[str] = frozenset(),
     gtt_repository: TursoGttRepository | None = None,
+    paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -297,6 +300,7 @@ async def run_signal_pipeline(
                     futures_paper_symbols=futures_paper_symbols,
                     precomputed_futures_note=futures_notes.get(symbol),
                     gtt_repository=gtt_repository,
+                    paper_benchmark_repository=paper_benchmark_repository,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -537,6 +541,7 @@ async def _process_symbol(
     futures_paper_symbols: frozenset[str] = frozenset(),
     precomputed_futures_note: str | None = None,
     gtt_repository: TursoGttRepository | None = None,
+    paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -646,15 +651,25 @@ async def _process_symbol(
                 await live_cash_execution.execute_cash_entry(
                     symbol, market_price, config, order_executor, live_order_repository, notifier,
                 )
-                if gtt_repository is not None:
-                    opened = await live_order_repository.get_open_cash_legs(symbol)
-                    if opened:
-                        leg = opened[0]
+                opened = await live_order_repository.get_open_cash_legs(symbol)
+                if opened:
+                    leg = opened[0]
+                    if gtt_repository is not None:
                         await gtt_bracket.place_bracket(
                             symbol, leg.tradingsymbol, leg.quantity,
                             leg.average_price or market_price,
                             config, order_executor, gtt_repository, notifier,
                         )
+                    if paper_benchmark_repository is not None:
+                        try:
+                            await paper_benchmark.record_entry(
+                                symbol, market_price, leg, paper_benchmark_repository,
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                "Paper-benchmark entry recording raised for %s -- "
+                                "real trade unaffected.", symbol,
+                            )
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Live cash order entry raised for %s -- rest of signal handling still stands.",
@@ -708,10 +723,33 @@ async def _process_symbol(
                         symbol, config, order_executor, gtt_repository,
                     )
                 if should_exit:
-                    await live_cash_execution.execute_cash_exit(
+                    entry_leg = None
+                    if paper_benchmark_repository is not None:
+                        still_open = await live_order_repository.get_open_cash_legs(symbol)
+                        if still_open:
+                            entry_leg = still_open[0]
+                    exit_basket_id = await live_cash_execution.execute_cash_exit(
                         symbol, market_price, config, order_executor, live_order_repository,
                         notifier,
                     )
+                    if (
+                        paper_benchmark_repository is not None
+                        and exit_basket_id is not None
+                        and entry_leg is not None
+                    ):
+                        exit_legs = await live_order_repository.get_legs(exit_basket_id)
+                        if exit_legs and exit_legs[0].status == "COMPLETE":
+                            try:
+                                await paper_benchmark.record_exit(
+                                    symbol, entry_leg.basket_id, market_price,
+                                    newest_candle.timestamp, exit_legs[0],
+                                    paper_benchmark_repository,
+                                )
+                            except Exception:
+                                logging.getLogger(__name__).exception(
+                                    "Paper-benchmark exit recording raised for %s -- "
+                                    "real trade unaffected.", symbol,
+                                )
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Live cash order exit raised for %s -- close above still stands.", symbol,

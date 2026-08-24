@@ -142,6 +142,7 @@
   <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
   <button class="tab-btn" data-tab="futures-paper" onclick="switchTab('futures-paper')">Futures (Nifty50)</button>
+  <button class="tab-btn" data-tab="paper-benchmark" onclick="switchTab('paper-benchmark')">Paper Benchmark</button>
   <button class="tab-btn" data-tab="smallcap" onclick="switchTab('smallcap')">Small Cap (weekly)</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
 </div>
@@ -183,6 +184,21 @@
   <h2 style="margin-top: 1.5rem;">Closed combos</h2>
   <div class="panel table-wrap">
     <table id="futures-paper-closed-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Margin allocated</th><th>P&amp;L</th></tr></thead><tbody></tbody></table>
+  </div>
+</section>
+
+<section class="tab-panel" data-tab="paper-benchmark" hidden>
+  <h2>Paper vs real execution <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(paper fill = decision price, no friction -- real fill = Kite's actual average_price, same symbol/qty/signal as the real trade)</span></h2>
+  <div class="cards" id="paper-benchmark-cards"></div>
+
+  <h2 style="margin-top: 1.5rem;">Open pairs</h2>
+  <div class="panel table-wrap">
+    <table id="paper-benchmark-open-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Qty</th><th>Paper entry</th><th>Real entry</th><th>Entry slippage</th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <h2 style="margin-top: 1.5rem;">Closed pairs</h2>
+  <div class="panel table-wrap">
+    <table id="paper-benchmark-closed-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Exit time</th><th>Paper P&amp;L</th><th>Real P&amp;L</th><th>Entry slippage</th><th>Exit slippage</th></tr></thead><tbody></tbody></table>
   </div>
 </section>
 
@@ -482,6 +498,30 @@ async function loadFuturesPaper() {
   }).join("") || "<tr><td colspan=8>No closed combos yet</td></tr>";
 }
 
+async function loadPaperBenchmark() {
+  const b = await api("/api/paper-benchmark");
+  const pnlClass = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
+  const s = b.summary;
+  document.getElementById("paper-benchmark-cards").innerHTML = `
+    <div class="card"><div class="label">Closed pairs</div><div class="value">${s.count}</div></div>
+    <div class="card"><div class="label">Avg entry slippage</div><div class="value">${s.avg_entry_slippage_pct === null ? "-" : fmt(s.avg_entry_slippage_pct) + "%"}</div></div>
+    <div class="card"><div class="label">Avg exit slippage</div><div class="value">${s.avg_exit_slippage_pct === null ? "-" : fmt(s.avg_exit_slippage_pct) + "%"}</div></div>
+    <div class="card"><div class="label">Total paper P&amp;L</div><div class="value ${pnlClass(s.total_paper_pnl)}">${s.total_paper_pnl === null ? "-" : "₹" + fmt(s.total_paper_pnl)}</div></div>
+    <div class="card"><div class="label">Total real P&amp;L</div><div class="value ${pnlClass(s.total_real_pnl)}">${s.total_real_pnl === null ? "-" : "₹" + fmt(s.total_real_pnl)}</div></div>
+  `;
+  document.querySelector("#paper-benchmark-open-table tbody").innerHTML = b.open_positions.map(p => {
+    const slip = (p.real_entry_price - p.paper_entry_price) / p.paper_entry_price * 100;
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${p.quantity}</td><td>₹${fmt(p.paper_entry_price)}</td><td>₹${fmt(p.real_entry_price)}</td><td>${fmt(slip)}%</td></tr>`;
+  }).join("") || "<tr><td colspan=6>No open pairs</td></tr>";
+  document.querySelector("#paper-benchmark-closed-table tbody").innerHTML = b.recent_closed.map(p => {
+    const entrySlip = (p.real_entry_price - p.paper_entry_price) / p.paper_entry_price * 100;
+    const exitSlip = p.paper_exit_price !== null && p.paper_exit_price !== undefined
+      ? (p.real_exit_price - p.paper_exit_price) / p.paper_exit_price * 100
+      : null;
+    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${fmtTime(p.exit_timestamp)}</td><td class="${pnlClass(p.paper_pnl_amount)}">₹${fmt(p.paper_pnl_amount)}</td><td class="${pnlClass(p.real_pnl_amount)}">₹${fmt(p.real_pnl_amount)}</td><td>${fmt(entrySlip)}%</td><td>${exitSlip === null ? "-" : fmt(exitSlip) + "%"}</td></tr>`;
+  }).join("") || "<tr><td colspan=7>No closed pairs yet</td></tr>";
+}
+
 async function loadSmallcap() {
   const s = await api("/api/smallcap-status");
   if (!s.deployed) {
@@ -548,7 +588,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadFuturesPaper(), loadSmallcap()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadFuturesPaper(), loadPaperBenchmark(), loadSmallcap()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
   }
