@@ -37,7 +37,7 @@ from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import GttBracket
 from trading_scanner.domain.ports import Notifier
 from trading_scanner.infrastructure.db import TursoGttRepository
-from trading_scanner.infrastructure.kite import KiteOrderExecutor
+from trading_scanner.infrastructure.kite import KiteOrderExecutor, round_to_tick
 
 logger = logging.getLogger(__name__)
 
@@ -72,8 +72,13 @@ async def place_bracket(
     GTT until the next entry (there is no automatic retry)."""
     if not _is_gated_in(symbol, config):
         return
-    stop_price = (entry_price * (1 - STOP_LOSS_PERCENT / 100)).quantize(Decimal("0.05"))
-    target_price = (entry_price * (1 + TARGET_PERCENT / 100)).quantize(Decimal("0.05"))
+    # 2026-08-25: was a flat .quantize(Decimal("0.05")) -- NSE requires the
+    # exact tick size for this instrument (not always 0.05), see kite.py's
+    # round_to_tick docstring. Off the event loop since tick_size() may hit
+    # Kite's instrument-dump API on first use.
+    tick = await asyncio.to_thread(order_executor.tick_size, tradingsymbol)
+    stop_price = round_to_tick(entry_price * (1 - STOP_LOSS_PERCENT / 100), tick)
+    target_price = round_to_tick(entry_price * (1 + TARGET_PERCENT / 100), tick)
     try:
         trigger_id = await asyncio.to_thread(
             order_executor.place_cash_bracket_gtt,
@@ -121,9 +126,8 @@ async def check_and_extend(
         return
 
     new_stop = bracket.entry_price  # trail to breakeven
-    new_target = (
-        bracket.entry_price * (1 + EXTENDED_TARGET_PERCENT / 100)
-    ).quantize(Decimal("0.05"))
+    tick = await asyncio.to_thread(order_executor.tick_size, bracket.tradingsymbol)
+    new_target = round_to_tick(bracket.entry_price * (1 + EXTENDED_TARGET_PERCENT / 100), tick)
     try:
         await asyncio.to_thread(
             order_executor.modify_cash_bracket_gtt,

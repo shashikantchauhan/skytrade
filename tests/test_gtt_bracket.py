@@ -45,12 +45,16 @@ def _config(
 
 
 class FakeOrderExecutor:
-    def __init__(self, gtt_status: str = "active") -> None:
+    def __init__(self, gtt_status: str = "active", tick_size: Decimal = Decimal("0.05")) -> None:
         self.placed: list[tuple] = []
         self.modified: list[tuple] = []
         self.deleted: list[int] = []
         self._gtt_status = gtt_status
         self._next_trigger_id = 100
+        self._tick_size = tick_size
+
+    def tick_size(self, tradingsymbol: str) -> Decimal:
+        return self._tick_size
 
     def place_cash_bracket_gtt(self, tradingsymbol, quantity, last_price, stop_price, target_price):
         self.placed.append((tradingsymbol, quantity, last_price, stop_price, target_price))
@@ -143,6 +147,30 @@ async def test_place_bracket_computes_10pct_target_and_3pct_stop():
     assert target_price == Decimal("1540.00")  # 1400 * 1.10
     assert len(repo.recorded) == 1
     assert any("GTT BRACKET PLACED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_place_bracket_rounds_to_the_instruments_real_tick_size():
+    # 2026-08-25 regression: a flat 0.05 quantize rejected stocks whose real
+    # tick size is 0.10 (InputException: "Stoploss trigger price should be
+    # a multiple of tick size 0.10") -- must round to whatever tick_size()
+    # actually returns, and the DB-recorded bracket must match exactly what
+    # was sent to Kite.
+    executor = FakeOrderExecutor(tick_size=Decimal("0.10"))
+    repo = FakeGttRepository()
+    notifier = FakeNotifier()
+
+    await gtt_bracket.place_bracket(
+        "BDL.NS", "BDL", 3, Decimal("1380.5"), _config(symbols=frozenset({"BDL.NS"})),
+        executor, repo, notifier,
+    )
+
+    assert len(executor.placed) == 1
+    _, _, _, stop_price, target_price = executor.placed[0]
+    assert stop_price == Decimal("1339.10")  # 1380.5 * 0.97, on a 0.10 tick
+    assert target_price == Decimal("1518.60")  # 1380.5 * 1.10, on a 0.10 tick
+    assert repo.recorded[0].stop_price == stop_price
+    assert repo.recorded[0].target_price == target_price
 
 
 @pytest.mark.asyncio

@@ -648,9 +648,22 @@ async def _process_symbol(
         )
         if order_executor is not None and live_order_repository is not None:
             try:
-                await live_cash_execution.execute_cash_entry(
-                    symbol, market_price, config, order_executor, live_order_repository, notifier,
+                # 2026-08-25: real cash entries now clear the same 55%-win-
+                # rate/>=5-closed-trades bar the old paper simulator used
+                # (paper_trading.is_eligible) -- previously execute_cash_entry
+                # fired on a bare AlphaEngine BUY signal regardless of this
+                # symbol's own track record, unlike every other capital-gated
+                # book (paper account, futures paper account) which already
+                # required it. Does not affect exits -- squaring off an
+                # already-open real position is never gated on eligibility.
+                cash_eligible = await paper_trading.is_eligible(
+                    symbol, config.candle_interval, trade_repository
                 )
+                if cash_eligible:
+                    await live_cash_execution.execute_cash_entry(
+                        symbol, market_price, config, order_executor, live_order_repository,
+                        notifier,
+                    )
                 opened = await live_order_repository.get_open_cash_legs(symbol)
                 if opened:
                     leg = opened[0]

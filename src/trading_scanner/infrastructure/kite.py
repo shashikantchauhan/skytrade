@@ -16,7 +16,7 @@ see ``TursoKiteSessionRepository``).
 
 import time
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 import pandas as pd
 from kiteconnect import KiteConnect
@@ -117,12 +117,28 @@ class InstrumentLookupError(RuntimeError):
     """A symbol couldn't be confidently mapped to a Kite instrument token."""
 
 
+def round_to_tick(price: Decimal, tick_size: Decimal) -> Decimal:
+    """Rounds ``price`` to the nearest valid multiple of ``tick_size``.
+
+    2026-08-25: NSE requires every order/GTT price to land exactly on the
+    exchange's tick size for that specific instrument -- commonly 0.05 or
+    0.10, but not universally either (Kite's own instrument dump is the
+    only reliable source, see ``KiteInstrumentMap.tick_size``). A flat
+    ``round(price, 2)``/``.quantize(Decimal("0.05"))`` guess caused real
+    order rejections (``InputException: Tick size for this script is
+    0.10...``) and, worse, silently-unplaced GTT brackets on stocks whose
+    tick size isn't 0.05."""
+    ticks = (price / tick_size).to_integral_value(rounding=ROUND_HALF_UP)
+    return (ticks * tick_size).quantize(tick_size)
+
+
 class KiteInstrumentMap:
     """Resolves Yahoo-style symbols (RELIANCE.NS, ^NSEI, ...) to Kite instrument tokens."""
 
     def __init__(self, kite: KiteConnect) -> None:
         self._kite = kite
         self._by_key: dict[tuple[str, str], int] | None = None  # (exchange, tradingsymbol) -> token
+        self._tick_size_by_key: dict[tuple[str, str], Decimal] | None = None
 
     def _ensure_loaded(self) -> None:
         if self._by_key is not None:
@@ -131,6 +147,25 @@ class KiteInstrumentMap:
         self._by_key = {
             (row["exchange"], row["tradingsymbol"]): row["instrument_token"] for row in instruments
         }
+        self._tick_size_by_key = {
+            (row["exchange"], row["tradingsymbol"]): Decimal(str(row["tick_size"]))
+            for row in instruments
+        }
+
+    def tick_size(self, tradingsymbol: str, exchange: str = "NSE") -> Decimal:
+        """The exchange's real tick size for this instrument, straight from
+        Kite's own instrument dump -- ``tradingsymbol`` here is already
+        Kite's own form (no ``.NS`` suffix), matching how ``place_cash_
+        market_order``/``place_cash_bracket_gtt`` already receive it
+        (unlike ``resolve()`` above, which takes the Yahoo-style symbol)."""
+        self._ensure_loaded()
+        assert self._tick_size_by_key is not None
+        value = self._tick_size_by_key.get((exchange, tradingsymbol))
+        if value is None:
+            raise InstrumentLookupError(
+                f"No tick size found for {exchange}:{tradingsymbol}."
+            )
+        return value
 
     def validate_index_mapping(self) -> None:
         """Confirm every hardcoded index tradingsymbol actually exists in
@@ -384,6 +419,16 @@ class KiteOrderExecutor:
 
     def __init__(self, kite: KiteConnect) -> None:
         self._kite = kite
+        # Own instance, not shared with whatever KiteInstrumentMap a caller
+        # elsewhere built for symbol->token resolution -- cheap (lazy: the
+        # real instrument-dump fetch only happens on first tick_size() call,
+        # off the event loop since every caller here already runs under
+        # asyncio.to_thread), and keeps this class fully self-contained so
+        # no existing KiteOrderExecutor(kite) call site needs to change.
+        self._instrument_map = KiteInstrumentMap(kite)
+
+    def tick_size(self, tradingsymbol: str) -> Decimal:
+        return self._instrument_map.tick_size(tradingsymbol)
 
     def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
         """Places a real NFO market order, product NRML (carries positions
@@ -425,6 +470,11 @@ class KiteOrderExecutor:
             if transaction_type == self._kite.TRANSACTION_TYPE_BUY
             else reference_price * (1 - _MARKET_PROTECTION_PCT / 100)
         )
+        # 2026-08-25: was `round(protected_price, 2)` -- any 2-decimal price
+        # looks reasonable but NSE requires it to land exactly on this
+        # instrument's own tick size (0.05/0.10/...), rejecting anything
+        # else. See round_to_tick's docstring.
+        tick = self.tick_size(tradingsymbol)
         return self._kite.place_order(
             variety=self._kite.VARIETY_REGULAR,
             exchange="NSE",
@@ -433,7 +483,7 @@ class KiteOrderExecutor:
             quantity=quantity,
             order_type=self._kite.ORDER_TYPE_LIMIT,
             product=self._kite.PRODUCT_CNC,
-            price=float(round(protected_price, 2)),
+            price=float(round_to_tick(protected_price, tick)),
         )
 
     def place_cash_bracket_gtt(
