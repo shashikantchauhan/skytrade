@@ -8,7 +8,7 @@ notional / market price (not a fixed share count), a real position is
 never stacked, and a failed order still notifies without raising.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, time
 from decimal import Decimal
 
 import pytest
@@ -23,6 +23,7 @@ _PRICE = Decimal("1000")  # Rs5,000 notional / Rs1,000 price = 5 shares, clean n
 def _config(
     *, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"}),
     notional: Decimal = Decimal("5000"), max_positions: int = 8,
+    entry_cutoff_ist: time | None = None,
 ) -> AppConfig:
     return AppConfig(
         scan_interval_hours=1,
@@ -45,6 +46,12 @@ def _config(
         live_cash_trading_symbols=symbols,
         live_cash_trading_notional=notional,
         live_cash_trading_max_positions=max_positions,
+        # None (disabled) by default here -- the entry-cutoff feature is
+        # unrelated to what most of these tests exercise, and leaving it at
+        # its real default (15:15 IST) would make every test that doesn't
+        # pass `now` to execute_cash_entry flaky depending on wall-clock
+        # time. See test_entry_cutoff_* below for the dedicated coverage.
+        live_cash_entry_cutoff_ist=entry_cutoff_ist,
     )
 
 
@@ -326,3 +333,54 @@ async def test_exit_incomplete_notifies_distinctly():
 
     assert basket_id is not None
     assert any("LIVE CASH EXIT INCOMPLETE" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_noop_when_past_the_cutoff():
+    # 2026-08-25 regression: real orders placed in NSE's final ~10-15
+    # minutes either took far longer than the fill-timeout to match, or got
+    # cancelled outright by the exchange for lack of a counterparty.
+    config = _config(enabled=True, entry_cutoff_ist=time(15, 15))
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+    past_cutoff = datetime(2026, 8, 25, 9, 50, tzinfo=UTC)  # 15:20 IST
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=past_cutoff,
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_allowed_right_up_to_the_cutoff():
+    config = _config(enabled=True, entry_cutoff_ist=time(15, 15))
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+    before_cutoff = datetime(2026, 8, 25, 9, 44, tzinfo=UTC)  # 15:14 IST
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=before_cutoff,
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]
+
+
+@pytest.mark.asyncio
+async def test_entry_cutoff_disabled_when_none():
+    config = _config(enabled=True, entry_cutoff_ist=None)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+    late = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)  # 15:30 IST, market close itself
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=late,
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]

@@ -217,6 +217,17 @@ async def run_signal_pipeline(
     # is fully independent across symbols and safe to run in parallel.
     paper_account_lock = asyncio.Lock()
 
+    # Real cash entries have the exact same check-then-act shape (read the
+    # current open-position count against live_cash_trading_max_positions,
+    # decide, then place a real order and record the leg) -- 2026-08-25:
+    # without this lock, several symbols signaling BUY in the same cycle
+    # could each see the same pre-entry open count and all pass the cap
+    # check concurrently, together opening more real positions than
+    # max_positions ever intended to allow. Scoped to entries only --
+    # exits are deliberately never serialized/blocked (de-risking an
+    # already-open real position must never wait on this).
+    live_cash_lock = asyncio.Lock()
+
     # _select_provider only validates Kite once, at the start of the run --
     # the token can still go invalid partway through (observed live: a run
     # validated fine, then every symbol still queued after that point failed
@@ -301,6 +312,7 @@ async def run_signal_pipeline(
                     precomputed_futures_note=futures_notes.get(symbol),
                     gtt_repository=gtt_repository,
                     paper_benchmark_repository=paper_benchmark_repository,
+                    live_cash_lock=live_cash_lock,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -542,6 +554,7 @@ async def _process_symbol(
     precomputed_futures_note: str | None = None,
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
+    live_cash_lock: asyncio.Lock | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -660,10 +673,21 @@ async def _process_symbol(
                     symbol, config.candle_interval, trade_repository
                 )
                 if cash_eligible:
-                    await live_cash_execution.execute_cash_entry(
-                        symbol, market_price, config, order_executor, live_order_repository,
-                        notifier,
-                    )
+                    # 2026-08-25: serialize real entries -- execute_cash_entry's
+                    # own max_positions check reads the current open count and
+                    # decides in two separate steps; without a lock, several
+                    # symbols signaling BUY in the same cycle could all read
+                    # the same pre-entry count and all pass concurrently,
+                    # together opening more real positions than intended
+                    # (observed live: 8 opened against a configured cap of 8,
+                    # only safe by coincidence). Falls back to a fresh,
+                    # call-scoped lock if none was threaded through -- never
+                    # crashes, just doesn't serialize across other calls.
+                    async with (live_cash_lock or asyncio.Lock()):
+                        await live_cash_execution.execute_cash_entry(
+                            symbol, market_price, config, order_executor, live_order_repository,
+                            notifier,
+                        )
                 opened = await live_order_repository.get_open_cash_legs(symbol)
                 if opened:
                     leg = opened[0]

@@ -3,6 +3,7 @@
 import logging
 import os
 from dataclasses import dataclass
+from datetime import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -76,6 +77,14 @@ class AppConfig:
     # See infrastructure/db/live_cash_toggle.py (the dashboard toggle
     # overrides this at runtime, same as the three fields above it).
     live_cash_trading_max_positions: int = 8
+    # 2026-08-25: no new real entries once IST wall-clock time reaches this
+    # -- orders placed in NSE's final ~10-15 minutes were observed either
+    # taking far longer than the fill-timeout to match, or getting
+    # cancelled outright by the exchange for lack of a counterparty in
+    # thin closing-session liquidity. Exits are never affected -- squaring
+    # off an already-open real position must always be allowed regardless
+    # of time. None disables the cutoff entirely.
+    live_cash_entry_cutoff_ist: time | None = time(15, 15)
 
 
 def load_config() -> AppConfig:
@@ -120,6 +129,9 @@ def load_config() -> AppConfig:
         live_cash_trading_max_positions=_positive_int(
             "TRADING_SCANNER_LIVE_CASH_TRADING_MAX_POSITIONS", 8
         ),
+        live_cash_entry_cutoff_ist=_time_hhmm(
+            "TRADING_SCANNER_LIVE_CASH_ENTRY_CUTOFF_IST", time(15, 15)
+        ),
         futures_paper_symbols_file=Path(
             os.getenv(
                 "TRADING_SCANNER_FUTURES_PAPER_SYMBOLS_FILE", "config/nifty50_symbols.txt"
@@ -157,3 +169,15 @@ def _logging_level(value: str) -> int:
     if not isinstance(level, int):
         raise ValueError(f"TRADING_SCANNER_LOGGING_LEVEL is invalid: {value!r}.")
     return level
+
+
+def _time_hhmm(name: str, default: time | None) -> time | None:
+    """Parses an "HH:MM" env setting into a ``time``. Unset -> ``default``;
+    explicitly set to "" -> ``None`` (disables whatever this gates)."""
+    value = os.getenv(name)
+    if value is None:
+        return default
+    if value.strip() == "":
+        return None
+    hour, minute = value.strip().split(":")
+    return time(int(hour), int(minute))

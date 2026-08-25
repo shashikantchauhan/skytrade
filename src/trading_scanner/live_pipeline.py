@@ -150,6 +150,13 @@ class LiveTickerPipeline:
         self._ticker: KiteTicker | None = None
         self._access_token: str | None = None
         self._paper_account_lock = asyncio.Lock()
+        # 2026-08-25: real cash entries have the same check-then-act shape
+        # (read open-position count vs. live_cash_trading_max_positions,
+        # decide, place a real order) -- without this, symbols signaling
+        # BUY in the same cycle could each see the same pre-entry count and
+        # together open more real positions than max_positions ever
+        # intended. See application/signal_pipeline.py's matching lock.
+        self._live_cash_lock = asyncio.Lock()
         self._client = None
         self._repos: dict = {}
         self._notifier = None
@@ -529,6 +536,7 @@ class LiveTickerPipeline:
                         precomputed_futures_note=futures_notes.get(symbol),
                         gtt_repository=self._repos["gtt"],
                         paper_benchmark_repository=self._repos["paper_benchmark"],
+                        live_cash_lock=self._live_cash_lock,
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)

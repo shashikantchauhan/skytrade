@@ -31,6 +31,7 @@ from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.ports import Notifier
 from trading_scanner.infrastructure.db import TursoLiveOrderRepository
 from trading_scanner.infrastructure.kite import KiteOrderExecutor, to_kite_tradingsymbol
+from trading_scanner.infrastructure.kite_ticker import IST
 
 logger = logging.getLogger(__name__)
 
@@ -132,19 +133,34 @@ async def execute_cash_entry(
     order_executor: KiteOrderExecutor,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
+    now: datetime | None = None,
 ) -> str | None:
     """Real cash-equity BUY, sized from ``config.live_cash_trading_notional``
     / ``market_price`` (a fixed rupee amount per symbol, not a fixed share
     count -- a flat share count would mean wildly different real risk
     across a Rs50 stock and a Rs3,000 stock). Returns the basket_id if an
-    order was placed, None if the gate was closed, a real position for this
-    symbol is already open (refuses to stack a second one), or
+    order was placed, None if the gate was closed, it's past
+    ``live_cash_entry_cutoff_ist``, a real position for this symbol
+    is already open (refuses to stack a second one), or
     ``live_cash_trading_max_positions`` real positions are already open
     across the whole allowlist (this is what makes a wide allowlist -- e.g.
     the full symbol universe -- safe to run: breadth of what's *eligible*
-    to trade doesn't widen how much real capital can be at risk at once)."""
+    to trade doesn't widen how much real capital can be at risk at once).
+
+    ``now`` -- defaults to the real wall clock; overridable for tests. Only
+    used for the entry-cutoff check below; the rest of this function's
+    gating is unrelated to time-of-day."""
     if not _is_gated_in(symbol, config):
         return None
+    if config.live_cash_entry_cutoff_ist is not None:
+        current_ist_time = (now or datetime.now(UTC)).astimezone(IST).time()
+        if current_ist_time >= config.live_cash_entry_cutoff_ist:
+            logger.info(
+                "Live cash entry skipped for %s -- past the %s IST entry cutoff "
+                "(closing-session liquidity is unreliable for fills).",
+                symbol, config.live_cash_entry_cutoff_ist,
+            )
+            return None
     already_open = await live_order_repository.get_open_cash_legs(symbol)
     if already_open:
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
