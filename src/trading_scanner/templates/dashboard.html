@@ -7,34 +7,48 @@
 <style>
   :root {
     color-scheme: light dark;
-    --bg: #f5f6f8;
+    --bg: #f6f7f9;
     --surface: #ffffff;
-    --border: #e2e4e9;
-    --text: #14161a;
-    --muted: #6b7280;
-    --accent: #2563eb;
-    --accent-soft: #eaf0fe;
-    --green: #0f9d58;
-    --green-soft: #e6f7ee;
-    --red: #d93025;
-    --red-soft: #fdeceb;
-    --shadow: 0 1px 2px rgba(16,24,40,0.04), 0 1px 3px rgba(16,24,40,0.06);
-    --radius: 12px;
+    --surface-2: #fafbfc;
+    --border: #e5e7eb;
+    --border-strong: #d7dae0;
+    --text: #101319;
+    --muted: #667085;
+    --faint: #98a1b0;
+    --accent: #2452e8;
+    --accent-soft: #eaf0ff;
+    --green: #0a8a4a;
+    --green-soft: #e7f7ee;
+    --red: #d5372b;
+    --red-soft: #fdecea;
+    --amber: #b76e00;
+    --amber-soft: #fef3e2;
+    --shadow-sm: 0 1px 2px rgba(16,24,40,0.05);
+    --shadow-md: 0 2px 8px rgba(16,24,40,0.06), 0 1px 2px rgba(16,24,40,0.04);
+    --radius: 14px;
+    --radius-sm: 9px;
+    --font-num: "SF Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #0f1115;
-      --surface: #191b20;
-      --border: #2b2e35;
-      --text: #eceef1;
-      --muted: #9aa1ac;
-      --accent: #5b8def;
-      --accent-soft: #1c2740;
+      --bg: #0b0d11;
+      --surface: #14171d;
+      --surface-2: #191c23;
+      --border: #262a33;
+      --border-strong: #333844;
+      --text: #edeff2;
+      --muted: #9aa2b1;
+      --faint: #6b7280;
+      --accent: #6f93ff;
+      --accent-soft: #182238;
       --green: #35c07a;
-      --green-soft: #103524;
-      --red: #f0685f;
-      --red-soft: #3a1a19;
-      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 2px 6px rgba(0,0,0,0.25);
+      --green-soft: #0f2b1e;
+      --red: #f2685f;
+      --red-soft: #35191b;
+      --amber: #e0a52c;
+      --amber-soft: #332507;
+      --shadow-sm: 0 1px 2px rgba(0,0,0,0.35);
+      --shadow-md: 0 2px 10px rgba(0,0,0,0.35), 0 1px 3px rgba(0,0,0,0.3);
     }
   }
   * { box-sizing: border-box; }
@@ -42,116 +56,181 @@
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, system-ui, sans-serif;
     background: var(--bg);
     color: var(--text);
-    max-width: 1080px;
+    max-width: 1100px;
     margin: 0 auto;
-    padding: 1.5rem 1.25rem 4rem;
+    padding: 1.75rem 1.5rem 4rem;
+    -webkit-font-smoothing: antialiased;
   }
-  .topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.75rem; }
-  .topbar h1 { font-size: 1.15rem; font-weight: 650; margin: 0; letter-spacing: -0.01em; }
-  .topbar .sub { color: var(--muted); font-size: 0.8rem; margin-top: 0.15rem; }
-  h2 { font-size: 0.95rem; font-weight: 650; margin: 0 0 0.75rem 0; letter-spacing: -0.01em; }
-  section { margin-bottom: 1.75rem; }
+  .topbar {
+    display: flex; justify-content: space-between; align-items: flex-start;
+    margin-bottom: 1.75rem; gap: 1rem; flex-wrap: wrap;
+  }
+  .brand { display: flex; align-items: center; gap: 0.6rem; }
+  .brand .mark {
+    width: 30px; height: 30px; border-radius: 9px; background: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 800; font-size: 0.85rem; letter-spacing: -0.02em;
+    box-shadow: var(--shadow-sm);
+  }
+  .topbar h1 { font-size: 1.2rem; font-weight: 700; margin: 0; letter-spacing: -0.015em; line-height: 1.2; }
+  .topbar .sub { color: var(--muted); font-size: 0.78rem; margin-top: 0.1rem; }
+  .topbar-right { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
+  h2 { font-size: 0.92rem; font-weight: 650; margin: 0 0 0.8rem 0; letter-spacing: -0.01em; }
+  h2 .hint { font-weight: 400; color: var(--muted); font-size: 0.78rem; }
+  section { margin-bottom: 1.5rem; }
   .panel {
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: var(--radius);
-    padding: 1.1rem 1.2rem;
-    box-shadow: var(--shadow);
+    padding: 1.15rem 1.25rem;
+    box-shadow: var(--shadow-sm);
   }
-  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 0.7rem; }
+  .panel.danger { border-color: color-mix(in srgb, var(--red) 35%, var(--border)); }
+
+  .hero {
+    display: grid; grid-template-columns: 1.3fr repeat(3, 1fr); gap: 0.75rem;
+    margin-bottom: 0.9rem;
+  }
+  @media (max-width: 760px) { .hero { grid-template-columns: 1fr 1fr; } }
+  .hero-card {
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 1rem 1.15rem; box-shadow: var(--shadow-sm); position: relative; overflow: hidden;
+  }
+  .hero-card.primary {
+    background: linear-gradient(165deg, var(--surface) 0%, var(--accent-soft) 130%);
+    border-color: color-mix(in srgb, var(--accent) 25%, var(--border));
+  }
+  .hero-card .label { font-size: 0.74rem; color: var(--muted); font-weight: 600; margin-bottom: 0.4rem; }
+  .hero-card .value {
+    font-size: 1.55rem; font-weight: 700; letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums; line-height: 1.15;
+  }
+  .hero-card .sub-value { font-size: 0.78rem; color: var(--muted); margin-top: 0.3rem; font-variant-numeric: tabular-nums; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.65rem; }
   .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--radius);
-    padding: 0.85rem 1rem;
-    box-shadow: var(--shadow);
+    background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-sm);
+    padding: 0.8rem 0.95rem; box-shadow: var(--shadow-sm);
   }
-  .card .label { font-size: 0.72rem; color: var(--muted); margin-bottom: 0.3rem; font-weight: 500; }
-  .card .value { font-size: 1.25rem; font-weight: 650; letter-spacing: -0.01em; }
-  .green { color: var(--green); } .red { color: var(--red); }
-  .pill { display: inline-block; padding: 0.1rem 0.5rem; border-radius: 999px; font-size: 0.72rem; font-weight: 600; }
+  .card .label { font-size: 0.7rem; color: var(--muted); margin-bottom: 0.3rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; }
+  .card .value { font-size: 1.1rem; font-weight: 650; letter-spacing: -0.01em; font-variant-numeric: tabular-nums; }
+
+  .green { color: var(--green); } .red { color: var(--red); } .amber { color: var(--amber); } .muted { color: var(--muted); }
+  .pill {
+    display: inline-flex; align-items: center; gap: 0.3rem; padding: 0.15rem 0.55rem;
+    border-radius: 999px; font-size: 0.71rem; font-weight: 650; letter-spacing: 0.01em;
+  }
   .pill.green { background: var(--green-soft); color: var(--green); }
   .pill.red { background: var(--red-soft); color: var(--red); }
-  table { border-collapse: collapse; width: 100%; font-size: 0.85rem; }
+  .pill.amber { background: var(--amber-soft); color: var(--amber); }
+  .pill.neutral { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+  .pill .dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+  table { border-collapse: collapse; width: 100%; font-size: 0.84rem; }
   th {
-    text-align: left; padding: 0.5rem 0.7rem; color: var(--muted); font-weight: 600;
-    font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.03em;
-    border-bottom: 1px solid var(--border);
+    text-align: left; padding: 0.55rem 0.7rem; color: var(--muted); font-weight: 650;
+    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+    border-bottom: 1px solid var(--border); white-space: nowrap;
   }
-  td { padding: 0.55rem 0.7rem; border-bottom: 1px solid var(--border); }
-  tbody tr:hover { background: var(--accent-soft); }
+  th.num, td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--font-num); font-size: 0.8rem; }
+  td { padding: 0.6rem 0.7rem; border-bottom: 1px solid var(--border); }
+  tbody tr { transition: background 0.1s; }
+  tbody tr:hover { background: var(--surface-2); }
   tbody tr:last-child td { border-bottom: none; }
   .table-wrap { overflow-x: auto; }
+  .table-wrap table { min-width: 560px; }
+  .empty-row td { text-align: center; color: var(--muted); padding: 1.6rem 0.7rem; font-size: 0.82rem; }
+
   button {
-    padding: 0.45rem 0.95rem; border-radius: 8px; border: 1px solid var(--border);
-    cursor: pointer; background: var(--surface); color: var(--text); font-size: 0.85rem; font-weight: 550;
-    transition: background 0.15s;
+    padding: 0.5rem 1rem; border-radius: 9px; border: 1px solid var(--border-strong);
+    cursor: pointer; background: var(--surface); color: var(--text); font-size: 0.84rem; font-weight: 600;
+    transition: background 0.15s, border-color 0.15s, transform 0.05s;
   }
   button:hover { background: var(--accent-soft); border-color: var(--accent); }
+  button:active { transform: translateY(1px); }
   button.primary { background: var(--accent); color: white; border-color: var(--accent); }
-  button.primary:hover { opacity: 0.9; }
+  button.primary:hover { opacity: 0.92; background: var(--accent); }
+  button.danger { background: var(--red); color: white; border-color: var(--red); }
+  button.danger:hover { opacity: 0.9; background: var(--red); }
   input, select {
-    padding: 0.4rem 0.6rem; border-radius: 8px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--text); font-size: 0.85rem;
+    padding: 0.45rem 0.65rem; border-radius: 9px; border: 1px solid var(--border-strong);
+    background: var(--surface); color: var(--text); font-size: 0.84rem;
   }
-  input { width: 110px; }
+  input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  input { width: 120px; }
   select { min-width: 220px; }
-  label.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); font-weight: 500; }
+  label.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.72rem; color: var(--muted); font-weight: 600; }
   pre {
-    background: var(--bg); border: 1px solid var(--border); padding: 0.75rem;
-    border-radius: 10px; max-height: 300px; overflow: auto; font-size: 0.72rem; line-height: 1.5;
+    background: var(--surface-2); border: 1px solid var(--border); padding: 0.85rem;
+    border-radius: 10px; max-height: 320px; overflow: auto; font-size: 0.72rem; line-height: 1.55;
+    font-family: var(--font-num);
   }
   .row { display: flex; gap: 0.6rem; align-items: center; flex-wrap: wrap; }
   .row.between { justify-content: space-between; }
   .msg { font-size: 0.8rem; color: var(--muted); }
+  .note {
+    font-size: 0.78rem; color: var(--muted); margin-top: 0.6rem; line-height: 1.5;
+    padding-top: 0.6rem; border-top: 1px dashed var(--border);
+  }
+
   .tabnav {
-    display: flex; gap: 0.4rem; margin-bottom: 1rem; border-bottom: 1px solid var(--border);
-    flex-wrap: wrap;
+    display: flex; gap: 0.15rem; margin-bottom: 1.1rem; padding: 0.25rem;
+    background: var(--surface-2); border: 1px solid var(--border); border-radius: 11px; width: fit-content;
   }
   .tab-btn {
-    background: none; border: none; border-bottom: 2px solid transparent; color: var(--muted);
-    padding: 0.6rem 0.9rem; font-size: 0.85rem; font-weight: 600; cursor: pointer; border-radius: 0;
+    background: none; border: none; color: var(--muted); border-radius: 8px;
+    padding: 0.45rem 0.9rem; font-size: 0.82rem; font-weight: 650; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
   }
-  .tab-btn:hover { color: var(--text); background: none; }
-  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text); background: var(--surface); box-shadow: var(--shadow-sm); }
   .admin-only.viewer-hidden { display: none; }
 </style>
 </head>
 <body>
 <div class="topbar">
-  <div>
-    <h1>SkyTrade</h1>
-    <div class="sub">NSE signal scanner &amp; paper trading dashboard</div>
+  <div class="brand">
+    <div class="mark">SK</div>
+    <div>
+      <h1>SkyTrade</h1>
+      <div class="sub">Live NSE cash-equity signal &amp; execution dashboard</div>
+    </div>
   </div>
-  <button onclick="logout()">Log out</button>
+  <div class="topbar-right">
+    <span id="market-status" class="pill neutral"><span class="dot"></span>&nbsp;</span>
+    <span class="row" id="kite-status"></span>
+    <button onclick="logout()">Log out</button>
+  </div>
 </div>
 
 <section>
-  <div class="cards" id="status-cards">Loading...</div>
+  <div class="hero" id="hero-cards">Loading...</div>
 </section>
 
 <section class="admin-only">
   <div class="row">
     <button class="primary" onclick="trigger()">Run pipeline now</button>
     <span class="msg" id="trigger-msg"></span>
-    <span class="row" id="kite-status" style="margin-left: auto;"></span>
   </div>
 </section>
 
 <div class="tabnav">
   <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
-  <button class="tab-btn" data-tab="futures-paper" onclick="switchTab('futures-paper')">Futures (Nifty50)</button>
-  <button class="tab-btn" data-tab="paper-benchmark" onclick="switchTab('paper-benchmark')">Paper Benchmark</button>
-  <button class="tab-btn" data-tab="smallcap" onclick="switchTab('smallcap')">Small Cap (weekly)</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
 </div>
 
 <section class="tab-panel" data-tab="positions">
-  <h2>Live cash positions <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real Kite orders -- see Config &amp; logs to turn this on/off)</span></h2>
+  <h2>Live cash positions <span class="hint">real Kite orders -- see Config &amp; logs to turn this on/off</span></h2>
   <div class="panel table-wrap">
-    <table id="positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Current price</th><th>Unrealized P&amp;L</th><th>GTT target</th><th>GTT stop</th><th>GTT status</th></tr></thead><tbody></tbody></table>
-    <div class="sub" id="positions-empty-note" style="margin-top: 0.5rem;" hidden>No real positions open. The old paper-trading simulator's history is retired but not deleted -- ask if you want to see it.</div>
+    <table id="positions-table">
+      <thead><tr>
+        <th>Symbol</th><th>Entry time</th><th class="num">Entry</th><th class="num">Qty</th>
+        <th class="num">Current</th><th class="num">Unrealized P&amp;L</th>
+        <th class="num">Target</th><th class="num">Stop</th><th>GTT</th>
+      </tr></thead>
+      <tbody><tr class="empty-row"><td colspan="9">Loading...</td></tr></tbody>
+    </table>
   </div>
 </section>
 
@@ -165,63 +244,13 @@
     </label>
   </div>
   <div class="panel table-wrap">
-    <table id="trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
-  </div>
-</section>
-
-<section class="tab-panel" data-tab="futures-paper" hidden>
-  <h2>Nifty50 futures paper account <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real, capital-gated -- 55% own-side win rate + live Kite margin check, separate book from cash)</span></h2>
-  <div class="cards" id="futures-paper-cards"></div>
-
-  <h2 style="margin-top: 1.5rem;">Last 30 days <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(track this before deciding whether to fund it for real trading)</span></h2>
-  <div class="cards" id="futures-paper-monthly-cards"></div>
-
-  <h2 style="margin-top: 1.5rem;">Open combos</h2>
-  <div class="panel table-wrap">
-    <table id="futures-paper-open-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Lot size</th><th>Margin allocated</th><th>Current price</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
-  </div>
-
-  <h2 style="margin-top: 1.5rem;">Closed combos</h2>
-  <div class="panel table-wrap">
-    <table id="futures-paper-closed-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Margin allocated</th><th>P&amp;L</th></tr></thead><tbody></tbody></table>
-  </div>
-</section>
-
-<section class="tab-panel" data-tab="paper-benchmark" hidden>
-  <h2>Paper vs real execution <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(paper fill = decision price, no friction -- real fill = Kite's actual average_price, same symbol/qty/signal as the real trade)</span></h2>
-  <div class="cards" id="paper-benchmark-cards"></div>
-
-  <h2 style="margin-top: 1.5rem;">Open pairs</h2>
-  <div class="panel table-wrap">
-    <table id="paper-benchmark-open-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Qty</th><th>Paper entry</th><th>Real entry</th><th>Entry slippage</th></tr></thead><tbody></tbody></table>
-  </div>
-
-  <h2 style="margin-top: 1.5rem;">Closed pairs</h2>
-  <div class="panel table-wrap">
-    <table id="paper-benchmark-closed-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Exit time</th><th>Paper P&amp;L</th><th>Real P&amp;L</th><th>Entry slippage</th><th>Exit slippage</th></tr></thead><tbody></tbody></table>
-  </div>
-</section>
-
-<section class="tab-panel" data-tab="smallcap" hidden>
-  <h2>Nifty Smallcap 250 <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(weekly signals, own Rs 5L/10-slot book -- separate deployment, see skytrade-smallcap)</span></h2>
-  <div id="smallcap-not-deployed" class="panel" hidden>Not deployed yet.</div>
-  <div id="smallcap-body">
-    <div class="cards" id="smallcap-cards"></div>
-
-    <h2 style="margin-top: 1.5rem;">Open positions</h2>
-    <div class="panel table-wrap">
-      <table id="smallcap-positions-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Qty</th><th>Capital</th><th>Current price</th><th>Price diff</th><th>Unrealized P&amp;L</th></tr></thead><tbody></tbody></table>
-    </div>
-
-    <h2 style="margin-top: 1.5rem;">Open BUY signals <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(model says long, no SELL reversal yet -- may predate this fork going live, so no real position exists for some of these; see current price to judge manually)</span></h2>
-    <div class="panel table-wrap">
-      <table id="smallcap-open-signals-table"><thead><tr><th>Symbol</th><th>Entry time</th><th>Entry price</th><th>Current price</th><th>Change</th></tr></thead><tbody></tbody></table>
-    </div>
-
-    <h2 style="margin-top: 1.5rem;">Closed trades, full history (buy-only win rate: <span id="smallcap-win-rate">-</span>)</h2>
-    <div class="panel table-wrap">
-      <table id="smallcap-trades-table"><thead><tr><th>Symbol</th><th>Side</th><th>Entry time</th><th>Entry price</th><th>Exit time</th><th>Exit price</th><th>Price diff</th><th>PnL%</th></tr></thead><tbody></tbody></table>
-    </div>
+    <table id="trades-table">
+      <thead><tr>
+        <th>Symbol</th><th>Side</th><th>Entry time</th><th class="num">Entry</th>
+        <th>Exit time</th><th class="num">Exit</th><th class="num">Diff</th><th class="num">PnL%</th>
+      </tr></thead>
+      <tbody><tr class="empty-row"><td colspan="8">Loading...</td></tr></tbody>
+    </table>
   </div>
 </section>
 
@@ -235,27 +264,27 @@
     <span class="msg" id="config-msg"></span>
   </div>
 
-  <h2 style="margin-top: 1.5rem;">Go Live -- real cash trading <span style="font-weight: 400; color: var(--muted); font-size: 0.8rem;">(real Kite orders, real money -- takes effect on the next scan cycle, no restart)</span></h2>
-  <div class="panel admin-only" id="live-cash-panel">
+  <h2 style="margin-top: 1.5rem;">Go Live -- real cash trading <span class="hint">real Kite orders, real money -- takes effect on the next scan cycle, no restart</span></h2>
+  <div class="panel danger admin-only" id="live-cash-panel">
     <div class="row">
-      <span class="pill" id="live-cash-status-pill">Loading...</span>
+      <span class="pill neutral" id="live-cash-status-pill">Loading...</span>
       <span class="msg" id="live-cash-error-count"></span>
     </div>
-    <div class="row" style="margin-top: 0.75rem;">
+    <div class="row" style="margin-top: 0.85rem;">
       <label class="field" style="flex: 2;">Symbols (comma-separated)<input id="live-cash-symbols" placeholder="RELIANCE.NS,HDFCBANK.NS,ICICIBANK.NS,INFY.NS,TCS.NS" /></label>
       <label class="field">Rs per symbol<input id="live-cash-notional" placeholder="5000" /></label>
       <label class="field">Max concurrent positions<input id="live-cash-max-positions" placeholder="8" /></label>
     </div>
-    <div class="row" style="margin-top: 0.5rem;">
+    <div class="row" style="margin-top: 0.6rem;">
       <button onclick="useFullUniverse()">Use full symbol universe</button>
-      <span class="sub" id="live-cash-universe-count"></span>
+      <span class="msg" id="live-cash-universe-count"></span>
     </div>
-    <div class="row" style="margin-top: 0.75rem;">
+    <div class="row" style="margin-top: 0.85rem;">
       <button class="primary" onclick="setLiveCashTrading(true)">Go Live</button>
-      <button onclick="setLiveCashTrading(false)">Stop -- go flat gate</button>
+      <button class="danger" onclick="setLiveCashTrading(false)">Stop -- go flat gate</button>
       <span class="msg" id="live-cash-msg"></span>
     </div>
-    <div class="sub" style="margin-top: 0.5rem;">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded.</div>
+    <div class="note">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded.</div>
   </div>
 
   <h2 style="margin-top: 1.5rem;">Recent logs</h2>
@@ -293,40 +322,74 @@ function fmtTime(iso) {
   });
 }
 
+// Pure client-side NSE session clock (9:15-15:30 IST, Mon-Fri) -- no
+// backend call needed, just a quick "is it worth watching right now" cue
+// next to the logout button.
+function updateMarketStatus() {
+  const now = new Date();
+  const ist = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Kolkata"}));
+  const day = ist.getDay();
+  const minutes = ist.getHours() * 60 + ist.getMinutes();
+  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < 15 * 60 + 30;
+  const el = document.getElementById("market-status");
+  el.className = "pill " + (open ? "green" : "neutral");
+  el.innerHTML = `<span class="dot"></span>Market ${open ? "open" : "closed"}`;
+}
+updateMarketStatus();
+setInterval(updateMarketStatus, 30000);
+
 async function loadStatus() {
   const s = await api("/api/status");
   const pnlClass = s.pnl_since_start >= 0 ? "green" : "red";
   const haveMtm = s.total_equity_mtm !== null && s.total_equity_mtm !== undefined;
-  const mtmClass = haveMtm && s.pnl_since_start_mtm >= 0 ? "green" : "red";
-  const mtmCard = haveMtm
-    ? `<div class="card"><div class="label">P&L (live, mark-to-market)</div><div class="value ${mtmClass}">₹${fmt(s.pnl_since_start_mtm)} (${fmt(s.pnl_since_start_mtm_pct)}%)</div></div>
-       <div class="card"><div class="label">Unrealized P&L (open positions)</div><div class="value ${s.unrealized_pnl >= 0 ? "green" : "red"}">₹${fmt(s.unrealized_pnl)}</div></div>`
-    : "";
-  document.getElementById("status-cards").innerHTML = `
-    <div class="card"><div class="label">Cash balance</div><div class="value">₹${fmt(s.cash_balance)}</div></div>
-    <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(s.total_equity)}</div></div>
-    <div class="card"><div class="label">P&L since start (at cost)</div><div class="value ${pnlClass}">₹${fmt(s.pnl_since_start)} (${fmt(s.pnl_since_start_pct)}%)</div></div>
-    ${mtmCard}
-    <div class="card"><div class="label">Open positions</div><div class="value">${s.open_position_count} / ${s.target_slots}</div></div>
-    <div class="card"><div class="label">Current slot size</div><div class="value">₹${fmt(s.current_slot_size)}</div></div>
-    <div class="card"><div class="label">Last run</div><div class="value" style="font-size:0.85rem">${s.last_run ? s.last_run.status : "unknown"}</div></div>
+  const heroPnl = haveMtm
+    ? {value: s.pnl_since_start_mtm, pct: s.pnl_since_start_mtm_pct, label: "P&L (live, mark-to-market)"}
+    : {value: s.pnl_since_start, pct: s.pnl_since_start_pct, label: "P&L since start (at cost)"};
+  const heroCls = heroPnl.value >= 0 ? "green" : "red";
+  document.getElementById("hero-cards").innerHTML = `
+    <div class="hero-card primary">
+      <div class="label">${heroPnl.label}</div>
+      <div class="value ${heroCls}">₹${fmt(heroPnl.value)}</div>
+      <div class="sub-value ${heroCls}">${fmt(heroPnl.pct)}%</div>
+    </div>
+    <div class="hero-card">
+      <div class="label">Cash balance</div>
+      <div class="value">₹${fmt(s.cash_balance)}</div>
+      <div class="sub-value">of ₹${fmt(s.total_equity)} total equity</div>
+    </div>
+    <div class="hero-card">
+      <div class="label">Open positions</div>
+      <div class="value">${s.open_position_count} <span class="muted" style="font-size:0.95rem;">/ ${s.target_slots}</span></div>
+      <div class="sub-value">₹${fmt(s.current_slot_size)} per slot</div>
+    </div>
+    <div class="hero-card">
+      <div class="label">Unrealized P&amp;L</div>
+      <div class="value ${(s.unrealized_pnl || 0) >= 0 ? "green" : "red"}">${s.unrealized_pnl === null || s.unrealized_pnl === undefined ? "-" : "₹" + fmt(s.unrealized_pnl)}</div>
+      <div class="sub-value">last run: ${s.last_run ? s.last_run.status : "unknown"}</div>
+    </div>
   `;
 }
 
 async function loadPositions() {
   const rows = await api("/api/live-cash-positions");
-  document.getElementById("positions-empty-note").hidden = rows.length > 0;
   document.querySelector("#positions-table tbody").innerHTML = rows.map(p => {
     const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
     const cls = known && p.unrealized_pnl >= 0 ? "green" : "red";
     const pnlCell = known
-      ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
-      : `<td>-</td>`;
+      ? `<td class="num ${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
+      : `<td class="num">-</td>`;
     const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
     const targetCell = p.target_price !== null ? `₹${fmt(p.target_price)}` : "-";
     const stopCell = p.stop_price !== null ? `₹${fmt(p.stop_price)}` : "-";
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>${priceCell}</td>${pnlCell}<td>${targetCell}</td><td>${stopCell}</td><td>${p.gtt_status || "-"}</td></tr>`;
-  }).join("") || "<tr><td colspan=9>No real positions open</td></tr>";
+    const gttCls = p.gtt_status === "active" || p.gtt_status === "extended" ? "green" : "amber";
+    const gttCell = p.gtt_status ? `<span class="pill ${gttCls}">${p.gtt_status}</span>` : `<span class="pill red">none</span>`;
+    return `<tr>
+      <td><strong>${p.symbol}</strong></td><td>${fmtTime(p.entry_timestamp)}</td>
+      <td class="num">₹${fmt(p.entry_price)}</td><td class="num">${p.quantity}</td>
+      <td class="num">${priceCell}</td>${pnlCell}
+      <td class="num">${targetCell}</td><td class="num">${stopCell}</td><td>${gttCell}</td>
+    </tr>`;
+  }).join("") || `<tr class="empty-row"><td colspan="9">No real positions open right now.</td></tr>`;
 }
 
 let symbolsLoaded = false;
@@ -357,8 +420,13 @@ async function loadTrades() {
     // BUY profits when price rises (exit - entry), SELL profits when price
     // falls (entry - exit) -- same convention as domain.models.Trade.
     const diff = r.side === "buy" ? r.exit_price - r.entry_price : r.entry_price - r.exit_price;
-    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>₹${fmt(r.entry_price)}</td><td>${fmtTime(r.exit_timestamp)}</td><td>₹${fmt(r.exit_price)}</td><td>₹${fmt(diff)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
-  }).join("") || "<tr><td colspan=8>No closed trades yet</td></tr>";
+    return `<tr>
+      <td><strong>${r.symbol}</strong></td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td>
+      <td>${fmtTime(r.entry_timestamp)}</td><td class="num">₹${fmt(r.entry_price)}</td>
+      <td>${fmtTime(r.exit_timestamp)}</td><td class="num">₹${fmt(r.exit_price)}</td>
+      <td class="num">₹${fmt(diff)}</td><td class="num"><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td>
+    </tr>`;
+  }).join("") || `<tr class="empty-row"><td colspan="8">No closed trades yet.</td></tr>`;
 }
 
 async function loadConfig() {
@@ -389,8 +457,8 @@ async function loadLiveCashTrading() {
   const s = await api("/api/live-cash-trading");
   _liveCashUniverse = s.universe_symbols || [];
   const pill = document.getElementById("live-cash-status-pill");
-  pill.textContent = s.enabled ? "LIVE" : "OFF";
-  pill.className = "pill " + (s.enabled ? "green" : "red");
+  pill.innerHTML = `<span class="dot"></span>${s.enabled ? "LIVE" : "OFF"}`;
+  pill.className = "pill " + (s.enabled ? "green" : "neutral");
   // Don't stomp what the admin is actively typing.
   const symbolsEl = document.getElementById("live-cash-symbols");
   const notionalEl = document.getElementById("live-cash-notional");
@@ -398,7 +466,7 @@ async function loadLiveCashTrading() {
   if (document.activeElement !== symbolsEl) symbolsEl.value = s.symbols.join(",");
   if (document.activeElement !== notionalEl) notionalEl.value = s.notional;
   if (document.activeElement !== maxPosEl) maxPosEl.value = s.max_positions;
-  const errCls = s.todays_error_count > 0 ? "red" : "";
+  const errCls = s.todays_error_count > 0 ? "red" : "muted";
   document.getElementById("live-cash-error-count").innerHTML =
     `<span class="${errCls}">Today's errors: ${s.todays_error_count}</span>`;
   document.getElementById("live-cash-universe-count").textContent =
@@ -440,8 +508,7 @@ async function setLiveCashTrading(enable) {
 async function trigger() {
   document.getElementById("trigger-msg").textContent = "Triggering...";
   await api("/api/trigger", {method: "POST"});
-  const msg = "Triggered - check logs below in a few minutes.";
-  document.getElementById("trigger-msg").textContent = msg;
+  document.getElementById("trigger-msg").textContent = "Triggered - check logs below in a few minutes.";
 }
 
 async function loadLogs() {
@@ -456,119 +523,10 @@ async function loadKiteStatus() {
   if (k.logged_in) {
     // obtained_at is already IST (Kite's own login_time), not UTC -- do not
     // run it through fmtTime()'s UTC->IST conversion, that would shift it.
-    el.innerHTML = `<span class="pill green">Kite: logged in (${k.obtained_at})</span> <button onclick="window.location.href='/kite/login'">Re-login</button>`;
+    el.innerHTML = `<span class="pill green"><span class="dot"></span>Kite: ${k.obtained_at}</span> <button onclick="window.location.href='/kite/login'">Re-login</button>`;
   } else {
-    el.innerHTML = `<span class="pill red">Kite: not logged in (using Yahoo)</span> <button class="primary" onclick="window.location.href='/kite/login'">Login to Kite</button>`;
+    el.innerHTML = `<span class="pill red"><span class="dot"></span>Kite: logged out</span> <button class="primary" onclick="window.location.href='/kite/login'">Login</button>`;
   }
-}
-
-async function loadFuturesPaper() {
-  const f = await api("/api/futures-paper");
-  const pnlClass = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
-  document.getElementById("futures-paper-cards").innerHTML = `
-    <div class="card"><div class="label">Cash balance (margin pool)</div><div class="value">₹${fmt(f.cash_balance)}</div></div>
-    <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(f.total_equity)}</div></div>
-    <div class="card"><div class="label">Open combos</div><div class="value">${f.open_positions.length}</div></div>
-  `;
-  const m = f.monthly_summary;
-  const mPnlClass = pnlClass(m.total_pnl);
-  const winRateCell = m.win_rate_pct === null ? "-" : `${fmt(m.win_rate_pct)}% (${m.wins}W / ${m.losses}L)`;
-  document.getElementById("futures-paper-monthly-cards").innerHTML = `
-    <div class="card"><div class="label">Trades opened</div><div class="value">${m.trades_opened}</div></div>
-    <div class="card"><div class="label">Trades closed</div><div class="value">${m.trades_closed}</div></div>
-    <div class="card"><div class="label">Still open (within window)</div><div class="value">${m.trades_still_open}</div></div>
-    <div class="card"><div class="label">Win rate</div><div class="value">${winRateCell}</div></div>
-    <div class="card"><div class="label">Total P&amp;L (closed)</div><div class="value ${mPnlClass}">₹${fmt(m.total_pnl)}</div></div>
-    <div class="card"><div class="label">Avg margin/trade</div><div class="value">${m.avg_margin_per_trade === null ? "-" : "₹" + fmt(m.avg_margin_per_trade)}</div></div>
-  `;
-  document.querySelector("#futures-paper-open-table tbody").innerHTML = f.open_positions.map(p => {
-    const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
-    const cls = pnlClass(p.unrealized_pnl);
-    const pnlCell = known
-      ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
-      : `<td>-</td>`;
-    const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    const sideCls = p.side === "long" ? "green" : "red";
-    return `<tr><td>${p.symbol}</td><td><span class="pill ${sideCls}">${p.side.toUpperCase()}</span></td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.futures_entry_price)}</td><td>${p.lot_size}</td><td>₹${fmt(p.margin_allocated)}</td><td>${priceCell}</td>${pnlCell}</tr>`;
-  }).join("") || "<tr><td colspan=8>No open combos</td></tr>";
-  document.querySelector("#futures-paper-closed-table tbody").innerHTML = f.recent_closed.map(p => {
-    const cls = pnlClass(p.pnl_amount);
-    const sideCls = p.side === "long" ? "green" : "red";
-    return `<tr><td>${p.symbol}</td><td><span class="pill ${sideCls}">${p.side.toUpperCase()}</span></td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.futures_entry_price)}</td><td>${fmtTime(p.exit_timestamp)}</td><td>₹${fmt(p.futures_exit_price)}</td><td>₹${fmt(p.margin_allocated)}</td><td class="${cls}">₹${fmt(p.pnl_amount)}</td></tr>`;
-  }).join("") || "<tr><td colspan=8>No closed combos yet</td></tr>";
-}
-
-async function loadPaperBenchmark() {
-  const b = await api("/api/paper-benchmark");
-  const pnlClass = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
-  const s = b.summary;
-  document.getElementById("paper-benchmark-cards").innerHTML = `
-    <div class="card"><div class="label">Closed pairs</div><div class="value">${s.count}</div></div>
-    <div class="card"><div class="label">Avg entry slippage</div><div class="value">${s.avg_entry_slippage_pct === null ? "-" : fmt(s.avg_entry_slippage_pct) + "%"}</div></div>
-    <div class="card"><div class="label">Avg exit slippage</div><div class="value">${s.avg_exit_slippage_pct === null ? "-" : fmt(s.avg_exit_slippage_pct) + "%"}</div></div>
-    <div class="card"><div class="label">Total paper P&amp;L</div><div class="value ${pnlClass(s.total_paper_pnl)}">${s.total_paper_pnl === null ? "-" : "₹" + fmt(s.total_paper_pnl)}</div></div>
-    <div class="card"><div class="label">Total real P&amp;L</div><div class="value ${pnlClass(s.total_real_pnl)}">${s.total_real_pnl === null ? "-" : "₹" + fmt(s.total_real_pnl)}</div></div>
-  `;
-  document.querySelector("#paper-benchmark-open-table tbody").innerHTML = b.open_positions.map(p => {
-    const slip = (p.real_entry_price - p.paper_entry_price) / p.paper_entry_price * 100;
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${p.quantity}</td><td>₹${fmt(p.paper_entry_price)}</td><td>₹${fmt(p.real_entry_price)}</td><td>${fmt(slip)}%</td></tr>`;
-  }).join("") || "<tr><td colspan=6>No open pairs</td></tr>";
-  document.querySelector("#paper-benchmark-closed-table tbody").innerHTML = b.recent_closed.map(p => {
-    const entrySlip = (p.real_entry_price - p.paper_entry_price) / p.paper_entry_price * 100;
-    const exitSlip = p.paper_exit_price !== null && p.paper_exit_price !== undefined
-      ? (p.real_exit_price - p.paper_exit_price) / p.paper_exit_price * 100
-      : null;
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>${fmtTime(p.exit_timestamp)}</td><td class="${pnlClass(p.paper_pnl_amount)}">₹${fmt(p.paper_pnl_amount)}</td><td class="${pnlClass(p.real_pnl_amount)}">₹${fmt(p.real_pnl_amount)}</td><td>${fmt(entrySlip)}%</td><td>${exitSlip === null ? "-" : fmt(exitSlip) + "%"}</td></tr>`;
-  }).join("") || "<tr><td colspan=7>No closed pairs yet</td></tr>";
-}
-
-async function loadSmallcap() {
-  const s = await api("/api/smallcap-status");
-  if (!s.deployed) {
-    document.getElementById("smallcap-not-deployed").hidden = false;
-    document.getElementById("smallcap-body").hidden = true;
-    return;
-  }
-  document.getElementById("smallcap-not-deployed").hidden = true;
-  document.getElementById("smallcap-body").hidden = false;
-  const pnlClass = s.pnl_since_start >= 0 ? "green" : "red";
-  document.getElementById("smallcap-cards").innerHTML = `
-    <div class="card"><div class="label">Cash balance</div><div class="value">₹${fmt(s.cash_balance)}</div></div>
-    <div class="card"><div class="label">Total equity (at cost)</div><div class="value">₹${fmt(s.total_equity)}</div></div>
-    <div class="card"><div class="label">P&L since start</div><div class="value ${pnlClass}">₹${fmt(s.pnl_since_start)} (${fmt(s.pnl_since_start_pct)}%)</div></div>
-    <div class="card"><div class="label">Open positions</div><div class="value">${s.open_position_count} / ${s.target_slots}</div></div>
-    <div class="card"><div class="label">Current slot size</div><div class="value">₹${fmt(s.current_slot_size)}</div></div>
-  `;
-
-  const rows = await api("/api/smallcap-positions");
-  document.querySelector("#smallcap-positions-table tbody").innerHTML = rows.map(p => {
-    const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
-    const cls = known && p.unrealized_pnl >= 0 ? "green" : "red";
-    const pnlCell = known
-      ? `<td class="${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
-      : `<td>-</td>`;
-    const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    const diffCell = known ? `₹${fmt(p.current_price - p.entry_price)}` : "-";
-    return `<tr><td>${p.symbol}</td><td>${fmtTime(p.entry_timestamp)}</td><td>₹${fmt(p.entry_price)}</td><td>${p.quantity}</td><td>₹${fmt(p.capital_allocated)}</td><td>${priceCell}</td><td>${diffCell}</td>${pnlCell}</tr>`;
-  }).join("") || "<tr><td colspan=8>No open positions</td></tr>";
-
-  const t = await api("/api/smallcap-trades");
-  document.getElementById("smallcap-win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
-  document.querySelector("#smallcap-trades-table tbody").innerHTML = t.recent.map(r => {
-    const cls = r.pnl_percent >= 0 ? "green" : "red";
-    const sideCls = r.side === "buy" ? "green" : "red";
-    const diff = r.side === "buy" ? r.exit_price - r.entry_price : r.entry_price - r.exit_price;
-    return `<tr><td>${r.symbol}</td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td><td>${fmtTime(r.entry_timestamp)}</td><td>₹${fmt(r.entry_price)}</td><td>${fmtTime(r.exit_timestamp)}</td><td>₹${fmt(r.exit_price)}</td><td>₹${fmt(diff)}</td><td><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td></tr>`;
-  }).join("") || "<tr><td colspan=8>No closed trades yet</td></tr>";
-
-  const openSignals = await api("/api/smallcap-open-signals");
-  document.querySelector("#smallcap-open-signals-table tbody").innerHTML = openSignals.map(s => {
-    const known = s.current_price !== null && s.current_price !== undefined;
-    const cls = known && s.price_change_pct >= 0 ? "green" : "red";
-    const priceCell = known ? `₹${fmt(s.current_price)}` : "-";
-    const changeCell = known ? `<td class="${cls}">${fmt(s.price_change_pct)}%</td>` : `<td>-</td>`;
-    return `<tr><td>${s.symbol}</td><td>${fmtTime(s.entry_timestamp)}</td><td>₹${fmt(s.entry_price)}</td><td>${priceCell}</td>${changeCell}</tr>`;
-  }).join("") || "<tr><td colspan=5>No open BUY signals</td></tr>";
 }
 
 let myRole = null;
@@ -588,7 +546,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadFuturesPaper(), loadPaperBenchmark(), loadSmallcap()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
   }
