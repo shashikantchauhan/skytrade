@@ -340,32 +340,36 @@ setInterval(updateMarketStatus, 30000);
 
 async function loadStatus() {
   const s = await api("/api/status");
-  const pnlClass = s.pnl_since_start >= 0 ? "green" : "red";
-  const haveMtm = s.total_equity_mtm !== null && s.total_equity_mtm !== undefined;
-  const heroPnl = haveMtm
-    ? {value: s.pnl_since_start_mtm, pct: s.pnl_since_start_mtm_pct, label: "P&L (live, mark-to-market)"}
-    : {value: s.pnl_since_start, pct: s.pnl_since_start_pct, label: "P&L since start (at cost)"};
-  const heroCls = heroPnl.value >= 0 ? "green" : "red";
+  if (!s.kite_connected) {
+    document.getElementById("hero-cards").innerHTML = `
+      <div class="hero-card" style="grid-column: 1 / -1;">
+        <div class="label">Real-money summary unavailable</div>
+        <div class="value" style="font-size: 1rem; font-weight: 600;">Kite isn't connected right now -- log in under Config &amp; logs to see live P&amp;L, positions, and available cash.</div>
+      </div>
+    `;
+    return;
+  }
+  const pnlCls = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
   document.getElementById("hero-cards").innerHTML = `
     <div class="hero-card primary">
-      <div class="label">${heroPnl.label}</div>
-      <div class="value ${heroCls}">₹${fmt(heroPnl.value)}</div>
-      <div class="sub-value ${heroCls}">${fmt(heroPnl.pct)}%</div>
-    </div>
-    <div class="hero-card">
-      <div class="label">Cash balance</div>
-      <div class="value">₹${fmt(s.cash_balance)}</div>
-      <div class="sub-value">of ₹${fmt(s.total_equity)} total equity</div>
-    </div>
-    <div class="hero-card">
-      <div class="label">Open positions</div>
-      <div class="value">${s.open_position_count} <span class="muted" style="font-size:0.95rem;">/ ${s.target_slots}</span></div>
-      <div class="sub-value">₹${fmt(s.current_slot_size)} per slot</div>
+      <div class="label">Today's P&amp;L</div>
+      <div class="value ${pnlCls(s.today_pnl)}">₹${fmt(s.today_pnl)}</div>
+      <div class="sub-value">realized + unrealized, real CNC trades</div>
     </div>
     <div class="hero-card">
       <div class="label">Unrealized P&amp;L</div>
-      <div class="value ${(s.unrealized_pnl || 0) >= 0 ? "green" : "red"}">${s.unrealized_pnl === null || s.unrealized_pnl === undefined ? "-" : "₹" + fmt(s.unrealized_pnl)}</div>
+      <div class="value ${pnlCls(s.unrealized_pnl)}">₹${fmt(s.unrealized_pnl)}</div>
+      <div class="sub-value">mark-to-market, open positions</div>
+    </div>
+    <div class="hero-card">
+      <div class="label">Open positions</div>
+      <div class="value">${s.open_position_count}</div>
       <div class="sub-value">last run: ${s.last_run ? s.last_run.status : "unknown"}</div>
+    </div>
+    <div class="hero-card">
+      <div class="label">Available cash</div>
+      <div class="value">₹${fmt(s.available_cash)}</div>
+      <div class="sub-value">live Kite margin balance</div>
     </div>
   `;
 }

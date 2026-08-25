@@ -324,61 +324,66 @@ async def kite_status(_: None = Depends(_require_admin)) -> JSONResponse:
 
 @app.get("/api/status")
 async def status(_: None = Depends(_require_session)) -> JSONResponse:
+    """Real-money summary, straight from Kite -- not this app's own
+    bookkeeping. 2026-08-25: this used to read the old, retired paper-
+    trading account (paper_account/paper_positions), which meant every
+    number here -- cash balance, open count, P&L, everything -- was stale
+    simulator data with no relationship to real cash trading at all.
+
+    Deliberately has no "P&L since start" figure: Kite's positions API
+    only reflects today's activity plus currently-held positions (a fully
+    closed position drops out entirely the next trading day), so there's
+    no clean multi-day cumulative number to pull from the broker directly.
+    Reconstructing one from this app's own live_order_legs ledger would
+    undercount -- a GTT bracket that closes a position directly on the
+    exchange never creates a matching closing leg here, only a strategy
+    exit does (see application/gtt_bracket.py's reconciliation, which only
+    notices after the fact). ``today_pnl``/``unrealized_pnl`` avoid both
+    problems: always exactly what Kite itself would show you right now.
+    """
     client, config = _client()
     try:
-        repository = TursoPaperAccountRepository(client, paper_trading.INITIAL_CAPITAL)
-        cash_balance = await repository.get_cash_balance()
-        open_positions = await repository.get_open_positions()
-        total_equity = cash_balance + sum(
-            (p.capital_allocated for p in open_positions), start=Decimal("0")
-        )
-        position_size = max(total_equity / paper_trading.TARGET_SLOTS, paper_trading.MIN_POSITION_SIZE)
+        if not config.kite_api_key:
+            return JSONResponse({"kite_connected": False, "last_run": _last_run_summary()})
+        repository = TursoKiteSessionRepository(client)
+        await repository.ensure_schema()
+        token_row = await repository.get_token()
+        if token_row is None:
+            return JSONResponse({"kite_connected": False, "last_run": _last_run_summary()})
+        access_token, _obtained_at = token_row
+        kite = KiteConnect(api_key=config.kite_api_key)
+        kite.set_access_token(access_token)
 
-        last_prices = await _last_prices(list(open_positions), client, config)
-        unrealized_total = sum(
-            (
-                (Decimal(str(last_prices[p.symbol])) - p.entry_price) * p.quantity
-                for p in open_positions
-                if p.symbol in last_prices
-            ),
-            start=Decimal("0"),
-        )
-        priced_count = sum(1 for p in open_positions if p.symbol in last_prices)
-        total_equity_mtm = total_equity + unrealized_total
+        def _fetch() -> tuple[dict, dict]:
+            return kite.margins(), kite.positions()
+
+        try:
+            margins, positions = await asyncio.to_thread(_fetch)
+        except Exception:
+            # Stale/invalid token, network hiccup, etc. -- same "just show
+            # not-connected" fallback as no session at all, never a 500.
+            return JSONResponse({"kite_connected": False, "last_run": _last_run_summary()})
+
+        # Scoped to CNC (delivery) -- what live_cash_execution.py always
+        # trades -- so nothing else ever placed on this same Kite account
+        # (manually, or by another product) skews these numbers.
+        net_cnc = [p for p in positions.get("net", []) if p.get("product") == "CNC"]
+        open_cnc = [p for p in net_cnc if p.get("quantity", 0) != 0]
+        day_cnc = [p for p in positions.get("day", []) if p.get("product") == "CNC"]
+
+        available_cash = margins.get("equity", {}).get("available", {}).get("live_balance")
+        unrealized_pnl = sum(Decimal(str(p.get("unrealised", 0))) for p in open_cnc)
+        today_pnl = sum(Decimal(str(p.get("pnl", 0))) for p in day_cnc)
 
         return JSONResponse(
             {
-                "cash_balance": _decimal(cash_balance),
-                "total_equity": _decimal(total_equity),
-                "open_position_count": len(open_positions),
-                "target_slots": paper_trading.TARGET_SLOTS,
-                "current_slot_size": _decimal(position_size),
-                "pnl_since_start": _decimal(total_equity - paper_trading.INITIAL_CAPITAL),
-                "pnl_since_start_pct": _decimal(
-                    (total_equity - paper_trading.INITIAL_CAPITAL)
-                    / paper_trading.INITIAL_CAPITAL
-                    * 100
-                ),
-                # Mark-to-market: total_equity above only reflects capital
-                # committed at entry, not what open positions are worth right
-                # now. unrealized_pnl is None if no live price could be
-                # fetched for any open symbol (market closed, Yahoo hiccup).
-                "unrealized_pnl": _decimal(unrealized_total) if priced_count else None,
-                "total_equity_mtm": _decimal(total_equity_mtm) if priced_count else None,
-                "pnl_since_start_mtm": (
-                    _decimal(total_equity_mtm - paper_trading.INITIAL_CAPITAL)
-                    if priced_count
-                    else None
-                ),
-                "pnl_since_start_mtm_pct": (
-                    _decimal(
-                        (total_equity_mtm - paper_trading.INITIAL_CAPITAL)
-                        / paper_trading.INITIAL_CAPITAL
-                        * 100
-                    )
-                    if priced_count
-                    else None
-                ),
+                "kite_connected": True,
+                "available_cash": _decimal(Decimal(str(available_cash)))
+                if available_cash is not None
+                else None,
+                "open_position_count": len(open_cnc),
+                "unrealized_pnl": _decimal(unrealized_pnl),
+                "today_pnl": _decimal(today_pnl),
                 "last_run": _last_run_summary(),
             }
         )
