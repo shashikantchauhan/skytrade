@@ -322,6 +322,52 @@ async def kite_status(_: None = Depends(_require_admin)) -> JSONResponse:
     return JSONResponse({"configured": True, "logged_in": True, "obtained_at": token_row[1]})
 
 
+def _merge_real_cash_summary(positions: dict, holdings: list[dict]) -> dict:
+    """Combine same-day CNC entries with prior-day CNC holdings into one
+    real, currently-held-position summary.
+
+    Kite splits a CNC (delivery) position's visible lifetime across two
+    separate endpoints: the day it's bought, it's in
+    ``positions()['net']`` with a nonzero ``quantity``; every day after
+    that it nets to 0 there and shows up in ``holdings()`` instead, as
+    ``quantity`` (fully settled) or ``t1_quantity`` (bought yesterday,
+    settling) -- either way, real shares actually owned. Reading only one
+    endpoint makes a real, currently-open position disappear the moment it
+    survives past its entry day. Scoped to CNC everywhere, matching what
+    ``live_cash_execution.py`` always trades, so nothing else on this Kite
+    account (manual trades, another product) skews these numbers.
+    """
+    net_cnc = [p for p in positions.get("net", []) if p.get("product") == "CNC"]
+    open_today = [p for p in net_cnc if p.get("quantity", 0) != 0]
+    day_cnc = [p for p in positions.get("day", []) if p.get("product") == "CNC"]
+
+    open_holdings = []
+    for holding in holdings:
+        if holding.get("product") != "CNC":
+            continue
+        total_qty = holding.get("quantity", 0) + holding.get("t1_quantity", 0)
+        if total_qty != 0:
+            open_holdings.append(holding)
+
+    unrealized_pnl = sum(Decimal(str(p.get("unrealised", 0))) for p in open_today) + sum(
+        Decimal(str(h.get("pnl", 0))) for h in open_holdings
+    )
+    # Today's P&L: same-day entries contribute their whole P&L (all of it
+    # happened today); a prior-day holding contributes only today's price
+    # move -- day_change is Kite's per-share rupee move since yesterday's
+    # close, so it needs multiplying by the shares actually held.
+    today_pnl = sum(Decimal(str(p.get("pnl", 0))) for p in day_cnc) + sum(
+        Decimal(str(h.get("day_change", 0)))
+        * Decimal(str(h.get("quantity", 0) + h.get("t1_quantity", 0)))
+        for h in open_holdings
+    )
+    return {
+        "open_position_count": len(open_today) + len(open_holdings),
+        "unrealized_pnl": unrealized_pnl,
+        "today_pnl": today_pnl,
+    }
+
+
 @app.get("/api/status")
 async def status(_: None = Depends(_require_session)) -> JSONResponse:
     """Real-money summary, straight from Kite -- not this app's own
@@ -330,10 +376,19 @@ async def status(_: None = Depends(_require_session)) -> JSONResponse:
     number here -- cash balance, open count, P&L, everything -- was stale
     simulator data with no relationship to real cash trading at all.
 
-    Deliberately has no "P&L since start" figure: Kite's positions API
-    only reflects today's activity plus currently-held positions (a fully
-    closed position drops out entirely the next trading day), so there's
-    no clean multi-day cumulative number to pull from the broker directly.
+    2026-08-26: reading only ``kite.positions()`` (as this endpoint did the
+    day before) is itself incomplete -- Kite only keeps a CNC position in
+    ``positions()['net']`` on the day it was bought. The very next trading
+    day it settles out of ``positions()`` entirely (nets to 0 there) and
+    moves into ``kite.holdings()`` instead. A position bought yesterday and
+    still open today is therefore real, still open, still at risk -- but
+    invisible to this endpoint unless holdings are read too. See
+    ``_merge_real_cash_summary`` for the actual merge.
+
+    Deliberately has no "P&L since start" figure: Kite's own APIs only
+    reflect today's activity plus currently-held positions (a fully closed
+    position drops out entirely the next trading day), so there's no clean
+    multi-day cumulative number to pull from the broker directly.
     Reconstructing one from this app's own live_order_legs ledger would
     undercount -- a GTT bracket that closes a position directly on the
     exchange never creates a matching closing leg here, only a strategy
@@ -354,26 +409,18 @@ async def status(_: None = Depends(_require_session)) -> JSONResponse:
         kite = KiteConnect(api_key=config.kite_api_key)
         kite.set_access_token(access_token)
 
-        def _fetch() -> tuple[dict, dict]:
-            return kite.margins(), kite.positions()
+        def _fetch() -> tuple[dict, dict, list]:
+            return kite.margins(), kite.positions(), kite.holdings()
 
         try:
-            margins, positions = await asyncio.to_thread(_fetch)
+            margins, positions, holdings = await asyncio.to_thread(_fetch)
         except Exception:
             # Stale/invalid token, network hiccup, etc. -- same "just show
             # not-connected" fallback as no session at all, never a 500.
             return JSONResponse({"kite_connected": False, "last_run": _last_run_summary()})
 
-        # Scoped to CNC (delivery) -- what live_cash_execution.py always
-        # trades -- so nothing else ever placed on this same Kite account
-        # (manually, or by another product) skews these numbers.
-        net_cnc = [p for p in positions.get("net", []) if p.get("product") == "CNC"]
-        open_cnc = [p for p in net_cnc if p.get("quantity", 0) != 0]
-        day_cnc = [p for p in positions.get("day", []) if p.get("product") == "CNC"]
-
+        summary = _merge_real_cash_summary(positions, holdings)
         available_cash = margins.get("equity", {}).get("available", {}).get("live_balance")
-        unrealized_pnl = sum(Decimal(str(p.get("unrealised", 0))) for p in open_cnc)
-        today_pnl = sum(Decimal(str(p.get("pnl", 0))) for p in day_cnc)
 
         return JSONResponse(
             {
@@ -381,9 +428,9 @@ async def status(_: None = Depends(_require_session)) -> JSONResponse:
                 "available_cash": _decimal(Decimal(str(available_cash)))
                 if available_cash is not None
                 else None,
-                "open_position_count": len(open_cnc),
-                "unrealized_pnl": _decimal(unrealized_pnl),
-                "today_pnl": _decimal(today_pnl),
+                "open_position_count": summary["open_position_count"],
+                "unrealized_pnl": _decimal(summary["unrealized_pnl"]),
+                "today_pnl": _decimal(summary["today_pnl"]),
                 "last_run": _last_run_summary(),
             }
         )
@@ -1374,10 +1421,27 @@ async def logs(lines: int = 200, _: None = Depends(_require_session)) -> JSONRes
 
 
 def _last_run_summary() -> dict | None:
+    """Most recent pipeline-activity log line, classified into a status.
+
+    2026-08-26: this used to grep only for "Signal pipeline (started|
+    finished)" -- the legacy hourly-cron path's own log lines
+    (``signals.py``). Since ``live_pipeline.py`` (the always-on WebSocket
+    runner) replaced that during market hours, it never logs those exact
+    words, so this silently found nothing recent and kept returning
+    whatever the hourly cron last logged days earlier -- a stale "last run"
+    on the dashboard even while the live pipeline was actively running.
+    Now recognizes the live pipeline's own lines too, so recency reflects
+    what's actually running.
+    """
     if not _LOG_PATH.exists():
         return None
+    pattern = (
+        "Signal pipeline (started|finished)"
+        "|Live ticker pipeline (starting|stopped)"
+        "|Bucket .* closed"
+    )
     result = subprocess.run(
-        ["grep", "-n", "Signal pipeline \\(started\\|finished\\)", str(_LOG_PATH)],
+        ["grep", "-nE", pattern, str(_LOG_PATH)],
         capture_output=True,
         text=True,
     )
@@ -1385,8 +1449,16 @@ def _last_run_summary() -> dict | None:
     if not lines:
         return None
     last_line = lines[-1]
+    if "finished" in last_line or "stopped" in last_line:
+        status = "finished"
+    elif "closed with no ticks" in last_line:
+        status = "idle"
+    elif "closed" in last_line:
+        status = "processing"
+    else:
+        status = "started"
     return {
-        "status": "finished" if "finished" in last_line else "started",
+        "status": status,
         "raw": last_line.split(":", 1)[-1].strip() if ":" in last_line else last_line,
     }
 
