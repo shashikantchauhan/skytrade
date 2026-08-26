@@ -29,7 +29,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
-from trading_scanner.application import futures_trading, paper_trading
+from trading_scanner.application import futures_trading, manual_exit, paper_trading
 from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
@@ -49,12 +49,14 @@ from trading_scanner.infrastructure.db import (
 )
 from trading_scanner.infrastructure.kite import (
     KiteDerivativesChain,
+    KiteOrderExecutor,
     build_login_url,
     exchange_request_token,
 )
 from trading_scanner.infrastructure.kite import (
     get_last_prices as kite_get_last_prices,
 )
+from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
 _yahoo = YahooProvider()
@@ -508,6 +510,58 @@ async def live_cash_positions(_: None = Depends(_require_session)) -> JSONRespon
                 }
             )
         return JSONResponse(rows)
+    finally:
+        await client.close()
+
+
+@app.post("/api/live-cash-positions/{symbol}/exit")
+async def exit_live_cash_position(
+    symbol: str, _: None = Depends(_require_admin)
+) -> JSONResponse:
+    """Manually close one real open cash position right now -- cancels its
+    GTT bracket first, then places a real market sell, exactly the same
+    path a strategy-driven exit takes (application/manual_exit.py). Admin-
+    only: this places a real order, unlike every ``_require_session`` read
+    route above."""
+    client, config = _client()
+    try:
+        if not config.kite_api_key:
+            raise HTTPException(status_code=400, detail="Kite is not configured.")
+        kite_session_repository = TursoKiteSessionRepository(client)
+        await kite_session_repository.ensure_schema()
+        token_row = await kite_session_repository.get_token()
+        if token_row is None:
+            raise HTTPException(status_code=400, detail="No active Kite session.")
+        access_token, _obtained_at = token_row
+
+        live_order_repository = TursoLiveOrderRepository(client)
+        await live_order_repository.ensure_schema()
+        open_legs = await live_order_repository.get_open_cash_legs(symbol)
+        if not open_legs:
+            raise HTTPException(status_code=404, detail=f"No real open position for {symbol}.")
+
+        kite = KiteConnect(api_key=config.kite_api_key)
+        kite.set_access_token(access_token)
+        last_prices = await _last_prices([SimpleNamespace(symbol=symbol)], client, config)
+        current_price = last_prices.get(symbol)
+        if current_price is None:
+            raise HTTPException(status_code=502, detail=f"No live quote available for {symbol}.")
+
+        gtt_repository = TursoGttRepository(client)
+        await gtt_repository.ensure_schema()
+        paper_benchmark_repository = TursoPaperBenchmarkRepository(client)
+        await paper_benchmark_repository.ensure_schema()
+        notifier = (
+            TelegramNotifier(config.telegram_bot_token, config.telegram_chat_id, config.notification_label)
+            if config.telegram_bot_token and config.telegram_chat_id
+            else LoggingNotifier()
+        )
+
+        result = await manual_exit.exit_position(
+            symbol, Decimal(str(current_price)), config, KiteOrderExecutor(kite),
+            gtt_repository, live_order_repository, paper_benchmark_repository, notifier,
+        )
+        return JSONResponse({"ok": result.ok, "message": result.message})
     finally:
         await client.close()
 

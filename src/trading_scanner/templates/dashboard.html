@@ -152,6 +152,8 @@
   button.primary:hover { opacity: 0.92; background: var(--accent); }
   button.danger { background: var(--red); color: white; border-color: var(--red); }
   button.danger:hover { opacity: 0.9; background: var(--red); }
+  button.danger:disabled { opacity: 0.6; cursor: default; }
+  button.compact { padding: 0.32rem 0.7rem; font-size: 0.76rem; border-radius: 7px; }
   input, select {
     padding: 0.45rem 0.65rem; border-radius: 9px; border: 1px solid var(--border-strong);
     background: var(--surface); color: var(--text); font-size: 0.84rem;
@@ -227,9 +229,9 @@
       <thead><tr>
         <th>Symbol</th><th>Entry time</th><th class="num">Entry</th><th class="num">Qty</th>
         <th class="num">Current</th><th class="num">Unrealized P&amp;L</th>
-        <th class="num">Target</th><th class="num">Stop</th><th>GTT</th>
+        <th class="num">Target</th><th class="num">Stop</th><th>GTT</th><th></th>
       </tr></thead>
-      <tbody><tr class="empty-row"><td colspan="9">Loading...</td></tr></tbody>
+      <tbody><tr class="empty-row"><td colspan="10">Loading...</td></tr></tbody>
     </table>
   </div>
 </section>
@@ -387,13 +389,37 @@ async function loadPositions() {
     const stopCell = p.stop_price !== null ? `₹${fmt(p.stop_price)}` : "-";
     const gttCls = p.gtt_status === "active" || p.gtt_status === "extended" ? "green" : "amber";
     const gttCell = p.gtt_status ? `<span class="pill ${gttCls}">${p.gtt_status}</span>` : `<span class="pill red">none</span>`;
+    const safeSymbol = p.symbol.replace(/'/g, "\\'");
     return `<tr>
       <td><strong>${p.symbol}</strong></td><td>${fmtTime(p.entry_timestamp)}</td>
       <td class="num">₹${fmt(p.entry_price)}</td><td class="num">${p.quantity}</td>
       <td class="num">${priceCell}</td>${pnlCell}
       <td class="num">${targetCell}</td><td class="num">${stopCell}</td><td>${gttCell}</td>
+      <td><button class="danger compact" onclick="exitPosition('${safeSymbol}', this)">Exit</button></td>
     </tr>`;
-  }).join("") || `<tr class="empty-row"><td colspan="9">No real positions open right now.</td></tr>`;
+  }).join("") || `<tr class="empty-row"><td colspan="10">No real positions open right now.</td></tr>`;
+}
+
+async function exitPosition(symbol, button) {
+  const ok = window.confirm(
+    `Close the real ${symbol} position right now?\n\n` +
+    "This cancels its GTT bracket and places a real market sell -- this cannot be undone."
+  );
+  if (!ok) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = "Exiting...";
+  try {
+    const result = await api(`/api/live-cash-positions/${encodeURIComponent(symbol)}/exit`, {
+      method: "POST",
+    });
+    button.textContent = result.ok ? "Done" : "Failed";
+    if (!result.ok) alert(`${symbol}: ${result.message}`);
+  } catch (e) {
+    button.textContent = "Failed";
+    alert(`${symbol}: ${e.message}`);
+  }
+  await loadPositions();
 }
 
 let symbolsLoaded = false;
