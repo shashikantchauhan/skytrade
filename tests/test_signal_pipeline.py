@@ -14,6 +14,7 @@ from trading_scanner.application.signal_pipeline import (
     _RECENT_WINDOW_DAYS,
     _close_futures_paper,
     _collect_and_open_ranked_positions,
+    _notify_missed_cash_entry,
     _open_futures_paper,
     _rank_and_open_futures_positions,
     _rank_and_open_paper_positions,
@@ -1395,3 +1396,33 @@ async def test_collect_and_open_ranked_positions_skips_futures_when_not_allowlis
     assert "opened" in paper_notes["RELIANCE.NS"]  # cash unaffected
     assert "RELIANCE.NS" not in futures_notes  # never even collected as a futures candidate
     assert futures_account_repository.opened == []
+
+
+class _FakeLiveOrderRepositoryForMissedNotify:
+    """Only what ``_notify_missed_cash_entry`` reads -- the current real
+    open-position count, to tell a full-capacity miss from any other."""
+
+    def __init__(self, open_count: int) -> None:
+        self._open_count = open_count
+
+    async def get_all_open_cash_legs(self):
+        return [object()] * self._open_count
+
+
+@pytest.mark.asyncio
+async def test_missed_cash_entry_notification_names_a_full_capacity_miss():
+    notifier = FakeNotifier()
+    repo = _FakeLiveOrderRepositoryForMissedNotify(open_count=8)  # matches the 8-slot cap
+    await _notify_missed_cash_entry("RELIANCE.NS", Decimal("2500"), _config(), repo, notifier)
+    assert len(notifier.texts) == 1
+    assert "MISSED BUY SIGNAL" in notifier.texts[0]
+    assert "RELIANCE.NS" in notifier.texts[0]
+    assert "8 real slots are already full" in notifier.texts[0]
+
+
+@pytest.mark.asyncio
+async def test_missed_cash_entry_notification_falls_back_when_slots_are_free():
+    notifier = FakeNotifier()
+    repo = _FakeLiveOrderRepositoryForMissedNotify(open_count=3)  # capacity wasn't the reason
+    await _notify_missed_cash_entry("RELIANCE.NS", Decimal("2500"), _config(), repo, notifier)
+    assert "entry cutoff" in notifier.texts[0]

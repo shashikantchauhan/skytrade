@@ -673,11 +673,13 @@ async def _process_symbol(
                 # Also gated on entry_quality_filter -- walk-forward-tested
                 # indicator floor to cut low-quality entries; see that
                 # module's own docstring for the evidence.
-                cash_eligible = await paper_trading.is_eligible(
+                track_record_ok = await paper_trading.is_eligible(
                     symbol, config.candle_interval, trade_repository
-                ) and entry_quality_filter.passes_indicator_filter(
+                )
+                quality_ok = entry_quality_filter.passes_indicator_filter(
                     result.volatility_margin, result.regime_normalized
                 )
+                cash_eligible = track_record_ok and quality_ok
                 if cash_eligible:
                     # 2026-08-25: serialize real entries -- execute_cash_entry's
                     # own max_positions check reads the current open count and
@@ -713,6 +715,22 @@ async def _process_symbol(
                                 "Paper-benchmark entry recording raised for %s -- "
                                 "real trade unaffected.", symbol,
                             )
+                elif cash_eligible:
+                    # 2026-08-26: notify only for the specific miss that's
+                    # actually costly -- a signal that cleared BOTH real
+                    # gates (track record, entry_quality_filter) and still
+                    # didn't get a real order, which today only happens
+                    # because execute_cash_entry's own capacity check
+                    # (max_positions already full) or its cutoff/execution
+                    # check turned it away. A signal that failed track
+                    # record or the quality filter was correctly rejected,
+                    # not "missed" -- no notification for those. Distinct
+                    # from the silenced-since-2026-08-21 informational entry
+                    # notification, which fired for every signal regardless
+                    # of outcome.
+                    await _notify_missed_cash_entry(
+                        symbol, market_price, config, live_order_repository, notifier,
+                    )
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Live cash order entry raised for %s -- rest of signal handling still stands.",
@@ -898,6 +916,37 @@ async def _process_symbol(
     # was flooding Telegram once paper trading's own suppression logic
     # stopped covering it. Still recorded for the dashboard's signal history.
     await signal_repository.record(signal.fingerprint, signal.timestamp)
+
+
+async def _notify_missed_cash_entry(
+    symbol: str,
+    market_price: Decimal,
+    config: AppConfig,
+    live_order_repository: TursoLiveOrderRepository,
+    notifier: Notifier,
+) -> None:
+    """A BUY signal cleared both real gates (track record,
+    entry_quality_filter) -- a genuinely good signal -- but still got no
+    real order. Tell the user, so a missed opportunity is visible instead
+    of silently dropped.
+
+    2026-08-26: deliberately narrow -- a signal that failed track record or
+    the quality filter was correctly rejected, not "missed", and does not
+    notify here (see the call site). This only fires for the case that's
+    actually costly: capital was tied up (or, more rarely, the entry
+    cutoff/an execution hiccup) while a signal worth taking passed by.
+    Distinct from the entry-signal notification silenced on 2026-08-21,
+    which fired for every signal regardless of outcome.
+    """
+    all_open = await live_order_repository.get_all_open_cash_legs()
+    if len(all_open) >= config.live_cash_trading_max_positions:
+        reason = f"all {config.live_cash_trading_max_positions} real slots are already full"
+    else:
+        reason = "past the entry cutoff or the order didn't go through -- check logs"
+    await notifier.send_text(
+        "\U0001f6ab <b>MISSED BUY SIGNAL</b>\n"
+        f"{symbol} @ {market_price} cleared eligibility and the quality filter, but {reason}."
+    )
 
 
 async def _notify_exit(
