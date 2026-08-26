@@ -11,6 +11,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
+    entry_quality_filter,
     futures_shadow,
     futures_trading,
     gtt_bracket,
@@ -669,8 +670,13 @@ async def _process_symbol(
                 # book (paper account, futures paper account) which already
                 # required it. Does not affect exits -- squaring off an
                 # already-open real position is never gated on eligibility.
+                # Also gated on entry_quality_filter -- walk-forward-tested
+                # indicator floor to cut low-quality entries; see that
+                # module's own docstring for the evidence.
                 cash_eligible = await paper_trading.is_eligible(
                     symbol, config.candle_interval, trade_repository
+                ) and entry_quality_filter.passes_indicator_filter(
+                    result.volatility_margin, result.regime_normalized
                 )
                 if cash_eligible:
                     # 2026-08-25: serialize real entries -- execute_cash_entry's
