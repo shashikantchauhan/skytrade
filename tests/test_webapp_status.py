@@ -10,6 +10,7 @@
 """
 
 import sys
+import time
 from decimal import Decimal
 from pathlib import Path
 
@@ -130,3 +131,31 @@ def test_last_run_falls_back_to_the_legacy_cron_pipelines_lines(tmp_path, monkey
     monkeypatch.setattr(webapp, "_LOG_PATH", log_path)
     summary = webapp._last_run_summary()
     assert summary["status"] == "finished"
+
+
+def test_pipeline_health_reports_healthy_when_the_log_was_just_written(tmp_path, monkeypatch):
+    log_path = tmp_path / "live.log"
+    log_path.write_text("2026-08-27 12:05:29,704 INFO: Outside market hours -- sleeping.\n")
+    monkeypatch.setattr(webapp, "_LOG_PATH", log_path)
+    health = webapp._live_pipeline_health()
+    assert health["healthy"] is True
+    assert health["age_seconds"] < 5
+
+
+def test_pipeline_health_reports_unhealthy_when_the_log_is_stale(tmp_path, monkeypatch):
+    import os
+
+    log_path = tmp_path / "live.log"
+    log_path.write_text("2026-08-27 04:37:12,714 ERROR: Live pipeline crashed.\n")
+    stale_time = time.time() - 600  # older than the 300s threshold
+    os.utime(log_path, (stale_time, stale_time))
+    monkeypatch.setattr(webapp, "_LOG_PATH", log_path)
+    health = webapp._live_pipeline_health()
+    assert health["healthy"] is False
+    assert health["age_seconds"] >= 600
+
+
+def test_pipeline_health_reports_unhealthy_when_the_log_does_not_exist(tmp_path, monkeypatch):
+    monkeypatch.setattr(webapp, "_LOG_PATH", tmp_path / "does-not-exist.log")
+    health = webapp._live_pipeline_health()
+    assert health == {"healthy": False, "age_seconds": None, "last_log_at": None}

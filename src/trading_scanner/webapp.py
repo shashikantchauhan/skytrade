@@ -1534,6 +1534,56 @@ def _todays_error_count() -> int:
         return 0
 
 
+# 2026-08-27: the live pipeline logs at least once a minute even when idle
+# ("Outside market hours -- sleeping"), so a genuinely healthy process is
+# never quiet longer than ~60s. Matches vps_watchdog's own threshold (see
+# that script) -- the cron-based watchdog force-restarts automatically at
+# this same age; this just makes that same fact visible/actionable from
+# the dashboard without waiting for cron's next 5-minute tick, for the
+# specific failure mode that motivated both: a silent async-level hang
+# where `systemctl status` keeps reporting the process as healthy while it
+# has actually stopped doing anything (see the 2026-08-27 incident -- a
+# Kite WebSocket 403 during a reconnect retry, then zero further log lines
+# for 7+ hours).
+_PIPELINE_STALE_SECONDS = 300
+
+
+def _live_pipeline_health() -> dict:
+    if not _LOG_PATH.exists():
+        return {"healthy": False, "age_seconds": None, "last_log_at": None}
+    last_modified = _LOG_PATH.stat().st_mtime
+    age_seconds = int(time.time() - last_modified)
+    return {
+        "healthy": age_seconds < _PIPELINE_STALE_SECONDS,
+        "age_seconds": age_seconds,
+        "last_log_at": datetime.fromtimestamp(last_modified, tz=UTC).isoformat(),
+    }
+
+
+@app.get("/api/live-pipeline-health")
+async def live_pipeline_health(_: None = Depends(_require_session)) -> JSONResponse:
+    return JSONResponse(_live_pipeline_health())
+
+
+@app.post("/api/live-pipeline-health/restart")
+async def restart_live_pipeline(_: None = Depends(_require_admin)) -> JSONResponse:
+    """Force-restart the live pipeline service -- the same action the
+    external cron watchdog takes automatically, exposed here so a stuck
+    pipeline (or one about to look stuck) can be restarted immediately
+    from the dashboard instead of waiting for cron's next check or
+    reaching for SSH. Real positions are never at risk from this: their
+    GTT brackets live at the broker, independent of this service being up.
+    """
+    result = subprocess.run(
+        ["systemctl", "restart", "p-trade-live"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500, detail=f"Restart failed: {result.stderr.strip() or 'unknown error'}"
+        )
+    return JSONResponse({"ok": True})
+
+
 def _write_env_updates(updates: dict[str, str]) -> None:
     existing_lines = _ENV_PATH.read_text(encoding="utf-8").splitlines() if _ENV_PATH.exists() else []
     remaining = dict(updates)

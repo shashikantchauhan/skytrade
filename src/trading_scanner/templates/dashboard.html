@@ -200,6 +200,7 @@
   </div>
   <div class="topbar-right">
     <span id="market-status" class="pill neutral"><span class="dot"></span>&nbsp;</span>
+    <span id="pipeline-health" class="pill neutral" title="Live pipeline log freshness"><span class="dot"></span>&nbsp;</span>
     <span class="row" id="kite-status"></span>
     <button onclick="logout()">Log out</button>
   </div>
@@ -213,6 +214,8 @@
   <div class="row">
     <button class="primary" onclick="trigger()">Run pipeline now</button>
     <span class="msg" id="trigger-msg"></span>
+    <button class="danger" onclick="restartLivePipeline()">Restart live pipeline</button>
+    <span class="msg" id="restart-msg"></span>
   </div>
 </section>
 
@@ -339,6 +342,43 @@ function updateMarketStatus() {
 }
 updateMarketStatus();
 setInterval(updateMarketStatus, 30000);
+
+async function loadPipelineHealth() {
+  const el = document.getElementById("pipeline-health");
+  try {
+    const h = await api("/api/live-pipeline-health");
+    if (h.age_seconds === null) {
+      el.className = "pill neutral";
+      el.innerHTML = `<span class="dot"></span>Pipeline: no log yet`;
+      return;
+    }
+    const mins = Math.floor(h.age_seconds / 60);
+    el.className = "pill " + (h.healthy ? "green" : "red");
+    el.innerHTML = h.healthy
+      ? `<span class="dot"></span>Pipeline live`
+      : `<span class="dot"></span>Pipeline stuck (${mins}m quiet)`;
+  } catch (e) {
+    el.className = "pill neutral";
+    el.innerHTML = `<span class="dot"></span>Pipeline: unknown`;
+  }
+}
+
+async function restartLivePipeline() {
+  const ok = window.confirm(
+    "Force-restart the live pipeline service now?\n\n" +
+    "Real positions are unaffected (their GTT brackets live at the broker), " +
+    "but the strategy stops watching for a few seconds during the restart."
+  );
+  if (!ok) return;
+  document.getElementById("restart-msg").textContent = "Restarting...";
+  try {
+    await api("/api/live-pipeline-health/restart", {method: "POST"});
+    document.getElementById("restart-msg").textContent = "Restarted.";
+  } catch (e) {
+    document.getElementById("restart-msg").textContent = "Failed: " + e.message;
+  }
+  await loadPipelineHealth();
+}
 
 async function loadStatus() {
   const s = await api("/api/status");
@@ -576,7 +616,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadPipelineHealth()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
   }
