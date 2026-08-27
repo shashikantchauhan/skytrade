@@ -31,6 +31,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from kiteconnect import KiteConnect, KiteTicker
+from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application.futures_trading import FUTURES_INITIAL_CAPITAL
@@ -673,6 +674,37 @@ class LiveTickerPipeline:
 
                 kite = KiteConnect(api_key=self._config.kite_api_key)
                 kite.set_access_token(access_token)
+
+                # 2026-08-27: a stored token isn't necessarily a *live*
+                # one -- Kite invalidates yesterday's token at a fixed
+                # daily reset regardless of whether anyone's logged back
+                # in yet, but `_resolve_instrument_tokens` below (an
+                # instruments dump) can succeed against a dead token,
+                # so this used to sail straight through to
+                # `_connect_ticker` and get every single reconnect
+                # rejected with a WebSocket 403 -- hammering Kite in a
+                # tight crash-restart loop for the rest of the morning
+                # (observed: 108 rejections before the retry loop itself
+                # hung). A cheap authenticated call up front catches an
+                # actually-dead token before any of that starts, and
+                # backs off exactly like the "no session at all" branch
+                # above -- no point retrying a token Kite has already
+                # thrown away.
+                try:
+                    await asyncio.to_thread(kite.profile)
+                except KiteTokenException:
+                    logger.warning(
+                        "Stored Kite token is no longer valid -- waiting for a fresh login."
+                    )
+                    try:
+                        await _notify_kite_expired_once_per_day(
+                            self._repos["kite_session"], self._notifier
+                        )
+                    except Exception:
+                        logger.exception("Failed to send token-expired notification")
+                    await asyncio.sleep(60)
+                    continue
+
                 try:
                     await self._resolve_instrument_tokens(kite)
                 except Exception:
