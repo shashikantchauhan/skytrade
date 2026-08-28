@@ -185,7 +185,12 @@ async def execute_cash_entry(
                 symbol, config.live_cash_entry_cutoff_ist,
             )
             return None
-    already_open = await live_order_repository.get_open_cash_legs(symbol)
+    # 2026-08-28: get_unclosed_cash_legs, not get_open_cash_legs -- the
+    # latter only counts a COMPLETE leg as "already open," which let a
+    # second real BUY through for PERSISTENT.NS while the first order's
+    # fill was still unconfirmed (status OPEN). See that method's own
+    # docstring for the incident.
+    already_open = await live_order_repository.get_unclosed_cash_legs(symbol)
     if already_open:
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
         return None

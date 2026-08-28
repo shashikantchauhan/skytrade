@@ -97,6 +97,7 @@ class FakeLiveOrderRepository:
     def __init__(
         self, open_cash: list[LiveOrderLeg] | None = None,
         all_open_cash: list[LiveOrderLeg] | None = None,
+        unclosed_cash: list[LiveOrderLeg] | None = None,
     ) -> None:
         self.recorded: list[LiveOrderLeg] = []
         self._open_cash = open_cash or []
@@ -104,6 +105,14 @@ class FakeLiveOrderRepository:
         # single-symbol tests; pass all_open_cash explicitly to simulate
         # other symbols' positions also being open (max_positions tests).
         self._all_open_cash = all_open_cash if all_open_cash is not None else self._open_cash
+        # Defaults to the same list too -- execute_cash_entry's stacking
+        # check now uses get_unclosed_cash_legs, not get_open_cash_legs;
+        # pass unclosed_cash explicitly to simulate an OPEN/UNKNOWN leg
+        # that get_open_cash_legs itself wouldn't count.
+        self._unclosed_cash = unclosed_cash if unclosed_cash is not None else self._open_cash
+
+    async def get_unclosed_cash_legs(self, symbol: str):
+        return self._unclosed_cash
 
     async def record_leg(self, leg: LiveOrderLeg) -> None:
         self.recorded.append(leg)
@@ -204,6 +213,32 @@ async def test_entry_refuses_to_stack_a_second_position():
 
     result = await live_cash_execution.execute_cash_entry(
         "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_refuses_to_stack_when_the_first_orders_fill_is_still_unconfirmed():
+    # 2026-08-28 regression: PERSISTENT.NS's first BUY order was placed for
+    # real, but wait_for_fill's poll timed out while Kite still reported it
+    # as OPEN (not yet COMPLETE) -- get_open_cash_legs only counts COMPLETE
+    # legs, so the next cycle saw an apparently-empty position and bought a
+    # second time. An OPEN (or UNKNOWN) leg must block a second entry too.
+    config = _config(enabled=True)
+    still_pending = [
+        LiveOrderLeg(
+            basket_id="x", symbol="PERSISTENT.NS", purpose="cash", tradingsymbol="PERSISTENT",
+            transaction_type="BUY", quantity=8, order_id="o1", status="OPEN",
+            placed_at=datetime.now(UTC),
+        )
+    ]
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository(open_cash=[], unclosed_cash=still_pending)
+
+    result = await live_cash_execution.execute_cash_entry(
+        "PERSISTENT.NS", _PRICE, config, executor, repo, FakeNotifier()
     )
 
     assert result is None
