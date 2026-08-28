@@ -196,6 +196,51 @@ async def execute_cash_entry(
     return basket_id
 
 
+async def record_broker_side_exit(
+    symbol: str,
+    open_leg: LiveOrderLeg,
+    market_price: Decimal,
+    live_order_repository: TursoLiveOrderRepository,
+    notifier: Notifier,
+) -> str:
+    """Closes ``open_leg`` in our own ledger without placing any order --
+    for when the real position is already flat at the broker (a GTT that
+    fired, or a manual square-off outside this app) but ``live_order_legs``
+    still shows it open. Records a synthetic COMPLETE closing leg (there is
+    no real order to poll) priced at ``market_price`` -- the latest quote,
+    not the true fill, since that already happened outside anything this
+    app placed and Kite's own order book doesn't reliably surface it (see
+    ``gtt_bracket.reconcile_before_exit``'s 2026-08-28 docstring). Called
+    from both ``execute_cash_exit`` (pre-flight ground-truth check) and
+    directly by callers when ``reconcile_before_exit`` already determined
+    the position is flat, so a real exit order is never attempted at all.
+
+    2026-08-28: added after COCHINSHIP.NS and VMM.NS were found stuck
+    "open" for days with no way to exit or re-enter -- see that module's
+    own docstring for the incident this fixes."""
+    close_txn = "SELL" if open_leg.transaction_type == "BUY" else "BUY"
+    basket_id = f"{symbol}-cash-reconciled-{datetime.now(UTC).isoformat()}"
+    await _record(
+        live_order_repository, basket_id, symbol,
+        CashLegResult(
+            tradingsymbol=open_leg.tradingsymbol,
+            transaction_type=close_txn,
+            quantity=open_leg.quantity,
+            order_id="RECONCILED",
+            status="COMPLETE",
+            average_price=market_price,
+            rejection_reason=None,
+        ),
+    )
+    await notifier.send_text(
+        "🔄 <b>POSITION RECONCILED</b>\n"
+        f"{symbol}: already flat at the broker but our records still showed it open -- "
+        f"closed it now at an approximate price ({market_price}, the latest quote, not "
+        "the exact fill). Check Kite directly for the exact exit price/P&L."
+    )
+    return basket_id
+
+
 async def execute_cash_exit(
     symbol: str,
     market_price: Decimal,
@@ -221,6 +266,27 @@ async def execute_cash_exit(
     if not open_legs:
         return None
     open_leg = open_legs[0]
+
+    # 2026-08-28: ground-truth check before ever placing the order -- see
+    # record_broker_side_exit's docstring. Defense in depth: the caller's
+    # own reconcile_before_exit should already catch this, but a doomed
+    # SELL against zero real shares (confirmed live against VMM.NS) is bad
+    # enough to guard against here too rather than trust every caller.
+    try:
+        real_quantity = await asyncio.to_thread(
+            order_executor.holding_quantity, open_leg.tradingsymbol
+        )
+    except Exception:
+        logger.warning(
+            "Could not verify real holding for %s before exit -- proceeding anyway.",
+            symbol, exc_info=True,
+        )
+        real_quantity = None
+    if real_quantity == 0:
+        return await record_broker_side_exit(
+            symbol, open_leg, market_price, live_order_repository, notifier
+        )
+
     basket_id = f"{symbol}-cash-exit-{datetime.now(UTC).isoformat()}"
 
     close_txn = "SELL" if open_leg.transaction_type == "BUY" else "BUY"

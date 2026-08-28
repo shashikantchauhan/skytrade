@@ -778,39 +778,47 @@ async def _process_symbol(
         )
         if order_executor is not None and live_order_repository is not None:
             try:
+                open_legs = await live_order_repository.get_open_cash_legs(symbol)
+                entry_leg = open_legs[0] if open_legs else None
                 should_exit = True
-                if gtt_repository is not None:
+                if gtt_repository is not None and entry_leg is not None:
                     should_exit = await gtt_bracket.reconcile_before_exit(
-                        symbol, config, order_executor, gtt_repository,
+                        symbol, entry_leg.tradingsymbol, config, order_executor, gtt_repository,
                     )
+                closed_basket_id = None
                 if should_exit:
-                    entry_leg = None
-                    if paper_benchmark_repository is not None:
-                        still_open = await live_order_repository.get_open_cash_legs(symbol)
-                        if still_open:
-                            entry_leg = still_open[0]
-                    exit_basket_id = await live_cash_execution.execute_cash_exit(
+                    closed_basket_id = await live_cash_execution.execute_cash_exit(
                         symbol, market_price, config, order_executor, live_order_repository,
                         notifier,
                     )
-                    if (
-                        paper_benchmark_repository is not None
-                        and exit_basket_id is not None
-                        and entry_leg is not None
-                    ):
-                        exit_legs = await live_order_repository.get_legs(exit_basket_id)
-                        if exit_legs and exit_legs[0].status == "COMPLETE":
-                            try:
-                                await paper_benchmark.record_exit(
-                                    symbol, entry_leg.basket_id, market_price,
-                                    newest_candle.timestamp, exit_legs[0],
-                                    paper_benchmark_repository,
-                                )
-                            except Exception:
-                                logging.getLogger(__name__).exception(
-                                    "Paper-benchmark exit recording raised for %s -- "
-                                    "real trade unaffected.", symbol,
-                                )
+                elif entry_leg is not None:
+                    # 2026-08-28: reconcile_before_exit determined the real
+                    # position is already flat -- close it in our own
+                    # ledger too. Previously this branch did nothing, which
+                    # is exactly how COCHINSHIP.NS got stuck "open" for
+                    # days with no way to exit or re-enter it; see
+                    # live_cash_execution.record_broker_side_exit.
+                    closed_basket_id = await live_cash_execution.record_broker_side_exit(
+                        symbol, entry_leg, market_price, live_order_repository, notifier,
+                    )
+                if (
+                    paper_benchmark_repository is not None
+                    and closed_basket_id is not None
+                    and entry_leg is not None
+                ):
+                    closed_legs = await live_order_repository.get_legs(closed_basket_id)
+                    if closed_legs and closed_legs[0].status == "COMPLETE":
+                        try:
+                            await paper_benchmark.record_exit(
+                                symbol, entry_leg.basket_id, market_price,
+                                newest_candle.timestamp, closed_legs[0],
+                                paper_benchmark_repository,
+                            )
+                        except Exception:
+                            logging.getLogger(__name__).exception(
+                                "Paper-benchmark exit recording raised for %s -- "
+                                "real trade unaffected.", symbol,
+                            )
             except Exception:
                 logging.getLogger(__name__).exception(
                     "Live cash order exit raised for %s -- close above still stands.", symbol,

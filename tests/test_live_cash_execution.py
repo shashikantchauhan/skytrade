@@ -60,10 +60,23 @@ class FakeOrderExecutor:
     mirrors test_live_execution.py's fake exactly, just against
     place_cash_market_order instead of place_market_order."""
 
-    def __init__(self, scripted: dict[tuple[str, str], list[str]]) -> None:
+    def __init__(
+        self,
+        scripted: dict[tuple[str, str], list[str]],
+        holding_quantity: int | None = None,
+    ) -> None:
         self._scripted = {key: list(values) for key, values in scripted.items()}
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
+        # None -- not configured -- makes execute_cash_exit's pre-flight
+        # ground-truth check fail closed (proceed as before), same as a
+        # real API error would.
+        self._holding_quantity = holding_quantity
+
+    def holding_quantity(self, tradingsymbol):
+        if self._holding_quantity is None:
+            raise RuntimeError("holding_quantity not configured for this fake")
+        return self._holding_quantity
 
     def place_cash_market_order(self, tradingsymbol, transaction_type, quantity, reference_price):
         self.calls.append((tradingsymbol, transaction_type, quantity))
@@ -313,6 +326,35 @@ async def test_exit_squares_off_the_open_buy_leg_with_a_sell():
     assert basket_id is not None
     assert executor.calls == [("RELIANCE", "SELL", 5)]
     assert any("LIVE CASH POSITION CLOSED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_exit_reconciles_instead_of_placing_a_doomed_sell_when_broker_shows_zero():
+    # 2026-08-28 regression: VMM.NS's real holding was already 0 (its GTT
+    # had fired) but the ledger still showed it open -- placing the SELL
+    # anyway got it rejected by Kite ("Insufficient stock holding...
+    # Holding quantity: 0"). Must reconcile instead of ever placing that
+    # order.
+    config = _config(enabled=True)
+    open_leg = LiveOrderLeg(
+        basket_id="VMM.NS-cash-entry-x", symbol="VMM.NS", purpose="cash",
+        tradingsymbol="VMM", transaction_type="BUY", quantity=44, order_id="o1",
+        status="COMPLETE", placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({}, holding_quantity=0)
+    repo = FakeLiveOrderRepository(open_cash=[open_leg])
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_exit(
+        "VMM.NS", _PRICE, config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert executor.calls == []  # never attempted the doomed order
+    assert repo.recorded[0].status == "COMPLETE"
+    assert repo.recorded[0].transaction_type == "SELL"
+    assert repo.recorded[0].order_id == "RECONCILED"
+    assert any("RECONCILED" in t for t in notifier.texts)
 
 
 @pytest.mark.asyncio

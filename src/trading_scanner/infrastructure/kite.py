@@ -430,6 +430,34 @@ class KiteOrderExecutor:
     def tick_size(self, tradingsymbol: str) -> Decimal:
         return self._instrument_map.tick_size(tradingsymbol)
 
+    def holding_quantity(self, tradingsymbol: str) -> int:
+        """Real, broker-side CNC quantity actually held for ``tradingsymbol``
+        right now -- combines a same-day position (``kite.positions()['net']``)
+        with a prior-day holding (``kite.holdings()``, ``quantity +
+        t1_quantity`` for a not-yet-fully-settled T1 lot), the same two
+        sources ``webapp._merge_real_cash_summary`` already merges for the
+        dashboard. Ground truth, used to double-check our own
+        ``live_order_legs`` ledger before ever placing an exit order.
+
+        2026-08-28: added after COCHINSHIP.NS and VMM.NS were found stuck
+        "open" in the ledger days after they were actually already flat at
+        the broker -- our own GTT-status check (``gtt_status``) can be
+        wrong or fail outright (Kite raised a bare ``GeneralException``
+        for VMM's already-invalidated trigger), which then sent a real
+        SELL order against zero real shares and got it rejected
+        ("Insufficient stock holding... Holding quantity: 0"). This is the
+        one signal that can't lie -- see ``application/gtt_bracket.
+        reconcile_before_exit`` and ``application/live_cash_execution.
+        execute_cash_exit`` for where it's used."""
+        total = 0
+        for position in self._kite.positions().get("net", []):
+            if position.get("product") == "CNC" and position.get("tradingsymbol") == tradingsymbol:
+                total += int(position.get("quantity", 0))
+        for holding in self._kite.holdings():
+            if holding.get("product") == "CNC" and holding.get("tradingsymbol") == tradingsymbol:
+                total += int(holding.get("quantity", 0)) + int(holding.get("t1_quantity", 0))
+        return total
+
     def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
         """Places a real NFO market order, product NRML (carries positions
         overnight -- appropriate for a swing strategy, not an intraday

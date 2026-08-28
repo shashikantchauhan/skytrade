@@ -37,15 +37,28 @@ def _config() -> AppConfig:
 
 
 class FakeOrderExecutor:
-    def __init__(self, gtt_status: str = "active", fill_status: str = "COMPLETE") -> None:
+    def __init__(
+        self,
+        gtt_status: str = "active",
+        fill_status: str = "COMPLETE",
+        holding_quantity: int | None = None,
+    ) -> None:
         self.deleted: list[int] = []
         self._gtt_status = gtt_status
         self._fill_status = fill_status
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
+        # None -- not configured -- makes reconcile_before_exit fall back to
+        # GTT-status-only reasoning, same as a real API failure would.
+        self._holding_quantity = holding_quantity
 
     def gtt_status(self, trigger_id):
         return self._gtt_status
+
+    def holding_quantity(self, tradingsymbol):
+        if self._holding_quantity is None:
+            raise RuntimeError("holding_quantity not configured for this fake")
+        return self._holding_quantity
 
     def delete_gtt(self, trigger_id):
         self.deleted.append(trigger_id)
@@ -162,15 +175,46 @@ async def test_reports_already_flat_when_the_gtt_already_fired():
     executor = FakeOrderExecutor(gtt_status="triggered")
     gtt_repository = FakeGttRepository(active=_bracket())
     live_order_repository = FakeLiveOrderRepository(open_leg=_open_leg())
+    notifier = FakeNotifier()
 
     result = await manual_exit.exit_position(
         "RELIANCE.NS", Decimal("1550"), _config(), executor,
-        gtt_repository, live_order_repository, None, FakeNotifier(),
+        gtt_repository, live_order_repository, None, notifier,
     )
 
     assert result.ok is True
     assert "already flat" in result.message
     assert executor.calls == []  # never placed a market order against flat shares
+    # 2026-08-28 regression: this used to just report the fact and move on,
+    # leaving the ledger stuck "open" forever (exactly how COCHINSHIP.NS/
+    # VMM.NS got stuck) -- it must now also close the ledger leg.
+    assert len(live_order_repository.recorded) == 1
+    reconciled = live_order_repository.recorded[0]
+    assert reconciled.transaction_type == "SELL"
+    assert reconciled.status == "COMPLETE"
+    assert reconciled.quantity == 10
+    assert any("RECONCILED" in text for text in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_records_the_paper_benchmark_close_when_reconciling_a_flat_position():
+    executor = FakeOrderExecutor(gtt_status="triggered")
+    gtt_repository = FakeGttRepository(active=_bracket())
+    entry_leg = _open_leg(basket_id="RELIANCE.NS-cash-entry-42")
+    live_order_repository = FakeLiveOrderRepository(open_leg=entry_leg)
+    paper_benchmark_repository = FakePaperBenchmarkRepository()
+
+    result = await manual_exit.exit_position(
+        "RELIANCE.NS", Decimal("1550"), _config(), executor,
+        gtt_repository, live_order_repository, paper_benchmark_repository, FakeNotifier(),
+    )
+
+    assert result.ok is True
+    assert len(paper_benchmark_repository.closed) == 1
+    symbol, basket_id, real_price = paper_benchmark_repository.closed[0]
+    assert symbol == "RELIANCE.NS"
+    assert basket_id == "RELIANCE.NS-cash-entry-42"
+    assert real_price == Decimal("1550")
 
 
 @pytest.mark.asyncio

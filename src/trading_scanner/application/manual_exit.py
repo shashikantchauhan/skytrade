@@ -59,11 +59,32 @@ async def exit_position(
     should_exit = True
     if gtt_repository is not None:
         should_exit = await gtt_bracket.reconcile_before_exit(
-            symbol, config, order_executor, gtt_repository
+            symbol, entry_leg.tradingsymbol, config, order_executor, gtt_repository
         )
     if not should_exit:
+        # 2026-08-28: the real position was already flat (GTT fired, or a
+        # manual square-off outside this app) -- close it in our own
+        # ledger too, not just note it, or the next dashboard load and the
+        # next entry-eligibility check both still see it as open (this is
+        # exactly how COCHINSHIP.NS/VMM.NS got stuck).
+        exit_basket_id = await live_cash_execution.record_broker_side_exit(
+            symbol, entry_leg, market_price, live_order_repository, notifier,
+        )
+        if paper_benchmark_repository is not None:
+            exit_legs = await live_order_repository.get_legs(exit_basket_id)
+            if exit_legs:
+                try:
+                    await paper_benchmark.record_exit(
+                        symbol, entry_leg.basket_id, market_price, datetime.now(UTC),
+                        exit_legs[0], paper_benchmark_repository,
+                    )
+                except Exception:
+                    logger.exception(
+                        "Paper-benchmark exit recording raised for %s -- "
+                        "real exit unaffected.", symbol,
+                    )
         return ManualExitResult(
-            True, f"{symbol}'s GTT had already fired -- the position was already flat."
+            True, f"{symbol} was already flat at the broker -- reconciled in our records."
         )
 
     exit_basket_id = await live_cash_execution.execute_cash_exit(

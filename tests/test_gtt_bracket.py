@@ -45,16 +45,32 @@ def _config(
 
 
 class FakeOrderExecutor:
-    def __init__(self, gtt_status: str = "active", tick_size: Decimal = Decimal("0.05")) -> None:
+    def __init__(
+        self,
+        gtt_status: str = "active",
+        tick_size: Decimal = Decimal("0.05"),
+        holding_quantity: int | None = None,
+        raise_on_gtt_status: bool = False,
+    ) -> None:
         self.placed: list[tuple] = []
         self.modified: list[tuple] = []
         self.deleted: list[int] = []
         self._gtt_status = gtt_status
         self._next_trigger_id = 100
         self._tick_size = tick_size
+        # None means "not configured for this fake" -- reconcile_before_exit
+        # treats a raised exception the same as a real API failure, i.e.
+        # falls back to GTT-status-only reasoning (see its docstring).
+        self._holding_quantity = holding_quantity
+        self._raise_on_gtt_status = raise_on_gtt_status
 
     def tick_size(self, tradingsymbol: str) -> Decimal:
         return self._tick_size
+
+    def holding_quantity(self, tradingsymbol: str) -> int:
+        if self._holding_quantity is None:
+            raise RuntimeError("holding_quantity not configured for this fake")
+        return self._holding_quantity
 
     def place_cash_bracket_gtt(self, tradingsymbol, quantity, last_price, stop_price, target_price):
         self.placed.append((tradingsymbol, quantity, last_price, stop_price, target_price))
@@ -69,6 +85,8 @@ class FakeOrderExecutor:
         )
 
     def gtt_status(self, trigger_id):
+        if self._raise_on_gtt_status:
+            raise RuntimeError("Error during internal conversion.")
         return self._gtt_status
 
     def delete_gtt(self, trigger_id):
@@ -220,7 +238,7 @@ async def test_reconcile_cancels_a_still_live_gtt_and_allows_market_exit():
     repo = FakeGttRepository(active=bracket)
 
     should_exit = await gtt_bracket.reconcile_before_exit(
-        "RELIANCE.NS", _config(), executor, repo,
+        "RELIANCE.NS", "RELIANCE", _config(), executor, repo,
     )
 
     assert should_exit is True
@@ -237,7 +255,7 @@ async def test_reconcile_still_fires_when_toggle_is_disabled():
     repo = FakeGttRepository(active=bracket)
 
     should_exit = await gtt_bracket.reconcile_before_exit(
-        "RELIANCE.NS", _config(enabled=False), executor, repo,
+        "RELIANCE.NS", "RELIANCE", _config(enabled=False), executor, repo,
     )
 
     assert should_exit is True
@@ -253,7 +271,7 @@ async def test_reconcile_skips_market_exit_when_gtt_already_triggered():
     repo = FakeGttRepository(active=bracket)
 
     should_exit = await gtt_bracket.reconcile_before_exit(
-        "RELIANCE.NS", _config(), executor, repo,
+        "RELIANCE.NS", "RELIANCE", _config(), executor, repo,
     )
 
     assert should_exit is False  # real position already flat -- don't sell again
@@ -267,8 +285,61 @@ async def test_reconcile_noop_when_no_bracket_exists():
     repo = FakeGttRepository(active=None)
 
     should_exit = await gtt_bracket.reconcile_before_exit(
-        "RELIANCE.NS", _config(), executor, repo,
+        "RELIANCE.NS", "RELIANCE", _config(), executor, repo,
     )
 
     assert should_exit is True  # nothing to reconcile, normal exit proceeds
     assert executor.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_trusts_real_holding_over_a_stale_active_gtt_status():
+    # 2026-08-28 regression: COCHINSHIP.NS's GTT still reported "active" at
+    # Kite days after the real position was already flat -- gtt_status
+    # alone said "still live," which would have sent a real SELL against
+    # zero real shares. Real holding must win.
+    executor = FakeOrderExecutor(gtt_status="active", holding_quantity=0)
+    bracket = _bracket()
+    repo = FakeGttRepository(active=bracket)
+
+    should_exit = await gtt_bracket.reconcile_before_exit(
+        "COCHINSHIP.NS", "COCHINSHIP", _config(), executor, repo,
+    )
+
+    assert should_exit is False  # real position already flat -- don't sell
+    assert executor.deleted == [101]  # still clean up the dangling live GTT
+    assert bracket.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_trusts_real_holding_when_gtt_status_check_raises():
+    # 2026-08-28 regression: VMM.NS's gtt_status() raised a bare
+    # kiteconnect GeneralException ("Error during internal conversion")
+    # instead of returning a clean status -- the exception fallback used
+    # to assume "active" and proceed to a real (rejected) SELL. Real
+    # holding must still be trusted even when the GTT status check itself
+    # is broken.
+    executor = FakeOrderExecutor(holding_quantity=0, raise_on_gtt_status=True)
+    bracket = _bracket()
+    repo = FakeGttRepository(active=bracket)
+
+    should_exit = await gtt_bracket.reconcile_before_exit(
+        "VMM.NS", "VMM", _config(), executor, repo,
+    )
+
+    assert should_exit is False
+    assert bracket.status == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_reconcile_allows_exit_when_real_holding_confirms_still_open():
+    executor = FakeOrderExecutor(gtt_status="active", holding_quantity=1)
+    bracket = _bracket()
+    repo = FakeGttRepository(active=bracket)
+
+    should_exit = await gtt_bracket.reconcile_before_exit(
+        "RELIANCE.NS", "RELIANCE", _config(), executor, repo,
+    )
+
+    assert should_exit is True
+    assert executor.deleted == [101]

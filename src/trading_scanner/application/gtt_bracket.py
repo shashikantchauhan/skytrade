@@ -151,15 +151,26 @@ async def check_and_extend(
 
 async def reconcile_before_exit(
     symbol: str,
+    tradingsymbol: str,
     config: AppConfig,
     order_executor: KiteOrderExecutor,
     gtt_repository: TursoGttRepository,
 ) -> bool:
     """Call before a strategy exit signal's market square-off. Returns
-    True if the caller should still place a market exit (no bracket, or
-    the bracket was still live and has now been cancelled), False if the
-    GTT already fired since the last scan -- the real position is already
-    flat, and a market SELL now would be against shares no longer held.
+    True if the caller should still place a market exit, False if the
+    real position is already flat and a market SELL now would be against
+    shares no longer held.
+
+    2026-08-28: real broker-side holding (``order_executor.
+    holding_quantity``) is now the primary signal, not the GTT's own
+    status -- ``gtt_status`` turned out to be unreliable (COCHINSHIP.NS's
+    GTT still reported "active" at Kite days after the position was
+    actually flat; VMM.NS's raised a bare ``GeneralException`` instead of
+    a clean status), and trusting it sent a real SELL against zero real
+    shares that Kite rejected. Holding quantity can't lie the same way.
+    GTT status is still consulted, but only to decide whether a
+    still-live GTT needs cancelling -- never to decide whether to exit.
+
     Deliberately NOT gated on ``_is_gated_in`` (unlike ``place_bracket``/
     ``check_and_extend``) -- disabling the toggle must only ever stop new
     brackets from being placed, never leave an already-live GTT unmanaged
@@ -167,9 +178,20 @@ async def reconcile_before_exit(
     whether a bracket is actually active (``gtt_repository``), not about
     the current toggle state.
     """
+    try:
+        real_quantity: int | None = await asyncio.to_thread(
+            order_executor.holding_quantity, tradingsymbol
+        )
+    except Exception:
+        logger.warning(
+            "Could not verify real holding for %s before exit -- falling back to GTT status.",
+            symbol, exc_info=True,
+        )
+        real_quantity = None
+
     bracket = await gtt_repository.get_active(symbol)
     if bracket is None:
-        return True
+        return real_quantity is None or real_quantity > 0
 
     try:
         status = await asyncio.to_thread(order_executor.gtt_status, bracket.trigger_id)
@@ -180,20 +202,21 @@ async def reconcile_before_exit(
         )
         status = "active"
 
-    if status not in _LIVE_STATUSES:
-        # Already triggered/deleted/expired at the exchange -- the real
-        # position is already flat, nothing left to cancel or sell.
-        await gtt_repository.update_status(bracket.trigger_id, "closed")
-        return False
+    still_flat = real_quantity == 0 if real_quantity is not None else status not in _LIVE_STATUSES
 
-    try:
-        await asyncio.to_thread(order_executor.delete_gtt, bracket.trigger_id)
-    except Exception:
-        # Treat "already gone by the time we tried to delete it" the same
-        # as the status check catching it -- either way it's not live
-        # anymore, and this must never block the market exit that follows.
-        logger.warning(
-            "GTT delete failed for %s -- treating as already gone.", symbol, exc_info=True
-        )
-    await gtt_repository.update_status(bracket.trigger_id, "cancelled")
-    return True
+    if status in _LIVE_STATUSES:
+        try:
+            await asyncio.to_thread(order_executor.delete_gtt, bracket.trigger_id)
+        except Exception:
+            # Treat "already gone by the time we tried to delete it" the
+            # same as the status check catching it -- either way it's not
+            # live anymore, and this must never block the reconciliation
+            # decision below.
+            logger.warning(
+                "GTT delete failed for %s -- treating as already gone.", symbol, exc_info=True
+            )
+        await gtt_repository.update_status(bracket.trigger_id, "cancelled")
+    else:
+        await gtt_repository.update_status(bracket.trigger_id, "closed")
+
+    return not still_flat
