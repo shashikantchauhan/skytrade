@@ -64,14 +64,14 @@ class FakeOrderExecutor:
         self,
         scripted: dict[tuple[str, str], list[str]],
         holding_quantity: int | None = None,
+        wait_for_fill_raises: bool = False,
     ) -> None:
         self._scripted = {key: list(values) for key, values in scripted.items()}
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
-        # None -- not configured -- makes execute_cash_exit's pre-flight
-        # ground-truth check fail closed (proceed as before), same as a
-        # real API error would.
+        # None -- not configured -- raises, same as a real API error would.
         self._holding_quantity = holding_quantity
+        self._wait_for_fill_raises = wait_for_fill_raises
 
     def holding_quantity(self, tradingsymbol):
         if self._holding_quantity is None:
@@ -84,6 +84,8 @@ class FakeOrderExecutor:
         return f"order-{self._order_counter}"
 
     def wait_for_fill(self, order_id, timeout_seconds, poll_interval=1.0):
+        if self._wait_for_fill_raises:
+            raise RuntimeError("Couldn't find that `order_id`.")
         index = self._order_counter - 1
         tradingsymbol, transaction_type, _ = self.calls[index]
         key = (tradingsymbol, transaction_type)
@@ -329,32 +331,60 @@ async def test_exit_squares_off_the_open_buy_leg_with_a_sell():
 
 
 @pytest.mark.asyncio
-async def test_exit_reconciles_instead_of_placing_a_doomed_sell_when_broker_shows_zero():
-    # 2026-08-28 regression: VMM.NS's real holding was already 0 (its GTT
-    # had fired) but the ledger still showed it open -- placing the SELL
-    # anyway got it rejected by Kite ("Insufficient stock holding...
-    # Holding quantity: 0"). Must reconcile instead of ever placing that
-    # order.
-    config = _config(enabled=True)
+async def test_record_broker_side_exit_closes_the_ledger_without_placing_an_order():
+    # See gtt_bracket.reconcile_before_exit's 2026-08-28 fix -- callers use
+    # this directly once they've already determined (via real holding
+    # quantity) that a position is flat; execute_cash_exit itself no
+    # longer duplicates that check (see its 2026-08-28 docstring note --
+    # the duplicate check was what tipped Kite's rate limit and cost the
+    # UNIONBANK.NS order-tracking incident the same day).
     open_leg = LiveOrderLeg(
         basket_id="VMM.NS-cash-entry-x", symbol="VMM.NS", purpose="cash",
         tradingsymbol="VMM", transaction_type="BUY", quantity=44, order_id="o1",
         status="COMPLETE", placed_at=datetime.now(UTC),
     )
-    executor = FakeOrderExecutor({}, holding_quantity=0)
     repo = FakeLiveOrderRepository(open_cash=[open_leg])
     notifier = FakeNotifier()
 
-    basket_id = await live_cash_execution.execute_cash_exit(
-        "VMM.NS", _PRICE, config, executor, repo, notifier
+    basket_id = await live_cash_execution.record_broker_side_exit(
+        "VMM.NS", open_leg, _PRICE, repo, notifier
     )
 
     assert basket_id is not None
-    assert executor.calls == []  # never attempted the doomed order
     assert repo.recorded[0].status == "COMPLETE"
     assert repo.recorded[0].transaction_type == "SELL"
     assert repo.recorded[0].order_id == "RECONCILED"
     assert any("RECONCILED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_exit_records_unknown_status_when_fill_check_fails_but_never_loses_the_order():
+    # 2026-08-28 regression: a real SELL was placed and filled for
+    # UNIONBANK.NS, but a transient Kite API error while polling its fill
+    # status raised straight out of _place_and_wait -- the order was never
+    # recorded anywhere, even though it had genuinely already happened.
+    # order_id must always survive to the ledger regardless of what
+    # wait_for_fill does.
+    config = _config(enabled=True)
+    open_leg = LiveOrderLeg(
+        basket_id="UNIONBANK.NS-cash-entry-x", symbol="UNIONBANK.NS", purpose="cash",
+        tradingsymbol="UNIONBANK", transaction_type="BUY", quantity=26, order_id="o1",
+        status="COMPLETE", placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({}, wait_for_fill_raises=True)
+    repo = FakeLiveOrderRepository(open_cash=[open_leg])
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_exit(
+        "UNIONBANK.NS", _PRICE, config, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert executor.calls == [("UNIONBANK", "SELL", 26)]  # the order WAS placed
+    assert len(repo.recorded) == 1
+    assert repo.recorded[0].status == "UNKNOWN"
+    assert repo.recorded[0].order_id == "order-1"  # never lost, even though unconfirmed
+    assert any("LIVE CASH EXIT INCOMPLETE" in t for t in notifier.texts)
 
 
 @pytest.mark.asyncio

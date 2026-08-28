@@ -447,16 +447,26 @@ class KiteOrderExecutor:
         SELL order against zero real shares and got it rejected
         ("Insufficient stock holding... Holding quantity: 0"). This is the
         one signal that can't lie -- see ``application/gtt_bracket.
-        reconcile_before_exit`` and ``application/live_cash_execution.
-        execute_cash_exit`` for where it's used."""
-        total = 0
+        reconcile_before_exit`` for where it's used.
+
+        ``positions()['net']`` quantity is only ever added when positive --
+        a same-day BUY not yet reflected in ``holdings()``. A *negative*
+        quantity there means a same-day SELL of shares that were already in
+        ``holdings()`` (Kite tracks the day's net buy/sell activity, not a
+        running total), and confirmed live the same day: ``holdings()``
+        already reflects that sale (dropped to 0) by the time it's read --
+        adding the negative figure on top double-subtracted and produced a
+        nonsensical negative "holding" for UNIONBANK.NS right after this
+        app sold it."""
+        same_day = 0
         for position in self._kite.positions().get("net", []):
             if position.get("product") == "CNC" and position.get("tradingsymbol") == tradingsymbol:
-                total += int(position.get("quantity", 0))
+                same_day += max(0, int(position.get("quantity", 0)))
+        prior_day = 0
         for holding in self._kite.holdings():
             if holding.get("product") == "CNC" and holding.get("tradingsymbol") == tradingsymbol:
-                total += int(holding.get("quantity", 0)) + int(holding.get("t1_quantity", 0))
-        return total
+                prior_day += int(holding.get("quantity", 0)) + int(holding.get("t1_quantity", 0))
+        return same_day + prior_day
 
     def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
         """Places a real NFO market order, product NRML (carries positions

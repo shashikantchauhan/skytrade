@@ -100,6 +100,25 @@ def test_same_day_and_prior_day_positions_combine_without_double_counting():
     assert summary["today_pnl"] == 98.5
 
 
+def test_a_same_day_sell_of_a_prior_day_holding_is_not_counted_as_open():
+    # 2026-08-28 regression: positions()['net'] shows a *negative* quantity
+    # for a same-day SELL of shares that came from yesterday's holdings
+    # (Kite tracks the day's net buy/sell activity, not a running total) --
+    # confirmed live against UNIONBANK.NS right after this app sold it:
+    # holdings() had already dropped to 0, but the -26 in net was still
+    # being counted as an open position, inflating the count and pulling
+    # its stale `unrealised` figure into unrealized_pnl.
+    positions = {
+        "net": [{"product": "CNC", "quantity": -26, "unrealised": -3.9}],
+        "day": [{"product": "CNC", "pnl": -27.8}],
+    }
+    holdings = [_holding("UNIONBANK", quantity=0, t1_quantity=0, pnl=0.0, day_change=0.0)]
+    summary = webapp._merge_real_cash_summary(positions, holdings)
+    assert summary["open_position_count"] == 0
+    assert summary["unrealized_pnl"] == 0
+    assert summary["today_pnl"] == Decimal("-27.8")  # the day's realized SELL P&L still counts
+
+
 def test_last_run_recognizes_the_live_ticker_pipelines_own_log_lines(tmp_path, monkeypatch):
     log_path = tmp_path / "signals.log"
     log_path.write_text(

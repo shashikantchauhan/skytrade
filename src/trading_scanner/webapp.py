@@ -338,9 +338,19 @@ def _merge_real_cash_summary(positions: dict, holdings: list[dict]) -> dict:
     survives past its entry day. Scoped to CNC everywhere, matching what
     ``live_cash_execution.py`` always trades, so nothing else on this Kite
     account (manual trades, another product) skews these numbers.
+
+    2026-08-28: ``positions()['net']`` quantity can also be *negative* --
+    that's Kite's way of showing a same-day SELL of shares that came from
+    yesterday's holdings (it tracks the day's net buy/sell activity, not a
+    running total), not an open position. Confirmed live right after this
+    app sold UNIONBANK.NS: ``holdings()`` had already dropped to 0 by the
+    time it was read, but the -26 in ``net`` was still being counted as an
+    "open position bought today," inflating the count and pulling its
+    ``unrealised`` figure into ``unrealized_pnl`` for a position that was
+    actually already closed.
     """
     net_cnc = [p for p in positions.get("net", []) if p.get("product") == "CNC"]
-    open_today = [p for p in net_cnc if p.get("quantity", 0) != 0]
+    open_today = [p for p in net_cnc if p.get("quantity", 0) > 0]
     day_cnc = [p for p in positions.get("day", []) if p.get("product") == "CNC"]
 
     open_holdings = []

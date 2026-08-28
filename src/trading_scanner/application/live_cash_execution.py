@@ -91,9 +91,33 @@ async def _place_and_wait(
             average_price=None,
             rejection_reason="place_order raised an exception -- see logs",
         )
-    status = await asyncio.to_thread(
-        order_executor.wait_for_fill, order_id, _FILL_TIMEOUT_SECONDS
-    )
+    try:
+        status = await asyncio.to_thread(
+            order_executor.wait_for_fill, order_id, _FILL_TIMEOUT_SECONDS
+        )
+    except Exception:
+        # 2026-08-28: confirmed live against UNIONBANK.NS -- a real SELL
+        # was placed and filled at the broker, but a transient Kite API
+        # error while polling its fill status (order_history raised) meant
+        # this exception used to propagate straight out of _place_and_wait
+        # and the order was NEVER recorded anywhere -- our own ledger had
+        # zero trace of a real trade that had already happened. order_id
+        # is always known by this point regardless of what wait_for_fill
+        # does, so this must never be allowed to lose it.
+        logger.exception(
+            "Order %s placed for %s (%s) but its fill status could not be confirmed -- "
+            "recording as UNKNOWN, verify directly in Kite.",
+            order_id, tradingsymbol, transaction_type,
+        )
+        return CashLegResult(
+            tradingsymbol=tradingsymbol,
+            transaction_type=transaction_type,
+            quantity=quantity,
+            order_id=order_id,
+            status="UNKNOWN",
+            average_price=None,
+            rejection_reason="fill status check raised an exception -- see logs, verify in Kite",
+        )
     average_price = status.get("average_price")
     return CashLegResult(
         tradingsymbol=tradingsymbol,
@@ -267,26 +291,16 @@ async def execute_cash_exit(
         return None
     open_leg = open_legs[0]
 
-    # 2026-08-28: ground-truth check before ever placing the order -- see
-    # record_broker_side_exit's docstring. Defense in depth: the caller's
-    # own reconcile_before_exit should already catch this, but a doomed
-    # SELL against zero real shares (confirmed live against VMM.NS) is bad
-    # enough to guard against here too rather than trust every caller.
-    try:
-        real_quantity = await asyncio.to_thread(
-            order_executor.holding_quantity, open_leg.tradingsymbol
-        )
-    except Exception:
-        logger.warning(
-            "Could not verify real holding for %s before exit -- proceeding anyway.",
-            symbol, exc_info=True,
-        )
-        real_quantity = None
-    if real_quantity == 0:
-        return await record_broker_side_exit(
-            symbol, open_leg, market_price, live_order_repository, notifier
-        )
-
+    # 2026-08-28, then reverted same day: a redundant ground-truth
+    # holding_quantity() check used to run here too (see
+    # record_broker_side_exit's docstring for why it exists at all) --
+    # every real caller already calls gtt_bracket.reconcile_before_exit
+    # first, which makes the same check, so this doubled the real Kite API
+    # calls made per exit. That doubling is what tipped UNIONBANK.NS into
+    # Kite's own rate limit mid-cycle ("Too many requests"), which then hit
+    # an unrelated fragility in wait_for_fill below and lost track of a
+    # real order entirely (see that function's own 2026-08-28 fix). Removed
+    # -- reconcile_before_exit is the single ground-truth check now.
     basket_id = f"{symbol}-cash-exit-{datetime.now(UTC).isoformat()}"
 
     close_txn = "SELL" if open_leg.transaction_type == "BUY" else "BUY"

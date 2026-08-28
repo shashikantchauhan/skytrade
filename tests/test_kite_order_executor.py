@@ -20,10 +20,17 @@ from trading_scanner.infrastructure.kite import KiteOrderExecutor
 
 
 class _CapturingKite(KiteConnect):
-    def __init__(self, tick_size: str = "0.05") -> None:
+    def __init__(
+        self,
+        tick_size: str = "0.05",
+        net_positions: list[dict] | None = None,
+        holdings: list[dict] | None = None,
+    ) -> None:
         super().__init__(api_key="test")
         self.calls: list[dict] = []
         self._tick_size = tick_size
+        self._net_positions = net_positions or []
+        self._holdings = holdings or []
 
     def place_order(self, **kwargs):
         self.calls.append(kwargs)
@@ -38,6 +45,12 @@ class _CapturingKite(KiteConnect):
                 "tick_size": self._tick_size,
             }
         ]
+
+    def positions(self):
+        return {"net": self._net_positions, "day": []}
+
+    def holdings(self):
+        return self._holdings
 
 
 def test_cash_buy_order_is_a_protected_limit_order_above_reference_price():
@@ -93,3 +106,50 @@ def test_cash_order_price_rounds_to_a_010_tick_size():
 
     # 1380.5 * 1.005 = 1387.4025 -> nearest 0.10 multiple -> 1387.40
     assert kite.calls[0]["price"] == 1387.40
+
+
+def test_holding_quantity_adds_a_same_day_buy_to_a_prior_day_holding():
+    kite = _CapturingKite(
+        net_positions=[{"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": 5}],
+        holdings=[{"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": 2, "t1_quantity": 0}],
+    )
+    executor = KiteOrderExecutor(kite)
+
+    assert executor.holding_quantity("RELIANCE") == 7
+
+
+def test_holding_quantity_ignores_a_negative_same_day_sell_quantity():
+    # 2026-08-28 regression: positions()['net'] shows a *negative* quantity
+    # for a same-day SELL of shares that came from yesterday's holdings --
+    # confirmed live against UNIONBANK.NS right after this app sold it:
+    # holdings() had already dropped to 0, but summing the -26 straight in
+    # produced a nonsensical negative "holding".
+    kite = _CapturingKite(
+        net_positions=[{"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": -26}],
+        holdings=[{"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": 0, "t1_quantity": 0}],
+    )
+    executor = KiteOrderExecutor(kite)
+
+    assert executor.holding_quantity("RELIANCE") == 0
+
+
+def test_holding_quantity_counts_a_t1_unsettled_lot():
+    kite = _CapturingKite(
+        holdings=[{"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": 0, "t1_quantity": 4}],
+    )
+    executor = KiteOrderExecutor(kite)
+
+    assert executor.holding_quantity("RELIANCE") == 4
+
+
+def test_holding_quantity_ignores_other_symbols_and_products():
+    kite = _CapturingKite(
+        net_positions=[{"product": "CNC", "tradingsymbol": "TCS", "quantity": 5}],
+        holdings=[
+            {"product": "CNC", "tradingsymbol": "RELIANCE", "quantity": 1, "t1_quantity": 0},
+            {"product": "NRML", "tradingsymbol": "RELIANCE", "quantity": 99, "t1_quantity": 0},
+        ],
+    )
+    executor = KiteOrderExecutor(kite)
+
+    assert executor.holding_quantity("RELIANCE") == 1
