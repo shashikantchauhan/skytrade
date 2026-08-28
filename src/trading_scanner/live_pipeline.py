@@ -644,6 +644,21 @@ class LiveTickerPipeline:
             if not is_market_hours(datetime.now(UTC)):
                 continue
             stale_for = (datetime.now(UTC) - self._last_tick_at).total_seconds()
+            # 2026-08-28: a real per-minute log line, not just on the stale
+            # path below -- the external cron watchdog (watchdog_live_
+            # pipeline.sh on the VPS) judges liveness purely from live.log's
+            # mtime, on the assumption the pipeline always logs at least
+            # once a minute. That's only true outside market hours ("Outside
+            # market hours -- sleeping"); with an hourly candle_interval, a
+            # perfectly healthy pipeline can go genuinely silent for up to
+            # an hour during market hours -- confirmed live: py-spy dumped
+            # the "hung" process mid-incident and found the event loop
+            # simply idle, not stuck, every single time the external
+            # watchdog force-restarted it (every ~5-10min, all morning,
+            # each restart discarding whatever ticks had accumulated toward
+            # the current candle). This line gives that external check a
+            # real, frequent, candle-interval-independent signal instead.
+            logger.info("Live pipeline heartbeat -- last tick %.0fs ago.", stale_for)
             if stale_for > _TICKER_STALE_SECONDS:
                 try:
                     await _notify_kite_expired_once_per_day(
