@@ -24,6 +24,10 @@ CREATE TABLE IF NOT EXISTS live_order_legs (
 )
 """
 
+# Statuses a cash leg can be in that represent (or might still turn into) a
+# real held position -- see get_unclosed_cash_legs's own docstring.
+_UNCLOSED_STATUSES = frozenset({"COMPLETE", "OPEN", "UNKNOWN"})
+
 
 class TursoLiveOrderRepository:
     """Records every real order leg placed on Zerodha -- see
@@ -70,110 +74,47 @@ class TursoLiveOrderRepository:
             """,
             [basket_id],
         )
-        return [
-            LiveOrderLeg(
-                basket_id=row[0],
-                symbol=row[1],
-                purpose=row[2],
-                tradingsymbol=row[3],
-                transaction_type=row[4],
-                quantity=int(row[5]),
-                order_id=row[6],
-                status=row[7],
-                placed_at=datetime.fromisoformat(row[8]),
-                average_price=Decimal(str(row[9])) if row[9] is not None else None,
-                rejection_reason=row[10],
-            )
-            for row in result.rows
-        ]
+        return [_row_to_leg(row) for row in result.rows]
+
+    async def _cash_legs(self, symbol: str | None) -> list[LiveOrderLeg]:
+        """Every ``purpose='cash'`` leg, optionally scoped to one symbol,
+        at every status -- raw material for the net-quantity-aware
+        open/unclosed derivations below."""
+        query = """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason
+            FROM live_order_legs WHERE purpose = 'cash'
+        """
+        params: list = []
+        if symbol is not None:
+            query += " AND symbol = ?"
+            params.append(symbol)
+        query += " ORDER BY placed_at ASC"
+        result = await self._client.execute(query, params)
+        return [_row_to_leg(row) for row in result.rows]
 
     async def get_all_open_cash_legs(self) -> Sequence[LiveOrderLeg]:
-        """Every currently-open ``purpose='cash'`` leg across all symbols --
-        same open/closed logic as ``get_open_cash_legs``, just not scoped to
-        one symbol. Used by the dashboard's real-positions view (see
-        webapp.py's /api/live-cash-positions), which needs to list all of
-        them, not check one at a time."""
-        result = await self._client.execute(
-            """
-            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
-            FROM live_order_legs
-            WHERE purpose = 'cash' AND status = 'COMPLETE'
-              AND tradingsymbol NOT IN (
-                  SELECT tradingsymbol FROM live_order_legs AS closer
-                  WHERE closer.symbol = live_order_legs.symbol
-                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
-                    AND closer.purpose = 'cash'
-                    AND closer.transaction_type != live_order_legs.transaction_type
-                    AND closer.status = 'COMPLETE'
-              )
-            ORDER BY placed_at ASC
-            """
-        )
-        return [
-            LiveOrderLeg(
-                basket_id=row[0],
-                symbol=row[1],
-                purpose=row[2],
-                tradingsymbol=row[3],
-                transaction_type=row[4],
-                quantity=int(row[5]),
-                order_id=row[6],
-                status=row[7],
-                placed_at=datetime.fromisoformat(row[8]),
-                average_price=Decimal(str(row[9])) if row[9] is not None else None,
-                rejection_reason=row[10],
-            )
-            for row in result.rows
-        ]
+        """Every currently-open (net quantity > 0) ``purpose='cash'`` leg
+        across all symbols -- used by the dashboard's real-positions view
+        (see webapp.py's /api/live-cash-positions) and the max_positions
+        capacity check, which both need to list all of them, not check one
+        symbol at a time. See ``_net_unclosed_legs``'s docstring for the
+        netting logic."""
+        legs = await self._cash_legs(symbol=None)
+        return _net_unclosed_legs(legs, opener_statuses=frozenset({"COMPLETE"}))
 
     async def get_open_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
-        """Every currently-open ``purpose='cash'`` leg for ``symbol`` -- see
-        ``application/live_cash_execution.py``. Same open/closed logic as
-        ``get_open_primary_legs`` below, just scoped to the cash-order
-        purpose instead of the futures-basket ``'primary'`` purpose; the two
-        never see each other's rows."""
-        result = await self._client.execute(
-            """
-            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
-            FROM live_order_legs
-            WHERE symbol = ? AND purpose = 'cash' AND status = 'COMPLETE'
-              AND tradingsymbol NOT IN (
-                  SELECT tradingsymbol FROM live_order_legs AS closer
-                  WHERE closer.symbol = live_order_legs.symbol
-                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
-                    AND closer.purpose = 'cash'
-                    AND closer.transaction_type != live_order_legs.transaction_type
-                    AND closer.status = 'COMPLETE'
-              )
-            ORDER BY placed_at ASC
-            """,
-            [symbol],
-        )
-        return [
-            LiveOrderLeg(
-                basket_id=row[0],
-                symbol=row[1],
-                purpose=row[2],
-                tradingsymbol=row[3],
-                transaction_type=row[4],
-                quantity=int(row[5]),
-                order_id=row[6],
-                status=row[7],
-                placed_at=datetime.fromisoformat(row[8]),
-                average_price=Decimal(str(row[9])) if row[9] is not None else None,
-                rejection_reason=row[10],
-            )
-            for row in result.rows
-        ]
+        """Every currently-open (net quantity > 0) ``purpose='cash'`` leg
+        for ``symbol`` -- see ``application/live_cash_execution.py``."""
+        legs = await self._cash_legs(symbol)
+        return _net_unclosed_legs(legs, opener_statuses=frozenset({"COMPLETE"}))
 
     async def get_unclosed_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
         """Every ``purpose='cash'`` leg for ``symbol`` that represents a
         real or still-unconfirmed order (status ``COMPLETE``, ``OPEN``, or
         ``UNKNOWN`` -- excludes ``REJECTED``/``CANCELLED``, which never
-        resulted in a real position) with no matching COMPLETE closing leg
-        yet.
+        resulted in a real position) not yet fully offset by COMPLETE
+        closing quantity.
 
         2026-08-28: broader than ``get_open_cash_legs`` (COMPLETE only) --
         used solely by ``execute_cash_entry``'s stacking-prevention check.
@@ -186,48 +127,19 @@ class TursoLiveOrderRepository:
         intended notional) bought instead of one properly-sized position.
         An ``OPEN``/``UNKNOWN`` leg must block a second entry exactly like
         a ``COMPLETE`` one does."""
-        result = await self._client.execute(
-            """
-            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
-            FROM live_order_legs
-            WHERE symbol = ? AND purpose = 'cash' AND status IN ('COMPLETE', 'OPEN', 'UNKNOWN')
-              AND tradingsymbol NOT IN (
-                  SELECT tradingsymbol FROM live_order_legs AS closer
-                  WHERE closer.symbol = live_order_legs.symbol
-                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
-                    AND closer.purpose = 'cash'
-                    AND closer.transaction_type != live_order_legs.transaction_type
-                    AND closer.status = 'COMPLETE'
-              )
-            ORDER BY placed_at ASC
-            """,
-            [symbol],
-        )
-        return [
-            LiveOrderLeg(
-                basket_id=row[0],
-                symbol=row[1],
-                purpose=row[2],
-                tradingsymbol=row[3],
-                transaction_type=row[4],
-                quantity=int(row[5]),
-                order_id=row[6],
-                status=row[7],
-                placed_at=datetime.fromisoformat(row[8]),
-                average_price=Decimal(str(row[9])) if row[9] is not None else None,
-                rejection_reason=row[10],
-            )
-            for row in result.rows
-        ]
+        legs = await self._cash_legs(symbol)
+        return _net_unclosed_legs(legs, opener_statuses=_UNCLOSED_STATUSES)
 
     async def get_open_primary_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
-        """Every currently-open (no matching closing leg yet) real
-        ``purpose="primary"`` futures leg for ``symbol`` -- used to check
-        "do we already hold a real position here" before opening another,
-        and to know what to square off on exit. A leg counts as open if its
-        basket_id has no later leg with the opposite transaction_type for
-        the same tradingsymbol (i.e. it was never closed out)."""
+        """Every currently-open ``purpose='primary'`` leg for ``symbol`` --
+        the futures-basket analogue of ``get_open_cash_legs``, scoped to
+        the ``'primary'`` purpose instead of ``'cash'``; the two never see
+        each other's rows. Still uses the older any-closer-exists check
+        (not the quantity-netting fix from 2026-08-31) -- this path is the
+        shadow/paper futures simulation, not real capital, so the
+        partial-exit failure mode that hit PERSISTENT.NS's real cash
+        position doesn't carry the same stakes here. Revisit if this ever
+        starts placing real futures orders."""
         result = await self._client.execute(
             """
             SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
@@ -238,6 +150,7 @@ class TursoLiveOrderRepository:
                   SELECT tradingsymbol FROM live_order_legs AS closer
                   WHERE closer.symbol = live_order_legs.symbol
                     AND closer.tradingsymbol = live_order_legs.tradingsymbol
+                    AND closer.purpose = 'primary'
                     AND closer.transaction_type != live_order_legs.transaction_type
                     AND closer.status = 'COMPLETE'
               )
@@ -245,19 +158,67 @@ class TursoLiveOrderRepository:
             """,
             [symbol],
         )
-        return [
-            LiveOrderLeg(
-                basket_id=row[0],
-                symbol=row[1],
-                purpose=row[2],
-                tradingsymbol=row[3],
-                transaction_type=row[4],
-                quantity=int(row[5]),
-                order_id=row[6],
-                status=row[7],
-                placed_at=datetime.fromisoformat(row[8]),
-                average_price=Decimal(str(row[9])) if row[9] is not None else None,
-                rejection_reason=row[10],
-            )
-            for row in result.rows
+        return [_row_to_leg(row) for row in result.rows]
+
+
+def _row_to_leg(row: Sequence) -> LiveOrderLeg:
+    return LiveOrderLeg(
+        basket_id=row[0],
+        symbol=row[1],
+        purpose=row[2],
+        tradingsymbol=row[3],
+        transaction_type=row[4],
+        quantity=int(row[5]),
+        order_id=row[6],
+        status=row[7],
+        placed_at=datetime.fromisoformat(row[8]),
+        average_price=Decimal(str(row[9])) if row[9] is not None else None,
+        rejection_reason=row[10],
+    )
+
+
+def _net_unclosed_legs(
+    legs: Sequence[LiveOrderLeg], opener_statuses: frozenset[str]
+) -> list[LiveOrderLeg]:
+    """Groups ``legs`` by ``tradingsymbol`` and returns whichever opening
+    legs (status in ``opener_statuses``, earliest-first) haven't yet been
+    fully offset by COMPLETE closing quantity for that same tradingsymbol
+    -- a FIFO net, not a binary "does any closer exist" check.
+
+    2026-08-31 regression this replaced: the old SQL treated *any* COMPLETE
+    opposite-transaction_type leg for a tradingsymbol as proof the whole
+    position was closed, regardless of quantity. PERSISTENT.NS had been
+    bought twice (8 + 9 shares, a stacking bug from three days earlier) and
+    a single 8-share exit fully squared off only the first leg -- but the
+    old query saw "a closer exists for PERSISTENT" and stopped counting
+    *either* leg as open, hiding a real 9-share position from the
+    dashboard, the exit path, and the max_positions capacity count.
+
+    The "opening" transaction_type for a tradingsymbol is taken from
+    whichever leg was placed first -- always BUY for this app's real cash
+    trades (NSE cash delivery is long-only, no short selling), so this
+    doesn't need to special-case direction."""
+    by_tradingsymbol: dict[str, list[LiveOrderLeg]] = {}
+    for leg in legs:
+        by_tradingsymbol.setdefault(leg.tradingsymbol, []).append(leg)
+
+    unclosed: list[LiveOrderLeg] = []
+    for symbol_legs in by_tradingsymbol.values():
+        symbol_legs = sorted(symbol_legs, key=lambda leg: leg.placed_at)
+        opening_type = symbol_legs[0].transaction_type
+        openers = [
+            leg for leg in symbol_legs
+            if leg.transaction_type == opening_type and leg.status in opener_statuses
         ]
+        closed_quantity = sum(
+            leg.quantity for leg in symbol_legs
+            if leg.transaction_type != opening_type and leg.status == "COMPLETE"
+        )
+        remaining_to_close = closed_quantity
+        for leg in openers:
+            if remaining_to_close >= leg.quantity:
+                remaining_to_close -= leg.quantity
+                continue
+            unclosed.append(leg)
+            remaining_to_close = 0
+    return unclosed

@@ -116,3 +116,76 @@ async def test_get_unclosed_cash_legs_is_closed_by_a_matching_complete_sell(
         assert unclosed == []
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_partial_exit_only_closes_the_quantity_actually_sold(tmp_path: Path) -> None:
+    # 2026-08-31 regression, confirmed live against PERSISTENT.NS: bought
+    # twice (8 then 9 shares, a stacking bug from three days earlier), then
+    # a single 8-share exit only squared off the first leg for real -- but
+    # the old "does any COMPLETE opposite-type leg exist for this
+    # tradingsymbol" check treated the whole tradingsymbol as closed the
+    # moment *any* closer existed, hiding a real 9-share position from the
+    # dashboard, the exit path, and the max_positions capacity count.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(
+                basket_id="PERSISTENT.NS-cash-entry-1", symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT", quantity=8, order_id="o1",
+                placed_at=datetime(2026, 8, 28, 7, 57, 22, tzinfo=UTC),
+                average_price=Decimal("5896.5"),
+            )
+        )
+        await repository.record_leg(
+            _leg(
+                basket_id="PERSISTENT.NS-cash-entry-2", symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT", quantity=9, order_id="o2",
+                placed_at=datetime(2026, 8, 28, 8, 18, 50, tzinfo=UTC),
+                average_price=Decimal("5898"),
+            )
+        )
+        await repository.record_leg(
+            _leg(
+                basket_id="PERSISTENT.NS-cash-exit-1", symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT", transaction_type="SELL", quantity=8, order_id="o3",
+                placed_at=datetime(2026, 8, 31, 12, 20, 3, tzinfo=UTC),
+                average_price=Decimal("5615.5"),
+            )
+        )
+
+        open_legs = await repository.get_open_cash_legs("PERSISTENT.NS")
+
+        assert len(open_legs) == 1
+        assert open_legs[0].quantity == 9
+        assert open_legs[0].basket_id == "PERSISTENT.NS-cash-entry-2"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_fully_covered_multi_leg_position_shows_as_closed(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(basket_id="RELIANCE.NS-cash-entry-1", quantity=8, order_id="o1")
+        )
+        await repository.record_leg(
+            _leg(basket_id="RELIANCE.NS-cash-entry-2", quantity=9, order_id="o2")
+        )
+        await repository.record_leg(
+            _leg(
+                basket_id="RELIANCE.NS-cash-exit-1", transaction_type="SELL", quantity=17,
+                order_id="o3",
+            )
+        )
+
+        open_legs = await repository.get_open_cash_legs("RELIANCE.NS")
+
+        assert open_legs == []
+    finally:
+        await client.close()

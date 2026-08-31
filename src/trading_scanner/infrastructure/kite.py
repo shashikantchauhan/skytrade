@@ -73,14 +73,11 @@ INDEX_SYMBOL_MAP = {
 # 2026-08-21: Kite rejects a plain market order placed via the API
 # ("Market orders without market protection are not allowed via API"),
 # discovered when the very first real order this system ever placed
-# failed on it. There's no separate "market protection" parameter exposed
-# on place_order() -- the documented workaround is a limit order priced
-# past the reference price by a small protection margin, so it still fills
-# immediately against available liquidity (matching a market order in
-# practice) while satisfying the exchange's requirement for an explicit
-# price. 0.5% matches Zerodha's own Kite web/app UI default market-
-# protection setting.
-_MARKET_PROTECTION_PCT = Decimal("0.5")
+# failed on it. Worked around for a while with a synthetic protected LIMIT
+# order (compute a price a small margin past the reference price); 2026-
+# 08-31: turns out place_order() has always accepted a market_protection
+# parameter directly (see place_cash_market_order's own docstring) -- no
+# workaround needed, just pass it.
 
 
 def to_kite_tradingsymbol(symbol: str) -> str:
@@ -496,32 +493,35 @@ class KiteOrderExecutor:
         wrong here). ``tradingsymbol`` must already be Kite's own form (no
         ``.NS`` suffix -- see ``_kite_symbol``). Returns Kite's order_id;
         does not wait for a fill -- see ``poll_order_status``/
-        ``wait_for_fill`` for that.
+        ``wait_for_fill`` for that. ``reference_price`` is no longer used
+        to price the order (see below) -- kept for callers that still log/
+        notify with it as "the price that triggered this trade."
 
-        A protected LIMIT order, not a true MARKET order -- see
-        ``_MARKET_PROTECTION_PCT``'s module-level docstring for why plain
-        market orders are rejected. ``reference_price`` should be this
-        symbol's current price (e.g. the bar close/LTP that triggered this
-        order), not the original entry price on an exit."""
-        protected_price = (
-            reference_price * (1 + _MARKET_PROTECTION_PCT / 100)
-            if transaction_type == self._kite.TRANSACTION_TYPE_BUY
-            else reference_price * (1 - _MARKET_PROTECTION_PCT / 100)
-        )
-        # 2026-08-25: was `round(protected_price, 2)` -- any 2-decimal price
-        # looks reasonable but NSE requires it to land exactly on this
-        # instrument's own tick size (0.05/0.10/...), rejecting anything
-        # else. See round_to_tick's docstring.
-        tick = self.tick_size(tradingsymbol)
+        2026-08-31: a true ``ORDER_TYPE_MARKET`` order with Kite's own
+        ``market_protection`` parameter (``-1`` -- automatic, per Kite's
+        own exchange guidelines), not a synthetic protected LIMIT order
+        computed off ``reference_price``. That workaround (2026-08-21,
+        when a plain market order was rejected: "Market orders without
+        market protection are not allowed via API") never actually needed
+        a hand-rolled LIMIT price -- ``market_protection`` was already a
+        real parameter on this same ``place_order`` call the whole time,
+        just never passed. The old approach protected against
+        ``reference_price``, which can already be a few seconds stale by
+        the time the order reaches the exchange (this bar's close/LTP at
+        signal time); if price had moved past that fixed limit in the
+        meantime, the order could sit unfilled rather than execute. A real
+        MARKET order with protection prices its band off the *current*
+        exchange price at execution, not a stale one -- strictly better
+        for actually getting filled, which is the whole point."""
         return self._kite.place_order(
             variety=self._kite.VARIETY_REGULAR,
             exchange="NSE",
             tradingsymbol=tradingsymbol,
             transaction_type=transaction_type,
             quantity=quantity,
-            order_type=self._kite.ORDER_TYPE_LIMIT,
+            order_type=self._kite.ORDER_TYPE_MARKET,
             product=self._kite.PRODUCT_CNC,
-            price=float(round_to_tick(protected_price, tick)),
+            market_protection=-1,
         )
 
     def place_cash_bracket_gtt(
