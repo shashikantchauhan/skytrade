@@ -85,12 +85,6 @@ def fmt(stats: Stats, label: str, baseline_n: int) -> str:
     )
 
 
-def decile_cuts(values: list[float]) -> list[float]:
-    values = sorted(values)
-    n = len(values)
-    return [values[int(n * p / 10)] for p in range(1, 10)]
-
-
 def percentile_floor(values: list[float], pct: float) -> float:
     values = sorted(values)
     idx = min(int(len(values) * pct / 100), len(values) - 1)

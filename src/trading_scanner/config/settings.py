@@ -44,7 +44,7 @@ class AppConfig:
     # 2026-08-17: distinguishes which deployment a Telegram message came
     # from -- e.g. this repo's own p-trade vs. the skytrade-smallcap fork,
     # which reuses the exact same bot/chat ID. Shown in every message
-    # header (see infrastructure/telegram.py's _format_signal). Defaulted
+    # header (see infrastructure/telegram.py's send_text). Defaulted
     # here (unlike every other field above) so existing AppConfig(...)
     # call sites -- test fixtures mostly -- don't all need updating just
     # for this; load_config() below still sets it explicitly from env.

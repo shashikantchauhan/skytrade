@@ -142,11 +142,7 @@ class FakePaperAccountRepository:
 
 class FakeNotifier:
     def __init__(self) -> None:
-        self.sent = []
         self.texts = []
-
-    async def send_signal(self, signal) -> None:
-        self.sent.append(signal)
 
     async def send_text(self, message: str) -> None:
         self.texts.append(message)
@@ -230,7 +226,6 @@ async def test_symbol_below_minimum_history_is_skipped_without_analysis(monkeypa
         market_data_provider=YahooProvider(),
     )
 
-    assert notifier.sent == []
     assert candle_repository.upserted  # the recent window is still ingested while warming up
 
 
@@ -463,7 +458,6 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
     assert trade.entry_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
     # 2026-08-21: entry-signal Telegram notifications are off entirely --
     # follow only real cash-market order events now.
-    assert notifier.sent == []
     assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
 
 
@@ -618,7 +612,6 @@ async def test_end_long_is_fingerprint_recorded_but_not_notified(monkeypatch) ->
         market_data_provider=YahooProvider(),
     )
 
-    assert notifier.sent == []
     assert len(trade_repository.closed) == 1
     assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
 
@@ -731,7 +724,6 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
     # 2026-08-21: entry-signal Telegram notifications are off entirely --
     # follow only real cash-market order events now; the quantity/capital
     # assertions above already confirm the position opened correctly.
-    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
@@ -895,7 +887,6 @@ async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypat
     # observable here -- the capital-safety invariant above (never
     # collectively commit more than the account had, exactly 2 of 20
     # symbols afforded) is this test's actual point and is unaffected.
-    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
@@ -956,7 +947,6 @@ async def test_end_long_closes_the_paper_position_with_realized_pnl(monkeypatch)
     assert len(paper_account_repository.closed) == 1
     closed_position = paper_account_repository.closed[0]
     assert closed_position.pnl_amount == Decimal("2000")  # (100-80)*100 qty
-    assert notifier.sent == []
 
 
 @pytest.mark.asyncio
@@ -1004,7 +994,6 @@ async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
     )
 
     assert paper_account_repository.opened == []
-    assert notifier.sent == []  # long-only: SELL never reaches Telegram
     assert len(signal_repository.recorded) == 1  # but is still fingerprint-recorded
 
 
@@ -1098,7 +1087,6 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
         market_data_provider=YahooProvider(),
     )
 
-    assert notifier.sent == []
     assert len(trade_repository.opened) == 1  # stock BUY still processed despite index disagreeing
     assert trade_repository.opened[0].symbol == "AARTIIND.NS"
     assert len(signal_repository.recorded) == 1  # still fingerprint-recorded

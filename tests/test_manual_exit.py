@@ -115,9 +115,6 @@ class FakeNotifier:
     def __init__(self) -> None:
         self.texts: list[str] = []
 
-    async def send_signal(self, signal) -> None:
-        pass
-
     async def send_text(self, message: str) -> None:
         self.texts.append(message)
 

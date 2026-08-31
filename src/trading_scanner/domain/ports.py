@@ -8,7 +8,6 @@ from trading_scanner.domain.models import (
     Candle,
     FuturesPaperPosition,
     PaperPosition,
-    Signal,
     SignalSide,
     Trade,
 )
@@ -36,8 +35,6 @@ class MarketDataProvider(Protocol):
 
 
 class Notifier(Protocol):
-    async def send_signal(self, signal: Signal) -> None: ...
-
     async def send_text(self, message: str) -> None: ...
 
 

@@ -1,22 +1,21 @@
 import logging
-import re
 
 import httpx
-
-from trading_scanner.domain.models import Signal, SignalSide
 
 logger = logging.getLogger(__name__)
 
 
 class TelegramNotifier:
-    """Sends formatted, HTML-parsed Telegram messages.
+    """Sends free-form, HTML-parsed Telegram messages -- every call site
+    (application/live_cash_execution.py, live_pipeline.py,
+    application/live_execution.py, application/signal_pipeline.py,
+    application/gtt_bracket.py) builds its own message text and calls
+    ``send_text`` directly; nothing here formats a ``Signal`` itself.
 
-    Every message is deliberately shaped so the *category* is obvious at a
-    glance (a distinct emoji/header) before you read a single number --
-    that was the actual complaint: everything looked like the same wall of
-    text regardless of whether it was a fresh signal, a strategy-only exit
-    (informational), a real paper P&L close, or a system alert. See
-    ``Signal.category`` for what drives the header choice.
+    2026-08-31: removed the ``Signal``-formatting path (``send_signal`` and
+    its ``_format_*`` helpers) -- dead code, superseded by direct
+    ``send_text`` calls at every real call site and unreferenced anywhere
+    in the codebase.
     """
 
     def __init__(self, bot_token: str, chat_id: str, label: str = "") -> None:
@@ -33,32 +32,21 @@ class TelegramNotifier:
         self._chat_ids = [c.strip() for c in chat_id.split(",") if c.strip()]
         self._label = label
 
-    async def send_signal(self, signal: Signal) -> None:
-        message = _format_signal(signal)
-        await self.send_text(message, label=_message_label_override(signal) or self._label)
-
     async def send_text(self, message: str, label: str | None = None) -> None:
         """Free-form notification, e.g. the Kite-session-expired alert (see
-        ``application/signal_pipeline.py``'s ``_select_provider``) -- not
-        every notification is a trade signal. HTML parse mode so callers can
-        bold/italic without hand-escaping every message; plain text still
-        renders fine under HTML mode as long as it has no bare ``<``/``&``.
+        ``application/signal_pipeline.py``'s ``_select_provider``). HTML
+        parse mode so callers can bold/italic without hand-escaping every
+        message; plain text still renders fine under HTML mode as long as
+        it has no bare ``<``/``&``.
 
         A label (e.g. "Cash", "Smallcap") is prepended as its own first
         line whenever one is set -- ``label`` if given, else this
         instance's own deployment-wide default (``self._label``).
-        Centralized here, not in each message formatter, so every message
-        type is tagged consistently with minimal per-call-site changes.
-        Matters because more than one deployment can share the same bot/
-        chat ID (see skytrade-smallcap's .env) and, without this, a
-        message gives no clue which system sent it.
-
-        2026-08-17: ``send_signal`` overrides the deployment default with
-        "Futures" for a real futures-paper fill -- that's real margin
-        capital committed on Nifty50-allowlisted symbols specifically, a
-        genuinely different thing from this deployment's own cash-side
-        activity, and tagging it with the deployment's default label
-        (e.g. "Cash") would be actively wrong for that one message.
+        Centralized here, not in each caller, so every message type is
+        tagged consistently with minimal per-call-site changes. Matters
+        because more than one deployment can share the same bot/chat ID
+        (see skytrade-smallcap's .env) and, without this, a message gives
+        no clue which system sent it.
 
         Sent to every configured chat ID independently -- one recipient's
         failure (e.g. they blocked the bot) is logged but never blocks
@@ -79,141 +67,11 @@ class TelegramNotifier:
                     logger.warning("Telegram send failed for chat_id=%s", chat_id, exc_info=True)
 
 
-def _message_label_override(signal: Signal) -> str | None:
-    """"Futures" whenever this message is about a real futures-paper fill
-    (open or close), regardless of which deployment sent it -- see
-    ``send_text``'s docstring. Every other message uses the notifier's own
-    deployment-wide default, so this only returns non-None in that one
-    case."""
-    if signal.category == "futures_exit":
-        return "Futures"
-    if signal.category == "entry" and "futures-paper:" in signal.rationale:
-        return "Futures"
-    return None
-
-
-def _format_signal(signal: Signal) -> str:
-    parts = [segment.strip() for segment in signal.rationale.split(";") if segment.strip()]
-    if signal.category == "paper_exit":
-        return _format_paper_exit(signal, parts)
-    if signal.category == "futures_exit":
-        return _format_futures_exit(signal, parts)
-    if signal.category == "exit":
-        return _format_exit(signal, parts)
-    return _format_entry(signal, parts)
-
-
-# A real futures-paper position opening/closing commits real margin capital
-# -- see application/futures_trading.py's open_futures_paper_position,
-# which is a wholly different thing from the always-on, uncapped
-# derivatives *shadow* tracking (futures-shadow(.../options-shadow(...),
-# analysis only, never a real order). 2026-08-17: both used to render as
-# identical plain bullets under a SELL header that says "info only, not
-# tradeable" -- true for the cash leg, but actively misleading when a real
-# futures short had just opened in the very same message. Split out so a
-# real futures fill is never mistaken for shadow-only noise.
-def _split_futures_paper(parts: list[str]) -> tuple[str | None, list[str]]:
-    futures_paper = next((p for p in parts if p.startswith("futures-paper:")), None)
-    rest = [p for p in parts if not p.startswith("futures-paper:")]
-    return futures_paper, rest
-
-
-def _format_entry(signal: Signal, parts: list[str]) -> str:
-    is_buy = signal.side == SignalSide.BUY
-    futures_paper, parts = _split_futures_paper(parts)
-    is_actionable = is_buy and any(p.startswith("paper: opened") for p in parts)
-    if is_buy and is_actionable:
-        header = "🟢 <b>BUY SIGNAL</b> -- paper trade opened"
-    elif is_buy:
-        header = "🟡 <b>BUY SIGNAL</b> <i>(watch only, no paper trade)</i>"
-    elif futures_paper:
-        header = "🔵 <b>SELL SIGNAL</b> <i>(cash: info only -- but see real futures below)</i>"
-    else:
-        header = "🔵 <b>SELL SIGNAL</b> <i>(info only -- not tradeable in cash market)</i>"
-    lines = [
-        header,
-        f"<b>{_escape(signal.symbol)}</b> @ ₹{signal.price}",
-    ]
-    for part in parts:
-        if part.startswith("prediction="):
-            continue  # internal engine detail, not useful in a Telegram message
-        lines.append(f"• {_escape(part)}")
-    if futures_paper:
-        lines.append(f"📊 <b>REAL FUTURES POSITION</b>: {_escape(futures_paper)}")
-    return "\n".join(lines)
-
-
-def _format_exit(signal: Signal, parts: list[str]) -> str:
-    detail = next((p for p in parts if "pnl=" in p), "")
-    pnl_str, is_loss = _extract_pnl_percent(detail)
-    header = "⚪ <b>STRATEGY EXIT</b> <i>(informational -- no paper capital involved)</i>"
-    lines = [
-        header,
-        f"<b>{_escape(signal.symbol)}</b> ({signal.side.upper()}) @ ₹{signal.price}",
-    ]
-    if detail:
-        lines.append(f"• {_escape(detail)}")
-    if pnl_str:
-        emoji = "📉" if is_loss else "📈"
-        lines.append(f"{emoji} {pnl_str}")
-    return "\n".join(lines)
-
-
-def _format_futures_exit(signal: Signal, parts: list[str]) -> str:
-    """A real futures-paper position closing -- real margin capital, real
-    P&L. 2026-08-17: this never had a Telegram message at all before (the
-    close note was logged server-side and discarded, see
-    application/signal_pipeline.py's _close_futures_paper) -- only opens
-    were ever visible in Telegram. Mirrors _format_paper_exit's shape."""
-    detail = "; ".join(parts)
-    pnl_str, is_loss = _extract_pnl_percent(detail)
-    header = ("🔴" if is_loss else "🟢") + " <b>FUTURES POSITION CLOSED</b>"
-    lines = [
-        header,
-        f"<b>{_escape(signal.symbol)}</b> @ ₹{signal.price}",
-        f"• {_escape(detail)}",
-    ]
-    if pnl_str:
-        emoji = "❌" if is_loss else "✅"
-        lines.append(f"{emoji} {pnl_str}")
-    return "\n".join(lines)
-
-
-def _format_paper_exit(signal: Signal, parts: list[str]) -> str:
-    detail = "; ".join(parts)
-    pnl_str, is_loss = _extract_pnl_percent(detail)
-    header = ("🔴" if is_loss else "🟢") + " <b>PAPER TRADE CLOSED</b>"
-    lines = [
-        header,
-        f"<b>{_escape(signal.symbol)}</b> @ ₹{signal.price}",
-        f"• {_escape(detail)}",
-    ]
-    if pnl_str:
-        emoji = "❌" if is_loss else "✅"
-        lines.append(f"{emoji} {pnl_str}")
-    return "\n".join(lines)
-
-
-def _extract_pnl_percent(text: str) -> tuple[str, bool]:
-    """Pulls the P&L percentage out of a rationale fragment for a standalone
-    highlighted line -- handles both "pnl=4.20%" (raw exit) and
-    "pnl=₹500 (4.20%)" (paper exit) shapes. Returns ("", False) if none is
-    present."""
-    matches = re.findall(r"([-+]?\d+\.\d+)%", text)
-    if not matches:
-        return "", False
-    value = float(matches[-1])
-    return f"P&L: {value:+.2f}%", value < 0
-
-
 def _escape(text: str) -> str:
     """Telegram's HTML parse mode requires literal &, <, > to be escaped."""
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
 
 class LoggingNotifier:
-    async def send_signal(self, signal: Signal) -> None:
-        logger.info("Signal: %s", signal)
-
     async def send_text(self, message: str) -> None:
         logger.info("Notification: %s", message)
