@@ -116,8 +116,23 @@ _POSITIONS_CACHE_REFRESH_SECONDS = 5
 # out of the asyncio.gather in run_forever so its outer while loop tears
 # down and reconnects from scratch -- the one path proven to work, without
 # needing an actual systemd/process restart.
-_TICKER_STALE_SECONDS = 600
-_TICKER_WATCHDOG_CHECK_SECONDS = 60
+#
+# 2026-08-31: originally 600s, lowered to 120s. That stale daily token
+# case is now caught earlier (see run_forever's kite.profile() check,
+# 2026-08-27) and no longer the main thing this watchdog has to wait out
+# -- but a *fresh* login this morning hit a different failure: KiteTicker
+# connected silently hung five times in a row (no on_connect, no
+# on_error/on_close/on_reconnect -- every one of its own callbacks stayed
+# completely silent), each attempt burning the full 600s before this
+# watchdog forced a reconnect. 220 actively-traded NSE symbols produce
+# ticks within seconds of a genuinely live connection, so 600s of total
+# silence was never actually needed to tell "healthy" from "dead" -- it
+# just made every stuck cycle 5x longer than it had to be. 120s (checked
+# every 30s, so detected within ~150s worst case) keeps a wide margin
+# over KiteTicker's own 30s connect_timeout plus subscribe/first-tick
+# latency, while cutting total stuck time roughly 5x per cycle.
+_TICKER_STALE_SECONDS = 120
+_TICKER_WATCHDOG_CHECK_SECONDS = 30
 
 # How often the heartbeat loop wakes up to check whether a new calendar
 # hour has started (see _heartbeat_loop) -- doesn't need to be frequent,
