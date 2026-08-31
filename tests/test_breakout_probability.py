@@ -6,6 +6,10 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from trading_scanner.application.breakout_probability import (
+    BreakoutStats,
+    LevelCounts,
+    advance_breakout_stats,
+    bullish_bias,
     compute_breakout_stats,
     project_next_bar_levels,
 )
@@ -127,3 +131,63 @@ def test_project_next_bar_levels_uses_the_latest_candle_as_the_reference():
     # green latest candle -> probabilities come from the green-conditioned side
     assert projected[0].high_probability == stats.level_probabilities()[0].green_high
     assert projected[1].high_target == candles[-1].high + (candles[-1].close * Decimal("0.01"))
+
+
+def test_bullish_bias_is_none_with_no_prior_history_of_that_color():
+    stats = BreakoutStats(levels=[LevelCounts()])
+    prev = _candle(100, 105, 99, 104, day=1)  # green, but stats has zero green history
+
+    assert bullish_bias(stats, prev) is None
+
+
+def test_bullish_bias_is_true_when_new_highs_outpace_new_lows_for_that_color():
+    stats = BreakoutStats(levels=[LevelCounts()])
+    stats.green_total = 10
+    stats.levels[0].green_high_hits = 7
+    stats.levels[0].green_low_hits = 2
+    prev = _candle(100, 105, 99, 104)  # green
+
+    assert bullish_bias(stats, prev) is True
+
+
+def test_bullish_bias_is_false_when_new_lows_outpace_new_highs_for_that_color():
+    stats = BreakoutStats(levels=[LevelCounts()])
+    stats.green_total = 10
+    stats.levels[0].green_high_hits = 2
+    stats.levels[0].green_low_hits = 7
+    prev = _candle(100, 105, 99, 104)  # green
+
+    assert bullish_bias(stats, prev) is False
+
+
+def test_bullish_bias_reads_the_red_conditioned_side_for_a_red_prev_candle():
+    stats = BreakoutStats(levels=[LevelCounts()])
+    stats.green_total = 10
+    stats.levels[0].green_high_hits = 9  # would say bullish if read from the green side
+    stats.levels[0].green_low_hits = 1
+    stats.red_total = 10
+    stats.levels[0].red_high_hits = 1
+    stats.levels[0].red_low_hits = 9
+    prev = _candle(104, 105, 95, 100)  # red: close < open
+
+    assert bullish_bias(stats, prev) is False
+
+
+def test_advance_breakout_stats_snapshot_matches_a_full_recompute_of_the_prior_bars_only():
+    # advance_breakout_stats is meant to be called incrementally, snapshotting
+    # `stats` before folding in the newest bar -- confirm that snapshot always
+    # equals compute_breakout_stats() run over just the bars seen so far.
+    candles = [
+        _candle(100, 105, 99, 104, day=1),
+        _candle(104, 108, 103, 107, day=2),
+        _candle(107, 106, 101, 102, day=3),
+        _candle(102, 112, 101, 111, day=4),
+    ]
+    stats = BreakoutStats(levels=[LevelCounts()])
+    for i in range(1, len(candles)):
+        prev, curr = candles[i - 1], candles[i]
+        expected = compute_breakout_stats(candles[:i], step_percent=1.0, num_levels=1)
+        assert stats.level_probabilities() == expected.level_probabilities()
+        assert stats.green_total == expected.green_total
+        assert stats.red_total == expected.red_total
+        advance_breakout_stats(stats, prev, curr, step_percent=1.0)

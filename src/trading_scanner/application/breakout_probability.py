@@ -107,29 +107,42 @@ def compute_breakout_stats(
     """
     stats = BreakoutStats(levels=[LevelCounts() for _ in range(num_levels)])
     for prev, curr in zip(candles, candles[1:], strict=False):
-        green = prev.close > prev.open
-        red = prev.close < prev.open
-        if green:
-            stats.green_total += 1
-        elif red:
-            stats.red_total += 1
-
-        step = curr.close * (Decimal(str(step_percent)) / 100)
-        for i, level in enumerate(stats.levels):
-            threshold = step * i
-            hit_high = curr.high >= prev.high + threshold
-            hit_low = curr.low <= prev.low - threshold
-            if green and hit_high:
-                level.green_high_hits += 1
-            if green and hit_low:
-                level.green_low_hits += 1
-            if red and hit_high:
-                level.red_high_hits += 1
-            if red and hit_low:
-                level.red_low_hits += 1
-
-        _score_directional_bias(stats, prev, curr, green)
+        advance_breakout_stats(stats, prev, curr, step_percent)
     return stats
+
+
+def advance_breakout_stats(
+    stats: BreakoutStats, prev: Candle, curr: Candle, step_percent: float
+) -> None:
+    """Folds one more (``prev``, ``curr``) candle pair into ``stats`` in
+    place -- the same per-bar update ``compute_breakout_stats`` applies bar
+    by bar. Exposed separately (not just inlined in that loop) so a
+    walk-forward backtest against real trade history can snapshot ``stats``
+    *before* folding in the bar a trade entered on, giving the causal,
+    no-look-ahead probability as it would have read at the moment of entry
+    -- see ``analysis/breakout_probability_trade_backtest.py``."""
+    green = prev.close > prev.open
+    red = prev.close < prev.open
+    if green:
+        stats.green_total += 1
+    elif red:
+        stats.red_total += 1
+
+    step = curr.close * (Decimal(str(step_percent)) / 100)
+    for i, level in enumerate(stats.levels):
+        threshold = step * i
+        hit_high = curr.high >= prev.high + threshold
+        hit_low = curr.low <= prev.low - threshold
+        if green and hit_high:
+            level.green_high_hits += 1
+        if green and hit_low:
+            level.green_low_hits += 1
+        if red and hit_high:
+            level.red_high_hits += 1
+        if red and hit_low:
+            level.red_low_hits += 1
+
+    _score_directional_bias(stats, prev, curr, green)
 
 
 def _score_directional_bias(stats: BreakoutStats, prev: Candle, curr: Candle, green: bool) -> None:
@@ -184,3 +197,23 @@ def project_next_bar_levels(
             )
         )
     return projected
+
+
+def bullish_bias(stats: BreakoutStats, prev: Candle) -> bool | None:
+    """The level-0 directional call as of right after ``prev`` closes --
+    the same "which side has the higher hit rate" comparison the original
+    indicator's own backtest panel uses (see ``_score_directional_bias``),
+    exposed standalone so a caller can snapshot it against real trade
+    history without needing the rest of ``advance_breakout_stats``'s
+    bookkeeping.
+
+    Returns ``True`` (bullish -- P(new high) >= P(new low)) or ``False``
+    (bearish), conditioned on ``prev``'s own color. ``None`` if there
+    isn't at least one prior candle of that color yet -- not enough
+    history to make a call either way, not a bearish call."""
+    probs = stats.level_probabilities()[0]
+    green = prev.close > prev.open
+    high, low = (probs.green_high, probs.green_low) if green else (probs.red_high, probs.red_low)
+    if high is None or low is None:
+        return None
+    return high >= low
