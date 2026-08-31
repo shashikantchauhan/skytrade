@@ -524,10 +524,11 @@ class LiveTickerPipeline:
             if symbol != self._config.index_symbol
         ))
 
-        paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+        paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
             evaluated_by_symbol, self._config, self._repos["trade"], self._repos["paper_account"],
             self._paper_account_lock, derivatives_chain, self._repos["futures_paper_account"],
-            self._futures_paper_symbols,
+            self._futures_paper_symbols, self._notifier, order_executor,
+            self._repos["live_order"], self._repos["gtt"], self._repos["paper_benchmark"],
         )
 
         async def _process_one(symbol: str) -> None:
@@ -553,6 +554,7 @@ class LiveTickerPipeline:
                         gtt_repository=self._repos["gtt"],
                         paper_benchmark_repository=self._repos["paper_benchmark"],
                         live_cash_lock=self._live_cash_lock,
+                        precomputed_cash_note=cash_notes.get(symbol),
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)

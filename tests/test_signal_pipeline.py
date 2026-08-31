@@ -16,6 +16,7 @@ from trading_scanner.application.signal_pipeline import (
     _collect_and_open_ranked_positions,
     _notify_missed_cash_entry,
     _open_futures_paper,
+    _rank_and_open_cash_positions,
     _rank_and_open_futures_positions,
     _rank_and_open_paper_positions,
     run_signal_pipeline,
@@ -24,6 +25,7 @@ from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import (
     Candle,
     FuturesPaperPosition,
+    LiveOrderLeg,
     PaperPosition,
     SignalSide,
     Trade,
@@ -1328,12 +1330,14 @@ async def test_rank_and_open_futures_positions_opens_strongest_first():
     assert account.opened[1].symbol == "WEAK.NS"
 
 
-def _fast_predict_result(signal: str, prediction: int) -> FastPredictResult:
+def _fast_predict_result(
+    signal: str, prediction: int, *, volatility_margin: float = 0.0, regime_normalized: float = 0.0
+) -> FastPredictResult:
     return FastPredictResult(
         signal=signal, prediction=prediction, end_long=False, end_short=False,
         is_early_signal_flip=False, signal_previous=0,
         queue_state=QueueState(), exit_state=ExitState(),
-        adx=0.0, regime_normalized=0.0, volatility_margin=0.0,
+        adx=0.0, regime_normalized=regime_normalized, volatility_margin=volatility_margin,
     )
 
 
@@ -1354,16 +1358,17 @@ async def test_collect_and_open_ranked_positions_populates_both_books():
         "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
     }
 
-    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+    paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, _config(), trade_repository, paper_account_repository,
         asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository,
-        frozenset({"RELIANCE.NS"}),
+        frozenset({"RELIANCE.NS"}), FakeNotifier(),
     )
 
     assert "opened" in paper_notes["RELIANCE.NS"]
     assert "opened" in futures_notes["RELIANCE.NS"]
     assert len(paper_account_repository.opened) == 1
     assert len(futures_account_repository.opened) == 1
+    assert cash_notes == {}  # no order_executor/live_order_repository given -- cash lane untouched
 
 
 @pytest.mark.asyncio
@@ -1375,15 +1380,203 @@ async def test_collect_and_open_ranked_positions_skips_futures_when_not_allowlis
         "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
     }
 
-    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+    paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, _config(), trade_repository, paper_account_repository,
         asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository,
-        frozenset(),  # empty allowlist
+        frozenset(), FakeNotifier(),  # empty allowlist
     )
 
     assert "opened" in paper_notes["RELIANCE.NS"]  # cash unaffected
     assert "RELIANCE.NS" not in futures_notes  # never even collected as a futures candidate
     assert futures_account_repository.opened == []
+    assert cash_notes == {}
+
+
+# --- _rank_and_open_cash_positions / cash lane of _collect_and_open_ranked_positions ---
+# Real money, so held to the exact same "strongest-ranked-first, capacity
+# genuinely scarce" bar as the paper/futures ranking tests above, plus its
+# own extra gates (entry_quality_filter, conviction_filter) that paper
+# doesn't have.
+
+
+class _FakeCashOrderExecutor:
+    """Always fills COMPLETE -- mirrors test_live_cash_execution.py's
+    FakeOrderExecutor, trimmed to what execute_cash_entry actually calls."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str, int]] = []
+        self._order_counter = 0
+
+    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity, reference_price):
+        self.calls.append((tradingsymbol, transaction_type, quantity))
+        self._order_counter += 1
+        return f"order-{self._order_counter}"
+
+    def wait_for_fill(self, order_id, timeout_seconds, poll_interval=1.0):
+        return {"status": "COMPLETE", "average_price": 1000.0, "status_message": None}
+
+
+class _StatefulFakeLiveOrderRepository:
+    """Unlike test_live_cash_execution.py's FakeLiveOrderRepository (fixed
+    scripted lists), this one tracks legs as execute_cash_entry actually
+    records them -- so a real capacity cap (max_positions) genuinely fills
+    up across sequential calls within one test, proving
+    _rank_and_open_cash_positions attempts ranked candidates one at a time
+    and a later one can really lose a scarce slot, not just a scripted
+    outcome."""
+
+    def __init__(self) -> None:
+        self.recorded: list[LiveOrderLeg] = []
+
+    async def record_leg(self, leg: LiveOrderLeg) -> None:
+        self.recorded.append(leg)
+
+    def _open_symbols(self) -> set[str]:
+        buys = {leg.symbol for leg in self.recorded if leg.transaction_type == "BUY"}
+        sells = {leg.symbol for leg in self.recorded if leg.transaction_type == "SELL"}
+        return buys - sells
+
+    async def get_unclosed_cash_legs(self, symbol: str):
+        if symbol not in self._open_symbols():
+            return []
+        return [leg for leg in self.recorded if leg.symbol == symbol]
+
+    async def get_open_cash_legs(self, symbol: str):
+        return await self.get_unclosed_cash_legs(symbol)
+
+    async def get_all_open_cash_legs(self):
+        open_symbols = self._open_symbols()
+        return [leg for leg in self.recorded if leg.symbol in open_symbols]
+
+
+def _cash_config(*, max_positions: int = 8, symbols: frozenset[str] = frozenset()) -> AppConfig:
+    return replace(
+        _config(),
+        live_cash_trading_enabled=True,
+        live_cash_trading_symbols=symbols,
+        live_cash_trading_notional=Decimal("5000"),
+        live_cash_trading_max_positions=max_positions,
+        live_cash_entry_cutoff_ist=None,  # unrelated to these tests, avoid wall-clock flakiness
+    )
+
+
+def _cash_candidate(symbol: str, prediction: int) -> RankedCandidate:
+    return RankedCandidate(
+        symbol=symbol, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        entry_price=Decimal("1000"), prediction_at_entry=prediction, adx=0.0,
+        regime_normalized=0.0, volatility_margin=0.0, direction=SignalSide.BUY,
+    )
+
+
+@pytest.mark.asyncio
+async def test_rank_and_open_cash_positions_opens_strongest_first_when_capacity_scarce():
+    strong = _cash_candidate("STRONG.NS", prediction=8)  # highest score
+    weak = _cash_candidate("WEAK.NS", prediction=1)  # lowest score
+    config = _cash_config(max_positions=1, symbols=frozenset({"STRONG.NS", "WEAK.NS"}))
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    notes = await _rank_and_open_cash_positions(
+        [("WEAK.NS", weak), ("STRONG.NS", strong)],  # listed weak-first -- ranking must reorder
+        config, _FakeCashOrderExecutor(), live_order_repository, notifier, None, None,
+    )
+
+    assert "opened" in notes["STRONG.NS"]
+    assert "SKIPPED" in notes["WEAK.NS"]
+    assert [leg.symbol for leg in live_order_repository.recorded] == ["STRONG.NS"]
+    # Losing a real slot to a stronger candidate is the specific costly
+    # case _notify_missed_cash_entry exists for -- confirm it actually fired.
+    assert any("MISSED BUY SIGNAL" in text and "WEAK.NS" in text for text in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_rank_and_open_cash_positions_rejects_below_score_floor(monkeypatch):
+    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 10_000.0)  # nothing can clear this
+    candidate = _cash_candidate("RELIANCE.NS", prediction=5)
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+
+    notes = await _rank_and_open_cash_positions(
+        [("RELIANCE.NS", candidate)], config, _FakeCashOrderExecutor(), live_order_repository,
+        FakeNotifier(), None, None,
+    )
+
+    assert "REJECTED" in notes["RELIANCE.NS"]
+    assert live_order_repository.recorded == []
+
+
+def _strong_conviction_candle(symbol: str) -> Candle:
+    """Closes at its own high -- CLV 1.0, clears the 0.7 conviction floor."""
+    return Candle(
+        symbol=symbol, timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        open=Decimal("990"), high=Decimal("1000"), low=Decimal("990"), close=Decimal("1000"),
+        volume=1000,
+    )
+
+
+def _weak_conviction_candle(symbol: str) -> Candle:
+    """Closes at its own low -- CLV 0.0, fails the 0.7 conviction floor."""
+    return Candle(
+        symbol=symbol, timestamp=datetime(2026, 2, 1, tzinfo=UTC),
+        open=Decimal("1000"), high=Decimal("1000"), low=Decimal("990"), close=Decimal("990"),
+        volume=1000,
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_rejects_cash_on_weak_conviction_candle():
+    # Same symbol, same eligible track record, same quality-clearing
+    # prediction/regime/volatility -- ONLY the entry candle's own shape
+    # differs. Cash must reject it; paper (not gated by conviction) must
+    # not even notice.
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (
+            # volatility_margin/regime_normalized comfortably clear
+            # entry_quality_filter's floor -- isolates conviction as the
+            # only variable this test is about.
+            _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _weak_conviction_candle("RELIANCE.NS"),
+        ),
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+
+    paper_notes, _, cash_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None,
+    )
+
+    assert "opened" in paper_notes["RELIANCE.NS"]  # paper unaffected by conviction
+    assert "REJECTED (conviction filter" in cash_notes["RELIANCE.NS"]
+    assert live_order_repository.recorded == []  # never reached execute_cash_entry
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_opens_cash_on_strong_conviction_candle():
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (
+            _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _strong_conviction_candle("RELIANCE.NS"),
+        ),
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+
+    _, _, cash_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None,
+    )
+
+    assert "opened" in cash_notes["RELIANCE.NS"]
+    assert live_order_repository.recorded[0].symbol == "RELIANCE.NS"
 
 
 class _FakeLiveOrderRepositoryForMissedNotify:

@@ -11,6 +11,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
+    conviction_filter,
     entry_quality_filter,
     futures_shadow,
     futures_trading,
@@ -277,9 +278,10 @@ async def run_signal_pipeline(
 
     await asyncio.gather(*(_evaluate_with_limit(symbol) for symbol in symbols))
 
-    paper_notes, futures_notes = await _collect_and_open_ranked_positions(
+    paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
         paper_account_lock, derivatives_chain, futures_account_repository, futures_paper_symbols,
+        notifier, order_executor, live_order_repository, gtt_repository, paper_benchmark_repository,
     )
 
     async def _process_with_limit(symbol: str) -> None:
@@ -314,6 +316,7 @@ async def run_signal_pipeline(
                     gtt_repository=gtt_repository,
                     paper_benchmark_repository=paper_benchmark_repository,
                     live_cash_lock=live_cash_lock,
+                    precomputed_cash_note=cash_notes.get(symbol),
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -556,6 +559,7 @@ async def _process_symbol(
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
     live_cash_lock: asyncio.Lock | None = None,
+    precomputed_cash_note: str | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -605,6 +609,16 @@ async def _process_symbol(
     whether to fall back to deciding it itself (``_open_futures_paper``,
     unranked -- only used when a caller doesn't pre-rank a whole cycle at
     once) or trust what's already been decided.
+
+    ``precomputed_cash_note``, same idea again, for the real cash order --
+    when given, the entire eligibility/quality-filter/conviction-filter/
+    execute_cash_entry/GTT/paper-benchmark sequence below is skipped
+    entirely (``_collect_and_open_ranked_positions`` already ran it, in
+    ranked order, before calling this function) and the note is used as-is.
+    ``None`` falls back to deciding and executing it right here, unranked --
+    same "only used when a caller doesn't pre-rank a whole cycle at once"
+    situation as the other two, dead in production today since both real
+    call sites always pre-rank first.
     """
     if precomputed_evaluation is not None:
         evaluated = precomputed_evaluation
@@ -619,6 +633,7 @@ async def _process_symbol(
     paper_note = None
     derivatives_note = None
     futures_note = None
+    cash_note = None
 
     if order_executor is not None and gtt_repository is not None:
         try:
@@ -660,7 +675,13 @@ async def _process_symbol(
             derivatives_chain, options_trade_repository, futures_trade_repository,
             config, order_executor, live_order_repository, notifier,
         )
-        if order_executor is not None and live_order_repository is not None:
+        if precomputed_cash_note is not None:
+            # _collect_and_open_ranked_positions already ran the whole
+            # eligibility/quality-filter/conviction-filter/execute_cash_
+            # entry/GTT/paper-benchmark sequence below, in ranked order,
+            # for this cycle -- trust its outcome instead of redeciding.
+            cash_note = precomputed_cash_note
+        elif order_executor is not None and live_order_repository is not None:
             try:
                 # 2026-08-25: real cash entries now clear the same 55%-win-
                 # rate/>=5-closed-trades bar the old paper simulator used
@@ -670,16 +691,20 @@ async def _process_symbol(
                 # book (paper account, futures paper account) which already
                 # required it. Does not affect exits -- squaring off an
                 # already-open real position is never gated on eligibility.
-                # Also gated on entry_quality_filter -- walk-forward-tested
-                # indicator floor to cut low-quality entries; see that
-                # module's own docstring for the evidence.
+                # Also gated on entry_quality_filter (walk-forward-tested
+                # indicator floor) and conviction_filter (entry-candle
+                # close-location-value >= 0.7, see that module's own
+                # docstring for the evidence behind both).
                 track_record_ok = await paper_trading.is_eligible(
                     symbol, config.candle_interval, trade_repository
                 )
                 quality_ok = entry_quality_filter.passes_indicator_filter(
                     result.volatility_margin, result.regime_normalized
                 )
-                cash_eligible = track_record_ok and quality_ok
+                conviction_ok = conviction_filter.passes_conviction_filter(
+                    newest_candle.high, newest_candle.low, newest_candle.close
+                )
+                cash_eligible = track_record_ok and quality_ok and conviction_ok
                 if cash_eligible:
                     # 2026-08-25: serialize real entries -- execute_cash_entry's
                     # own max_positions check reads the current open count and
@@ -691,45 +716,18 @@ async def _process_symbol(
                     # only safe by coincidence). Falls back to a fresh,
                     # call-scoped lock if none was threaded through -- never
                     # crashes, just doesn't serialize across other calls.
+                    # (Only needed on this unranked fallback path -- the
+                    # ranked path, _rank_and_open_cash_positions, attempts
+                    # entries sequentially by construction, so no race is
+                    # possible there.)
                     async with (live_cash_lock or asyncio.Lock()):
                         await live_cash_execution.execute_cash_entry(
                             symbol, market_price, config, order_executor, live_order_repository,
                             notifier,
                         )
-                opened = await live_order_repository.get_open_cash_legs(symbol)
-                if opened:
-                    leg = opened[0]
-                    if gtt_repository is not None:
-                        await gtt_bracket.place_bracket(
-                            symbol, leg.tradingsymbol, leg.quantity,
-                            leg.average_price or market_price,
-                            config, order_executor, gtt_repository, notifier,
-                        )
-                    if paper_benchmark_repository is not None:
-                        try:
-                            await paper_benchmark.record_entry(
-                                symbol, market_price, leg, paper_benchmark_repository,
-                            )
-                        except Exception:
-                            logging.getLogger(__name__).exception(
-                                "Paper-benchmark entry recording raised for %s -- "
-                                "real trade unaffected.", symbol,
-                            )
-                elif cash_eligible:
-                    # 2026-08-26: notify only for the specific miss that's
-                    # actually costly -- a signal that cleared BOTH real
-                    # gates (track record, entry_quality_filter) and still
-                    # didn't get a real order, which today only happens
-                    # because execute_cash_entry's own capacity check
-                    # (max_positions already full) or its cutoff/execution
-                    # check turned it away. A signal that failed track
-                    # record or the quality filter was correctly rejected,
-                    # not "missed" -- no notification for those. Distinct
-                    # from the silenced-since-2026-08-21 informational entry
-                    # notification, which fired for every signal regardless
-                    # of outcome.
-                    await _notify_missed_cash_entry(
+                    cash_note = await _finalize_cash_entry(
                         symbol, market_price, config, live_order_repository, notifier,
+                        gtt_repository, paper_benchmark_repository, order_executor,
                     )
             except Exception:
                 logging.getLogger(__name__).exception(
@@ -895,6 +893,8 @@ async def _process_symbol(
         rationale += "; informational only -- not tradeable in NSE cash market"
     elif paper_note is not None:
         rationale += f"; {paper_note}"
+    if cash_note is not None:
+        rationale += f"; {cash_note}"
     # Unlike paper_note (cash, BUY-only), futures_note applies to both
     # sides -- futures are the real short mechanism, see futures_trading.py.
     if futures_note is not None:
@@ -926,6 +926,59 @@ async def _process_symbol(
     await signal_repository.record(signal.fingerprint, signal.timestamp)
 
 
+async def _finalize_cash_entry(
+    symbol: str,
+    market_price: Decimal,
+    config: AppConfig,
+    live_order_repository: TursoLiveOrderRepository,
+    notifier: Notifier,
+    gtt_repository: TursoGttRepository | None,
+    paper_benchmark_repository: TursoPaperBenchmarkRepository | None,
+    order_executor: KiteOrderExecutor,
+) -> str:
+    """Called right after ``live_cash_execution.execute_cash_entry`` was
+    attempted for a candidate that already cleared every real gate
+    (eligibility, entry_quality_filter, conviction_filter): places the GTT
+    bracket and records the paper-benchmark entry if a real fill happened,
+    or sends the "missed" notification if it didn't. Shared by
+    ``_rank_and_open_cash_positions`` (ranked path) and
+    ``_process_symbol``'s own unranked fallback, so this bookkeeping has a
+    single implementation instead of being duplicated between them.
+
+    ``get_open_cash_legs`` only ever returns a leg that is
+    ``status='COMPLETE'`` -- a rejected/incomplete real order never appears
+    there, so "a leg exists" reliably means "a real fill actually
+    happened," no extra status checking needed (same reasoning
+    ``application/paper_benchmark.py``'s own design doc already relies on).
+    """
+    opened = await live_order_repository.get_open_cash_legs(symbol)
+    if opened:
+        leg = opened[0]
+        if gtt_repository is not None:
+            await gtt_bracket.place_bracket(
+                symbol, leg.tradingsymbol, leg.quantity, leg.average_price or market_price,
+                config, order_executor, gtt_repository, notifier,
+            )
+        if paper_benchmark_repository is not None:
+            try:
+                await paper_benchmark.record_entry(
+                    symbol, market_price, leg, paper_benchmark_repository,
+                )
+            except Exception:
+                logging.getLogger(__name__).exception(
+                    "Paper-benchmark entry recording raised for %s -- real trade unaffected.",
+                    symbol,
+                )
+        return f"cash: opened {leg.quantity} qty (avg ₹{leg.average_price or market_price:.2f})"
+    # 2026-08-26: notify only for the specific miss that's actually costly --
+    # a signal that cleared every real gate and still didn't get a real
+    # order, which today only happens because execute_cash_entry's own
+    # capacity check (max_positions already full) or its cutoff/execution
+    # check turned it away. See _notify_missed_cash_entry's own docstring.
+    await _notify_missed_cash_entry(symbol, market_price, config, live_order_repository, notifier)
+    return "cash: SKIPPED (no free slot, past cutoff, or execution failed -- see logs)"
+
+
 async def _notify_missed_cash_entry(
     symbol: str,
     market_price: Decimal,
@@ -933,18 +986,18 @@ async def _notify_missed_cash_entry(
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
 ) -> None:
-    """A BUY signal cleared both real gates (track record,
-    entry_quality_filter) -- a genuinely good signal -- but still got no
-    real order. Tell the user, so a missed opportunity is visible instead
-    of silently dropped.
+    """A BUY signal cleared all real gates (track record,
+    entry_quality_filter, conviction_filter) -- a genuinely good signal --
+    but still got no real order. Tell the user, so a missed opportunity is
+    visible instead of silently dropped.
 
-    2026-08-26: deliberately narrow -- a signal that failed track record or
-    the quality filter was correctly rejected, not "missed", and does not
-    notify here (see the call site). This only fires for the case that's
-    actually costly: capital was tied up (or, more rarely, the entry
-    cutoff/an execution hiccup) while a signal worth taking passed by.
-    Distinct from the entry-signal notification silenced on 2026-08-21,
-    which fired for every signal regardless of outcome.
+    2026-08-26: deliberately narrow -- a signal that failed track record,
+    the quality filter, or the conviction filter was correctly rejected,
+    not "missed", and does not notify here (see the call site). This only
+    fires for the case that's actually costly: capital was tied up (or,
+    more rarely, the entry cutoff/an execution hiccup) while a signal worth
+    taking passed by. Distinct from the entry-signal notification silenced
+    on 2026-08-21, which fired for every signal regardless of outcome.
     """
     all_open = await live_order_repository.get_all_open_cash_legs()
     if len(all_open) >= config.live_cash_trading_max_positions:
@@ -953,7 +1006,8 @@ async def _notify_missed_cash_entry(
         reason = "past the entry cutoff or the order didn't go through -- check logs"
     await notifier.send_text(
         "\U0001f6ab <b>MISSED BUY SIGNAL</b>\n"
-        f"{symbol} @ {market_price} cleared eligibility and the quality filter, but {reason}."
+        f"{symbol} @ {market_price} cleared eligibility, the quality filter, and the "
+        f"conviction filter, but {reason}."
     )
 
 
@@ -1101,6 +1155,70 @@ async def _rank_and_open_paper_positions(
     return notes
 
 
+async def _rank_and_open_cash_positions(
+    candidates: list[tuple[str, RankedCandidate]],
+    config: AppConfig,
+    order_executor: KiteOrderExecutor,
+    live_order_repository: TursoLiveOrderRepository,
+    notifier: Notifier,
+    gtt_repository: TursoGttRepository | None,
+    paper_benchmark_repository: TursoPaperBenchmarkRepository | None,
+) -> dict[str, str]:
+    """Open REAL cash-equity BUY positions for one cycle's already-gated
+    candidates (track record, entry_quality_filter, and conviction_filter
+    all already cleared -- see ``_collect_and_open_ranked_positions``),
+    strongest-ranked first, instead of whichever symbol's task happened to
+    finish first -- same idea as ``_rank_and_open_paper_positions``, for
+    real money instead of the paper book.
+
+    Sequential by construction (candidates are attempted one at a time, in
+    ranked order) -- unlike the old per-symbol-concurrent path this
+    replaces, no lock is needed here: there is no way for two of these
+    calls to race on ``execute_cash_entry``'s own check-then-act capacity
+    check, because there's only ever one in flight. ``execute_cash_entry``
+    still does its own real capacity/cutoff/already-open check per call --
+    this function doesn't pre-compute whether each candidate will fit, it
+    just tries them in ranked order and lets that real check (surfaced via
+    ``_finalize_cash_entry``'s empty-``get_open_cash_legs`` case) decide.
+    """
+    notes: dict[str, str] = {}
+    symbol_by_candidate = {candidate: symbol for symbol, candidate in candidates}
+    ranked = rank_candidates([candidate for _, candidate in candidates])
+    for index, candidate in enumerate(ranked):
+        symbol = symbol_by_candidate[candidate]
+        score = score_candidate(candidate)
+        if score < MIN_SCORE:
+            # Ranked strongest-first, so every remaining candidate also
+            # scores below the floor -- reject them all and stop, rather
+            # than spending real capital on a signal too weak by policy
+            # just because a slot happens to be free (see MIN_SCORE's own
+            # docstring -- 0 by default, a no-op, pending real evidence
+            # this heuristic score discriminates quality on its own).
+            for weaker_candidate in ranked[index:]:
+                weaker_symbol = symbol_by_candidate[weaker_candidate]
+                weaker_score = score_candidate(weaker_candidate)
+                notes[weaker_symbol] = (
+                    f"cash: REJECTED (score {weaker_score:.0f} below minimum {MIN_SCORE:.0f})"
+                )
+            break
+        try:
+            await live_cash_execution.execute_cash_entry(
+                symbol, candidate.entry_price, config, order_executor, live_order_repository,
+                notifier,
+            )
+            notes[symbol] = await _finalize_cash_entry(
+                symbol, candidate.entry_price, config, live_order_repository, notifier,
+                gtt_repository, paper_benchmark_repository, order_executor,
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Live cash order entry raised for %s -- rest of signal handling still stands.",
+                symbol,
+            )
+            notes[symbol] = "cash: ERROR placing order (see logs)"
+    return notes
+
+
 async def _rank_and_open_futures_positions(
     candidates: list[tuple[str, RankedCandidate]],
     interval: str,
@@ -1152,11 +1270,17 @@ async def _collect_and_open_ranked_positions(
     derivatives_chain: KiteDerivativesChain | None,
     futures_account_repository: FuturesPaperAccountRepository | None,
     futures_paper_symbols: frozenset[str],
-) -> tuple[dict[str, str], dict[str, str]]:
-    """One scan cycle's ranked capital allocation for BOTH books -- cash
-    (BUY-only, ``_rank_and_open_paper_positions``) and futures (BUY+SELL,
-    Nifty50-allowlisted, ``_rank_and_open_futures_positions``) -- from the
-    same batch of already-evaluated symbols.
+    notifier: Notifier,
+    order_executor: KiteOrderExecutor | None = None,
+    live_order_repository: TursoLiveOrderRepository | None = None,
+    gtt_repository: TursoGttRepository | None = None,
+    paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
+) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
+    """One scan cycle's ranked capital allocation for ALL THREE books --
+    paper (BUY-only, ``_rank_and_open_paper_positions``), futures (BUY+SELL,
+    Nifty50-allowlisted, ``_rank_and_open_futures_positions``), and REAL
+    cash (BUY-only, ``_rank_and_open_cash_positions``) -- from the same
+    batch of already-evaluated symbols.
 
     2026-08-14: this used to be duplicated inline inside
     ``run_signal_pipeline`` (the cron path) with no futures-side
@@ -1164,18 +1288,35 @@ async def _collect_and_open_ranked_positions(
     production driver) never ranked either book, cash or futures, despite
     the ranking module existing and being "deployed." Factored out here so
     both the cron path and the live WebSocket path call the exact same
-    ranking logic and can't silently drift apart again.
+    ranking logic and can't silently drift apart again. Real cash orders
+    joined this same ranked flow later -- previously ``execute_cash_entry``
+    was first-come-first-served, no ranking step existed before it.
 
-    Returns ``(paper_notes, futures_notes)``, both ``symbol -> note``, for
-    the caller to pass into ``_process_symbol`` as
-    ``precomputed_paper_note``/``precomputed_futures_note`` so its second
-    pass doesn't redecide what this already decided.
+    Cash competes on a strictly narrower candidate set than paper: paper is
+    gated only on ``paper_trading.is_eligible`` (track record); real cash
+    ALSO requires ``entry_quality_filter`` and ``conviction_filter`` to
+    pass (see both modules' own docstrings for the evidence) before a
+    candidate is even allowed to compete for ranked capital -- a real-money
+    order is held to a higher bar than the paper benchmark. Cash ranking
+    only runs at all when ``order_executor``/``live_order_repository`` are
+    given (mirrors every existing cash call site's own
+    ``if order_executor is not None and live_order_repository is not None``
+    gating).
+
+    Returns ``(paper_notes, futures_notes, cash_notes)``, all
+    ``symbol -> note``, for the caller to pass into ``_process_symbol`` as
+    ``precomputed_paper_note``/``precomputed_futures_note``/
+    ``precomputed_cash_note`` so its second pass doesn't redecide what this
+    already decided.
     """
     paper_notes: dict[str, str] = {}
     ranked_candidates: list[tuple[str, RankedCandidate]] = []
     futures_notes: dict[str, str] = {}
     futures_candidates: list[tuple[str, RankedCandidate]] = []
+    cash_notes: dict[str, str] = {}
+    cash_candidates: list[tuple[str, RankedCandidate]] = []
     futures_enabled = derivatives_chain is not None and futures_account_repository is not None
+    cash_enabled = order_executor is not None and live_order_repository is not None
 
     for symbol, evaluated in evaluated_by_symbol.items():
         if evaluated is None:
@@ -1190,23 +1331,41 @@ async def _collect_and_open_ranked_positions(
                 expectancy = await symbol_expectancy(
                     symbol, SignalSide.BUY, config.candle_interval, trade_repository
                 )
-                ranked_candidates.append((
-                    symbol,
-                    RankedCandidate(
-                        symbol=symbol,
-                        entry_timestamp=newest_candle.timestamp,
-                        entry_price=entry_price,
-                        prediction_at_entry=result.prediction,
-                        adx=result.adx,
-                        regime_normalized=result.regime_normalized,
-                        volatility_margin=result.volatility_margin,
-                        expectancy=expectancy,
-                    ),
-                ))
+                candidate = RankedCandidate(
+                    symbol=symbol,
+                    entry_timestamp=newest_candle.timestamp,
+                    entry_price=entry_price,
+                    prediction_at_entry=result.prediction,
+                    adx=result.adx,
+                    regime_normalized=result.regime_normalized,
+                    volatility_margin=result.volatility_margin,
+                    expectancy=expectancy,
+                )
+                ranked_candidates.append((symbol, candidate))
+
+                if cash_enabled:
+                    quality_ok = entry_quality_filter.passes_indicator_filter(
+                        result.volatility_margin, result.regime_normalized
+                    )
+                    conviction_ok = conviction_filter.passes_conviction_filter(
+                        newest_candle.high, newest_candle.low, newest_candle.close
+                    )
+                    if quality_ok and conviction_ok:
+                        cash_candidates.append((symbol, candidate))
+                    else:
+                        reason = (
+                            "entry_quality_filter" if not quality_ok
+                            else "conviction filter -- weak entry candle"
+                        )
+                        cash_notes[symbol] = f"cash: REJECTED ({reason})"
             else:
                 paper_notes[symbol] = (
                     "paper: not eligible yet (win_rate<55% or insufficient trade history)"
                 )
+                if cash_enabled:
+                    cash_notes[symbol] = (
+                        "cash: not eligible yet (win_rate<55% or insufficient trade history)"
+                    )
 
         if futures_enabled and symbol in futures_paper_symbols:
             side = SignalSide.BUY if result.signal == "BUY" else SignalSide.SELL
@@ -1255,7 +1414,14 @@ async def _collect_and_open_ranked_positions(
                 derivatives_chain, futures_account_repository,
             )
         )
-    return paper_notes, futures_notes
+    if cash_enabled:
+        cash_notes.update(
+            await _rank_and_open_cash_positions(
+                cash_candidates, config, order_executor, live_order_repository, notifier,
+                gtt_repository, paper_benchmark_repository,
+            )
+        )
+    return paper_notes, futures_notes, cash_notes
 
 
 async def _close_paper_position(
