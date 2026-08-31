@@ -78,6 +78,16 @@ INDEX_SYMBOL_MAP = {
 # 08-31: turns out place_order() has always accepted a market_protection
 # parameter directly (see place_cash_market_order's own docstring) -- no
 # workaround needed, just pass it.
+#
+# 2% explicit, not Kite's "-1" automatic setting -- a Kite Connect
+# developer forum thread surfaced real reports of "-1" picking a band too
+# narrow during a fast move, leaving an order partially unfilled anyway
+# ("prices jumped above and my exit order was not executed"), with
+# Zerodha's own team recommending an explicit percentage (2-10%) instead.
+# Small positions here (~Rs50,000), so the extra slippage on the rare
+# order that actually needs the room is trivial next to the alternative of
+# it sitting unfilled during exactly the move it was trying to catch.
+_CASH_MARKET_PROTECTION_PERCENT = 2
 
 
 def to_kite_tradingsymbol(symbol: str) -> str:
@@ -498,10 +508,9 @@ class KiteOrderExecutor:
         notify with it as "the price that triggered this trade."
 
         2026-08-31: a true ``ORDER_TYPE_MARKET`` order with Kite's own
-        ``market_protection`` parameter (``-1`` -- automatic, per Kite's
-        own exchange guidelines), not a synthetic protected LIMIT order
-        computed off ``reference_price``. That workaround (2026-08-21,
-        when a plain market order was rejected: "Market orders without
+        ``market_protection`` parameter, not a synthetic protected LIMIT
+        order computed off ``reference_price``. That workaround (2026-08-
+        21, when a plain market order was rejected: "Market orders without
         market protection are not allowed via API") never actually needed
         a hand-rolled LIMIT price -- ``market_protection`` was already a
         real parameter on this same ``place_order`` call the whole time,
@@ -511,8 +520,17 @@ class KiteOrderExecutor:
         signal time); if price had moved past that fixed limit in the
         meantime, the order could sit unfilled rather than execute. A real
         MARKET order with protection prices its band off the *current*
-        exchange price at execution, not a stale one -- strictly better
-        for actually getting filled, which is the whole point."""
+        exchange price at execution, not a stale one.
+
+        An explicit ``_CASH_MARKET_PROTECTION_PERCENT`` (not ``-1``,
+        Kite's "automatic" setting) -- a Kite Connect developer forum
+        thread (2026-08-31 research) surfaced real reports of ``-1``
+        picking a band too narrow during a fast move ("prices jumped above
+        and my exit order was not executed"), with Zerodha's own team
+        response recommending an explicit percentage instead. Even with an
+        explicit percentage, execution past NSE's own exchange-side price-
+        protection band still can't be guaranteed -- this reduces, not
+        eliminates, the chance of an order sitting unfilled."""
         return self._kite.place_order(
             variety=self._kite.VARIETY_REGULAR,
             exchange="NSE",
@@ -521,7 +539,7 @@ class KiteOrderExecutor:
             quantity=quantity,
             order_type=self._kite.ORDER_TYPE_MARKET,
             product=self._kite.PRODUCT_CNC,
-            market_protection=-1,
+            market_protection=_CASH_MARKET_PROTECTION_PERCENT,
         )
 
     def place_cash_bracket_gtt(

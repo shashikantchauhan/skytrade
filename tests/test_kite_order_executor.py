@@ -4,8 +4,10 @@
 orders without market protection are not allowed via API"). 2026-08-31:
 place_order() has always accepted a market_protection parameter directly
 -- place_cash_market_order now sends a real ORDER_TYPE_MARKET order with
-market_protection=-1 instead of a synthetic protected LIMIT order priced
-off a (possibly stale) reference price. Uses a real KiteConnect instance
+an explicit 2% market_protection (not Kite's "-1" automatic setting --
+see that module's own docstring for why) instead of a synthetic protected
+LIMIT order priced off a (possibly stale) reference price. Uses a real
+KiteConnect instance
 (so the real order-type/variety/product constants are exercised, not
 redefined by hand) with place_order/instruments swapped for capturing/
 faking stubs -- no real network call.
@@ -70,9 +72,9 @@ def test_cash_buy_order_is_a_real_market_order_with_protection():
     assert call["product"] == kite.PRODUCT_CNC
     assert call["transaction_type"] == "BUY"
     assert call["quantity"] == 5
-    # -1 = Kite's own automatic protection band, applied against the
-    # *current* exchange price at execution -- not a price we compute here.
-    assert call["market_protection"] == -1
+    # An explicit 2% band, applied against the *current* exchange price at
+    # execution -- not a price we compute here.
+    assert call["market_protection"] == 2
     assert "price" not in call
 
 
@@ -85,7 +87,7 @@ def test_cash_sell_order_is_a_real_market_order_with_protection():
     call = kite.calls[0]
     assert call["order_type"] == kite.ORDER_TYPE_MARKET
     assert call["transaction_type"] == "SELL"
-    assert call["market_protection"] == -1
+    assert call["market_protection"] == 2
     assert "price" not in call
 
 
