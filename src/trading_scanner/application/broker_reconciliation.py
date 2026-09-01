@@ -75,3 +75,21 @@ async def position_lifecycle(
     attempted."""
     legs = await live_order_repository.get_cash_legs(symbol)
     return derive_position_lifecycle(legs)
+
+
+async def get_reconciliation_required_symbols(
+    live_order_repository: TursoLiveOrderRepository,
+) -> list[str]:
+    """Every symbol whose real cash position currently needs broker
+    ground truth to resolve (``PositionLifecycle.RECONCILIATION_
+    REQUIRED``) -- Phase 15 (observability): backs the dashboard's health
+    surface, so an ``UNKNOWN``-status leg is visible somewhere even before
+    a strategy exit signal or manual action happens to resolve it. Read-
+    only -- never places an order or otherwise acts on what it finds."""
+    symbols = await live_order_repository.get_cash_symbols()
+    flagged = []
+    for symbol in symbols:
+        lifecycle = await position_lifecycle(symbol, live_order_repository)
+        if lifecycle is PositionLifecycle.RECONCILIATION_REQUIRED:
+            flagged.append(symbol)
+    return flagged

@@ -355,3 +355,23 @@ async def test_an_arbitrary_kite_status_string_is_still_accepted(tmp_path: Path)
         assert legs[0].status == "TRIGGER PENDING"
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_cash_symbols_returns_distinct_symbols_only(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(order_id="o1", status="REJECTED"))
+        await repository.record_leg(_leg(order_id="o2", status="COMPLETE"))  # same symbol again
+        await repository.record_leg(
+            _leg(symbol="TCS.NS", tradingsymbol="TCS", basket_id="TCS.NS-cash-entry-1",
+                 order_id="o3", status="COMPLETE")
+        )
+
+        symbols = await repository.get_cash_symbols()
+
+        assert set(symbols) == {"RELIANCE.NS", "TCS.NS"}
+    finally:
+        await client.close()

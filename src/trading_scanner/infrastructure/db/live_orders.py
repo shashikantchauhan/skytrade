@@ -110,6 +110,17 @@ class TursoLiveOrderRepository:
         )
         return [_row_to_leg(row) for row in result.rows]
 
+    async def get_cash_symbols(self) -> Sequence[str]:
+        """Every distinct symbol with at least one ``purpose='cash'`` leg
+        ever recorded -- Phase 15 (observability): backs the dashboard's
+        reconciliation-status check (``application/broker_
+        reconciliation.py``'s ``position_lifecycle``), which needs to know
+        which symbols to check without scanning the whole allowlist."""
+        result = await self._client.execute(
+            "SELECT DISTINCT symbol FROM live_order_legs WHERE purpose = 'cash'"
+        )
+        return [row[0] for row in result.rows]
+
     async def get_legs(self, basket_id: str) -> Sequence[LiveOrderLeg]:
         result = await self._client.execute(
             """

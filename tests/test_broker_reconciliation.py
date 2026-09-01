@@ -4,6 +4,7 @@ checks) is closed by these functions, against a real local SQLite repo
 (same style as test_live_order_repository.py)."""
 
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -100,5 +101,48 @@ async def test_position_lifecycle_is_none_for_a_never_traded_symbol(tmp_path: Pa
         lifecycle = await broker_reconciliation.position_lifecycle("RELIANCE.NS", repository)
 
         assert lifecycle == PositionLifecycle.NONE
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_reconciliation_required_symbols_flags_only_the_unknown_one(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(symbol="RELIANCE.NS", tradingsymbol="RELIANCE"))
+        await repository.record_leg(
+            _leg(
+                symbol="TCS.NS", tradingsymbol="TCS", basket_id="TCS.NS-cash-entry-1",
+                status="COMPLETE", average_price=Decimal("3500"),
+            )
+        )
+
+        flagged = await broker_reconciliation.get_reconciliation_required_symbols(repository)
+
+        assert flagged == ["RELIANCE.NS"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_reconciliation_required_symbols_is_empty_when_nothing_needs_it(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(symbol="TCS.NS", tradingsymbol="TCS", status="COMPLETE",
+                 average_price=Decimal("3500"))
+        )
+
+        flagged = await broker_reconciliation.get_reconciliation_required_symbols(repository)
+
+        assert flagged == []
     finally:
         await client.close()

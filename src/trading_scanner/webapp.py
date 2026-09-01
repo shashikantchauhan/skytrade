@@ -1591,6 +1591,27 @@ async def live_pipeline_health(_: None = Depends(_require_session)) -> JSONRespo
     return JSONResponse(_live_pipeline_health())
 
 
+@app.get("/api/reconciliation-status")
+async def reconciliation_status(_: None = Depends(_require_session)) -> JSONResponse:
+    """Symbols whose real cash position currently needs broker ground
+    truth to resolve (Phase 15, observability -- see application/broker_
+    reconciliation.py). Read-only: never places an order or otherwise
+    acts on what it finds -- surfacing this is the whole point, since an
+    UNKNOWN-status leg used to be invisible everywhere until a strategy
+    exit or manual action happened to resolve it (see that module's own
+    docstring for the incident)."""
+    client, _config = _client()
+    try:
+        live_order_repository = TursoLiveOrderRepository(client)
+        await live_order_repository.ensure_schema()
+        flagged = await broker_reconciliation.get_reconciliation_required_symbols(
+            live_order_repository
+        )
+        return JSONResponse({"reconciliation_required": flagged})
+    finally:
+        await client.close()
+
+
 @app.post("/api/live-pipeline-health/restart")
 async def restart_live_pipeline(_: None = Depends(_require_admin)) -> JSONResponse:
     """Force-restart the live pipeline service -- the same action the
