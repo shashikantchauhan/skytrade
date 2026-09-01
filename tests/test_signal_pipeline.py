@@ -6,6 +6,7 @@ from decimal import Decimal
 import pandas as pd
 import pytest
 
+import trading_scanner.application.pipeline.capital_allocation as capital_allocation_module
 import trading_scanner.application.signal_pipeline as signal_pipeline_module
 from trading_scanner.application.fast_predict import ExitState, FastPredictResult, QueueState
 from trading_scanner.application.ranking import RankedCandidate
@@ -420,7 +421,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="BUY",
             prediction=6,
@@ -474,7 +475,7 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="NEUTRAL",
             prediction=-2,
@@ -526,7 +527,7 @@ async def test_sell_entry_abandons_a_still_open_buy_trade_without_scoring_it(mon
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="SELL",
             prediction=-6,
@@ -576,7 +577,7 @@ async def test_end_long_is_fingerprint_recorded_but_not_notified(monkeypatch) ->
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="NEUTRAL",
             prediction=-2,
@@ -675,7 +676,7 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="BUY",
             prediction=6,
@@ -824,7 +825,7 @@ async def test_concurrent_symbols_never_overspend_shared_paper_account(monkeypat
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="BUY",
             prediction=6,
@@ -906,7 +907,7 @@ async def test_end_long_closes_the_paper_position_with_realized_pnl(monkeypatch)
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="NEUTRAL",
             prediction=-2,
@@ -964,7 +965,7 @@ async def test_sell_signal_is_tagged_informational_only(monkeypatch) -> None:
         lambda self, symbol, interval, days: _small_recent_download(),
     )
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline.evaluate_latest_bar",
+        "trading_scanner.application.pipeline.evaluation.evaluate_latest_bar",
         lambda engine, history, signal_previous, queue_state, exit_state: FastPredictResult(
             signal="SELL",
             prediction=-6,
@@ -1051,7 +1052,7 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
         )
 
     monkeypatch.setattr(
-        "trading_scanner.application.signal_pipeline._evaluate_symbol", fake_evaluate_symbol
+        "trading_scanner.application.pipeline.orchestrator._evaluate_symbol", fake_evaluate_symbol
     )
     config = AppConfig(
         scan_interval_hours=1,
@@ -1098,7 +1099,7 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
 async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypatch) -> None:
     """A candidate scoring below MIN_SCORE is rejected outright, even with
     plenty of free capital -- distinct from a capacity-driven skip."""
-    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 80.0)
+    monkeypatch.setattr(capital_allocation_module, "MIN_SCORE", 80.0)
 
     # Both leave expectancy unset (None), which scores as the neutral
     # median decile (50 * 1.5 = 75) -- same fixed offset on both, so it
@@ -1126,7 +1127,7 @@ async def test_rank_and_open_paper_positions_rejects_below_score_floor(monkeypat
 
 
 async def test_rank_and_open_paper_positions_default_floor_is_a_no_op(monkeypatch) -> None:
-    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 0.0)
+    monkeypatch.setattr(capital_allocation_module, "MIN_SCORE", 0.0)
 
     weak = RankedCandidate(
         symbol="B", entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC), entry_price=Decimal("100"),
@@ -1510,7 +1511,7 @@ async def test_rank_and_open_cash_positions_opens_strongest_first_when_capacity_
 
 @pytest.mark.asyncio
 async def test_rank_and_open_cash_positions_rejects_below_score_floor(monkeypatch):
-    monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 10_000.0)  # nothing can clear this
+    monkeypatch.setattr(capital_allocation_module, "MIN_SCORE", 10_000.0)  # nothing can clear this
     candidate = _cash_candidate("RELIANCE.NS", prediction=5)
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
