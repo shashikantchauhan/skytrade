@@ -12,7 +12,30 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True, slots=True)
 class AppConfig:
-    """Settings required to run one market scan."""
+    """Settings required to run one market scan.
+
+    Static, process-startup configuration ONLY -- loaded once by
+    ``load_config()`` and never mutated or cloned afterward (see Phase 11
+    of `projectedPlann.md`, ``docs/architecture/000-audit.md``). Anything
+    a human can change while the process is already running (the
+    dashboard's "Go Live" cash-trading toggle: enabled/symbols/notional/
+    max_positions) is deliberately NOT one of these fields' live value --
+    it lives in its own dedicated runtime-state type instead
+    (``infrastructure/db/live_cash_toggle.py``'s ``LiveCashToggleState``,
+    read fresh from the DB every scan cycle) and is threaded through as
+    its own explicit parameter wherever it's needed, alongside this
+    (unrelated, still-static) config.
+
+    2026-09-01: this distinction used to be blurred -- a
+    ``dataclasses.replace(AppConfig, ...)`` clone merging the DB toggle's
+    live values onto a copy of this static config was built, and a bug in
+    which of the two nearly-identical ``AppConfig`` objects got passed
+    into one call site silently disabled real order execution in
+    production with zero log output (see ``application/live_cash_
+    execution.py``'s own module docstring for the incident). Never
+    reintroduce that pattern -- a dashboard-adjustable setting belongs in
+    its own type, not folded into a clone of this one.
+    """
 
     scan_interval_hours: int
     candle_interval: str
