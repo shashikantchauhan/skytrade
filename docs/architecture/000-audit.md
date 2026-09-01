@@ -129,6 +129,30 @@ generalize this pattern, not invent a new one.
   dashboard -- exactly the risk profile this refactor's own ground rules
   say to avoid attempting without characterization tests first.
 
+- **Phase 17 (research cleanup)**: already satisfied by the existing
+  structure -- `analysis/` already sits outside `src/trading_scanner/`
+  (production code), a real, working separation. Not renamed to
+  `research/`: multiple in-code docstrings reference exact paths like
+  `analysis/eviction_rule_simulation.py`/`analysis/bad_trade_filters.py`,
+  and renaming would mean finding and updating every one of those for a
+  purely cosmetic change with no functional benefit -- not worth the
+  churn. `src/trading_scanner/experiments/` (an empty, untracked
+  directory) predates this branch and isn't this refactor's to clean up.
+- **Phase 18 (ADRs)**: `docs/decisions/001` through `005` written for the
+  five biggest incidents/decisions this session's work addressed. The
+  in-code comments they summarize were deliberately NOT trimmed to bare
+  pointers (unlike the doc's literal suggestion) -- see
+  `docs/decisions/README.md`'s own note on why.
+- **Phase 19 (CI hardening)**: `.github/workflows/ci.yml`'s `deploy` job
+  now runs `pip install -e .` after `git pull` (dependency sync, using
+  `poetry-core`'s declared build backend so it works without poetry
+  itself on the VPS) and fails the deploy (not just logs a warning) if
+  either systemd service isn't `active` a few seconds after restart.
+  Verified: YAML parses, the embedded shell script passes `bash -n` --
+  not verified against the real VPS from this environment (no SSH access
+  here); first real verification happens on the next actual deploy after
+  merge.
+
 ## Non-goals reaffirmed
 
 Every threshold, filter, and formula below is a read-only input to the new

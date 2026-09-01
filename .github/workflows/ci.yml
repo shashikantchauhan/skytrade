@@ -42,12 +42,27 @@ jobs:
           script: |
             set -e
             cd /opt/p-trade
-            # Mirrors the documented manual process exactly (README/deploy/
-            # p-trade-live.service): git pull, then restart. No dependency
-            # reinstall step -- the manual process never had one either
-            # (the VPS's .venv is not poetry-managed in place; a PR adding a
-            # new dependency still needs a one-off manual venv update, same
-            # as it always has).
             git pull origin main --ff-only
+            # Phase 19 (projectedPlann.md, docs/decisions/): a PR adding a
+            # new dependency used to need a separate, easy-to-forget manual
+            # venv update on the VPS -- poetry-core is the declared build
+            # backend (see pyproject.toml's [build-system]), so pip can
+            # resolve/install straight from pyproject.toml without poetry
+            # itself being installed on the VPS. Quiet and idempotent: a
+            # no-op whenever dependencies haven't actually changed.
+            .venv/bin/pip install -q -e .
             systemctl restart p-trade-live
             systemctl restart p-trade-dashboard
+            # Phase 19: fail the deploy (not just log a warning) if either
+            # service doesn't come up healthy, instead of finding out later
+            # from a missed heartbeat/silent gap -- give each a moment past
+            # the restart before checking, same margin systemd itself needs
+            # to report a genuine crash-on-start rather than "activating".
+            sleep 5
+            for service in p-trade-live p-trade-dashboard; do
+              if [ "$(systemctl is-active "$service")" != "active" ]; then
+                echo "$service is not active after restart -- deploy failed." >&2
+                systemctl status "$service" --no-pager || true
+                exit 1
+              fi
+            done
