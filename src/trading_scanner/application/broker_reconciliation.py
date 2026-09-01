@@ -26,11 +26,16 @@ instead of calling ``get_open_cash_legs``/``get_all_open_cash_legs``
 directly.
 """
 
+import asyncio
+import logging
 from collections.abc import Sequence
 
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.order_lifecycle import PositionLifecycle, derive_position_lifecycle
-from trading_scanner.infrastructure.db import TursoLiveOrderRepository
+from trading_scanner.infrastructure.db import LiveCashToggleState, TursoLiveOrderRepository
+from trading_scanner.infrastructure.kite import KiteOrderExecutor, to_kite_tradingsymbol
+
+logger = logging.getLogger(__name__)
 
 
 async def get_unclosed_entry_leg(
@@ -93,3 +98,46 @@ async def get_reconciliation_required_symbols(
         if lifecycle is PositionLifecycle.RECONCILIATION_REQUIRED:
             flagged.append(symbol)
     return flagged
+
+
+async def find_hidden_positions(
+    cash_state: LiveCashToggleState,
+    order_executor: KiteOrderExecutor,
+    live_order_repository: TursoLiveOrderRepository,
+) -> list[str]:
+    """Every symbol in the current cash allowlist with a real broker-side
+    holding but literally no local unclosed leg accounting for it -- the
+    one gap ``execute_cash_entry``'s own broker-ground-truth preflight
+    (``live_cash_execution.py``, 2026-09-01) can't reach on its own,
+    because that preflight only ever runs when a matching signal fires
+    again. A hidden position can persist with no signal ever recurring for
+    it (the crash that lost the local write happened on a signal that
+    won't repeat, or the position came from something entirely outside
+    this app's own order flow) -- this is the periodic, allowlist-wide
+    sweep for exactly that case (the spec's own test case: "existing real
+    broker position but missing local ledger row").
+
+    Read-only -- never places an order or writes to the ledger itself
+    (unlike the entry preflight, which reconciles what it finds because
+    it's already mid-decision for that one symbol); this only surfaces the
+    symbol list for a caller (``live_pipeline.py``) to alert a human about.
+    Best-effort per symbol: a ``holding_quantity`` failure for one symbol
+    is logged and skipped, never allowed to abort the sweep for the rest
+    of the allowlist."""
+    hidden: list[str] = []
+    for symbol in sorted(cash_state.symbols):
+        tradingsymbol = to_kite_tradingsymbol(symbol)
+        try:
+            real_quantity = await asyncio.to_thread(order_executor.holding_quantity, tradingsymbol)
+        except Exception:
+            logger.warning(
+                "Hidden-position check failed for %s -- skipping this cycle.",
+                symbol, exc_info=True,
+            )
+            continue
+        if real_quantity <= 0:
+            continue
+        unclosed = await live_order_repository.get_unclosed_cash_legs(symbol)
+        if not unclosed:
+            hidden.append(symbol)
+    return hidden

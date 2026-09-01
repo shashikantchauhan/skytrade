@@ -105,6 +105,7 @@ async def _place_and_wait(
     transaction_type: str,
     quantity: int,
     reference_price: Decimal,
+    tag: str | None = None,
 ) -> CashLegResult:
     """Places one real cash order and blocks (off the event loop) until it
     fills or times out. Never raises -- same "treat an exception as a
@@ -114,7 +115,11 @@ async def _place_and_wait(
     order placed via the API ("Market orders without market protection are
     not allowed via API"), discovered when the very first real order this
     system ever placed failed on it. ``place_cash_market_order`` uses this
-    to price a protected limit order instead (see its own docstring)."""
+    to price a protected limit order instead (see its own docstring).
+
+    ``tag`` -- see ``place_cash_market_order``'s own docstring; forwarded
+    as-is (None for an exit, an entry's ``intent_id[:20]`` for an entry --
+    see ``execute_cash_entry``)."""
     try:
         order_id = await asyncio.to_thread(
             order_executor.place_cash_market_order,
@@ -122,6 +127,7 @@ async def _place_and_wait(
             transaction_type,
             quantity,
             reference_price,
+            tag,
         )
     except Exception:
         logger.exception(
@@ -198,6 +204,150 @@ async def _record(
             intent_id=intent_id,
         )
     )
+
+
+def _confirmed_no_position(status: str) -> bool:
+    """True only for a status we know for certain never resulted in a real
+    position -- Kite's own REJECTED/CANCELLED. Any other status, including
+    one this codebase doesn't otherwise branch on (e.g. Kite's own
+    "TRIGGER PENDING"), is NOT confirmed-safe: fail closed rather than risk
+    a duplicate order against a position that may already be real."""
+    return status in ("REJECTED", "CANCELLED")
+
+
+async def _broker_ground_truth_preflight(
+    symbol: str,
+    tradingsymbol: str,
+    intent,
+    order_executor: KiteOrderExecutor,
+    live_order_repository: TursoLiveOrderRepository,
+    notifier: Notifier,
+) -> bool:
+    """Closes the one gap ``intent_id`` alone can't (see ``domain/
+    order_intent.py``'s own docstring): Kite accepting an order and this
+    process dying before ``_record`` ever ran, so a fresh attempt at the
+    exact same intent -- possibly a whole new process, after a restart --
+    has zero local memory that anything was ever tried. Called once, right
+    before the first placement attempt for a fresh intent; the local
+    ``get_legs_by_intent`` check above already covers every case where
+    *this* process's own ledger has something to say.
+
+    Checks two independent broker-ground-truth signals and reconciles
+    (records locally, notifies) whatever either finds instead of ever
+    placing a new order on top of it, per the "prefer blocking a duplicate
+    entry over placing another order" discipline this whole function
+    exists for:
+
+    1. An order still sitting in *today's* order book tagged with this
+       exact intent (``KiteOrderExecutor.find_todays_order_by_tag`` --
+       ``place_cash_market_order`` stamps every real entry with
+       ``intent.intent_id[:20]`` as its Kite ``tag``, see that function's
+       own docstring). Catches the order regardless of whether it has
+       filled yet.
+    2. A real held quantity for ``tradingsymbol``
+       (``KiteOrderExecutor.holding_quantity``, the same ground-truth
+       check ``gtt_bracket.reconcile_before_exit`` already trusts) that no
+       local leg accounts for -- catches a filled position even when the
+       tag lookup above somehow misses it, and independently catches the
+       broader "a real position exists with literally zero local record"
+       case (e.g. this exact signal will never recur, so the tag alone
+       would never be re-checked).
+
+    Returns True if a new order must be blocked.
+
+    Best-effort: if the broker calls themselves fail (a transient Kite API
+    error, or in tests, a fake that doesn't implement them), this is
+    treated the same as "found nothing" and the caller proceeds --
+    matching ``gtt_bracket.reconcile_before_exit``'s own established
+    fallback discipline elsewhere in this codebase. The risk being closed
+    here is what happens when the check *succeeds* and finds real
+    evidence, not what happens when the check itself is unavailable:
+    refusing every entry whenever a single broker call hiccups would trade
+    a rare, already-mitigated risk (a lost local write) for a routine one
+    (blocking genuinely fresh, legitimate signals on ordinary API
+    flakiness)."""
+    tag = intent.intent_id[:20]
+    try:
+        broker_order = await asyncio.to_thread(order_executor.find_todays_order_by_tag, tag)
+    except Exception:
+        logger.warning(
+            "Broker order-book lookup by tag failed for %s -- proceeding without it.",
+            symbol, exc_info=True,
+        )
+        broker_order = None
+
+    if broker_order is not None:
+        status = str(broker_order.get("status", "UNKNOWN"))
+        average_price = broker_order.get("average_price")
+        basket_id = f"{symbol}-cash-reconciled-crash-recovery-{datetime.now(UTC).isoformat()}"
+        confirmed_safe = _confirmed_no_position(status)
+        await _record(
+            live_order_repository, basket_id, symbol,
+            CashLegResult(
+                tradingsymbol=tradingsymbol,
+                transaction_type="BUY",
+                quantity=int(
+                    broker_order.get("quantity") or broker_order.get("filled_quantity") or 0
+                ),
+                order_id=str(broker_order.get("order_id") or ""),
+                status=status,
+                average_price=Decimal(str(average_price)) if average_price else None,
+                rejection_reason=(
+                    "Reconciled from Kite's own order book -- this process had no local "
+                    "record of it (likely a crash between the broker accepting the order "
+                    "and this app recording it normally)."
+                ),
+            ),
+            intent.intent_id,
+        )
+        if not confirmed_safe:
+            await notifier.send_text(
+                "⚠️ <b>RECONCILIATION REQUIRED</b>\n"
+                f"{symbol}: found an untracked order for this exact signal already in "
+                f"Kite's order book (status={status}) -- recorded it, refusing to place a "
+                "duplicate. Verify directly in Kite."
+            )
+            return True
+        # REJECTED/CANCELLED -- confirmed no real position resulted. Worth
+        # the audit-trail row above (this process never recorded it), but
+        # not a reason to block a fresh attempt.
+
+    try:
+        real_quantity = await asyncio.to_thread(order_executor.holding_quantity, tradingsymbol)
+    except Exception:
+        logger.warning(
+            "Broker holding-quantity check failed for %s -- proceeding without it.",
+            symbol, exc_info=True,
+        )
+        real_quantity = None
+
+    if real_quantity:
+        basket_id = f"{symbol}-cash-reconciled-hidden-position-{datetime.now(UTC).isoformat()}"
+        await _record(
+            live_order_repository, basket_id, symbol,
+            CashLegResult(
+                tradingsymbol=tradingsymbol,
+                transaction_type="BUY",
+                quantity=real_quantity,
+                order_id="RECONCILED-HOLDING",
+                status="COMPLETE",
+                average_price=None,
+                rejection_reason=(
+                    "Reconciled from Kite's own real holding quantity -- a real position "
+                    "exists with no local ledger row at all (order_id/fill price unknown)."
+                ),
+            ),
+            intent.intent_id,
+        )
+        await notifier.send_text(
+            "⚠️ <b>RECONCILIATION REQUIRED</b>\n"
+            f"{symbol}: {real_quantity} real shares are held at the broker with no "
+            "matching local record -- recorded it, refusing to place a duplicate. "
+            "Verify directly in Kite."
+        )
+        return True
+
+    return False
 
 
 async def execute_cash_entry(
@@ -313,6 +463,21 @@ async def execute_cash_entry(
         return None
 
     tradingsymbol = to_kite_tradingsymbol(symbol)
+
+    # P0 fix (2026-09-01): the intent-legs check above only catches an
+    # attempt *this process itself* already recorded -- it says nothing
+    # about an order Kite accepted that got lost before ``_record`` ever
+    # ran (a crash between ``place_order`` returning and the local write).
+    # See ``_broker_ground_truth_preflight``'s own docstring for exactly
+    # what this closes and why it's checked here, once, rather than on
+    # every retry attempt below (a REJECTED/CANCELLED local record from an
+    # earlier attempt in *this* call already proves definitively that no
+    # real position resulted, so there is nothing left to reconcile).
+    if await _broker_ground_truth_preflight(
+        symbol, tradingsymbol, intent, order_executor, live_order_repository, notifier
+    ):
+        return None
+
     quantity = max(1, int(cash_state.notional / market_price))
     basket_id = f"{symbol}-cash-entry-{datetime.now(UTC).isoformat()}"
 
@@ -342,7 +507,10 @@ async def execute_cash_entry(
                 break
             await asyncio.sleep(_ENTRY_RETRY_BACKOFF_SECONDS)
 
-        leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)
+        leg = await _place_and_wait(
+            order_executor, tradingsymbol, "BUY", quantity, market_price,
+            tag=intent.intent_id[:20],
+        )
         attempts_made += 1
         await _record(live_order_repository, basket_id, symbol, leg, intent.intent_id)
 

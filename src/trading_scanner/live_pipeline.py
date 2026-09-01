@@ -33,6 +33,7 @@ from kiteconnect import KiteConnect, KiteTicker
 from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
+from trading_scanner.application import broker_reconciliation
 from trading_scanner.application.futures_trading import FUTURES_INITIAL_CAPITAL
 from trading_scanner.application.paper_trading import (
     INITIAL_CAPITAL,
@@ -173,6 +174,13 @@ class LiveTickerPipeline:
         # together open more real positions than max_positions ever
         # intended. See application/signal_pipeline.py's matching lock.
         self._live_cash_lock = asyncio.Lock()
+        # P0 (2026-09-01): symbols already alerted this process lifetime for
+        # broker_reconciliation.find_hidden_positions -- see
+        # _process_closed_candles' own call site. Debounces the Telegram
+        # alert (a real, unmanaged position needs a human, not one message
+        # per hourly cycle until it's resolved); a process restart re-
+        # alerting on a still-unresolved symbol is acceptable and intended.
+        self._hidden_position_alerted: set[str] = set()
         self._client = None
         self._repos: dict = {}
         self._notifier = None
@@ -449,6 +457,40 @@ class LiveTickerPipeline:
         )
         await self._process_closed_candles(candles)
 
+    async def _alert_hidden_positions(
+        self, cash_state: LiveCashToggleState, order_executor: KiteOrderExecutor
+    ) -> None:
+        """P0 (2026-09-01): once per cycle, sweep the whole cash allowlist
+        for a real broker-side holding with no local ledger row at all --
+        see ``broker_reconciliation.find_hidden_positions``'s own
+        docstring for exactly what this catches that ``execute_cash_
+        entry``'s own per-signal preflight can't. Best-effort and
+        debounced (``self._hidden_position_alerted``) -- never allowed to
+        raise into the caller, never re-alerts the same symbol every
+        cycle."""
+        if not cash_state.enabled or self._notifier is None:
+            return
+        try:
+            hidden = await broker_reconciliation.find_hidden_positions(
+                cash_state, order_executor, self._repos["live_order"]
+            )
+        except Exception:
+            logger.exception("Hidden-position sweep raised -- skipping this cycle.")
+            return
+        for symbol in hidden:
+            if symbol in self._hidden_position_alerted:
+                continue
+            self._hidden_position_alerted.add(symbol)
+            await self._notifier.send_text(
+                "⚠️ <b>RECONCILIATION REQUIRED</b>\n"
+                f"{symbol}: real shares are held at the broker with no matching local "
+                "record at all -- verify directly in Kite and reconcile manually."
+            )
+        # A symbol that's since been reconciled (locally recorded, or the
+        # broker position closed) should be re-alertable if it ever goes
+        # hidden again -- drop anything not in this cycle's hidden set.
+        self._hidden_position_alerted.intersection_update(hidden)
+
     async def _process_closed_candles(self, candles: dict[str, Candle]) -> None:
         kite = KiteConnect(api_key=self._config.kite_api_key)
         kite.set_access_token(self._access_token)
@@ -477,6 +519,7 @@ class LiveTickerPipeline:
                 max_positions=self._config.live_cash_trading_max_positions,
             )
         )
+        await self._alert_hidden_positions(cash_state, order_executor)
 
         index_result = None
         if self._config.index_symbol and self._config.index_symbol in candles:

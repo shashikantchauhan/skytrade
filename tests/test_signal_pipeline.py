@@ -1409,7 +1409,9 @@ class _FakeCashOrderExecutor:
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
 
-    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity, reference_price):
+    def place_cash_market_order(
+        self, tradingsymbol, transaction_type, quantity, reference_price, tag=None
+    ):
         self.calls.append((tradingsymbol, transaction_type, quantity))
         self._order_counter += 1
         return f"order-{self._order_counter}"

@@ -12,7 +12,11 @@ import pytest
 from trading_scanner.application import broker_reconciliation
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.order_lifecycle import PositionLifecycle
-from trading_scanner.infrastructure.db import TursoLiveOrderRepository, create_turso_client
+from trading_scanner.infrastructure.db import (
+    LiveCashToggleState,
+    TursoLiveOrderRepository,
+    create_turso_client,
+)
 
 
 def _local_url(tmp_path: Path) -> str:
@@ -144,5 +148,108 @@ async def test_get_reconciliation_required_symbols_is_empty_when_nothing_needs_i
         flagged = await broker_reconciliation.get_reconciliation_required_symbols(repository)
 
         assert flagged == []
+    finally:
+        await client.close()
+
+
+class _FakeOrderExecutor:
+    """Scripts holding_quantity per tradingsymbol -- for
+    find_hidden_positions's own tests, no real Kite connection."""
+
+    def __init__(self, holdings: dict[str, int]) -> None:
+        self._holdings = holdings
+        self.raises_for: set[str] = set()
+
+    def holding_quantity(self, tradingsymbol: str) -> int:
+        if tradingsymbol in self.raises_for:
+            raise RuntimeError("Kite API error")
+        return self._holdings.get(tradingsymbol, 0)
+
+
+def _cash_state(symbols: frozenset[str]) -> LiveCashToggleState:
+    return LiveCashToggleState(
+        enabled=True, symbols=symbols, notional=Decimal("50000"), max_positions=8
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_hidden_positions_flags_a_real_holding_with_no_local_record(
+    tmp_path: Path,
+) -> None:
+    # P0 (2026-09-01): the case execute_cash_entry's own per-signal
+    # preflight can't reach on its own -- no local ledger row at all, and
+    # no signal needs to recur to surface it.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        executor = _FakeOrderExecutor({"RELIANCE": 5})
+
+        hidden = await broker_reconciliation.find_hidden_positions(
+            _cash_state(frozenset({"RELIANCE.NS"})), executor, repository
+        )
+
+        assert hidden == ["RELIANCE.NS"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_find_hidden_positions_is_empty_when_the_local_ledger_already_accounts_for_it(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(status="COMPLETE", average_price=Decimal("1500")))
+        executor = _FakeOrderExecutor({"RELIANCE": 5})
+
+        hidden = await broker_reconciliation.find_hidden_positions(
+            _cash_state(frozenset({"RELIANCE.NS"})), executor, repository
+        )
+
+        assert hidden == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_find_hidden_positions_skips_a_symbol_whose_broker_check_fails(
+    tmp_path: Path,
+) -> None:
+    # One symbol's holding_quantity failing (a transient Kite API error)
+    # must not abort the sweep for the rest of the allowlist.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        executor = _FakeOrderExecutor({"TCS": 3})
+        executor.raises_for.add("RELIANCE")
+
+        hidden = await broker_reconciliation.find_hidden_positions(
+            _cash_state(frozenset({"RELIANCE.NS", "TCS.NS"})), executor, repository
+        )
+
+        assert hidden == ["TCS.NS"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_find_hidden_positions_is_empty_when_no_real_shares_are_held(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        executor = _FakeOrderExecutor({})
+
+        hidden = await broker_reconciliation.find_hidden_positions(
+            _cash_state(frozenset({"RELIANCE.NS"})), executor, repository
+        )
+
+        assert hidden == []
     finally:
         await client.close()

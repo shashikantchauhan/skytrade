@@ -496,6 +496,7 @@ class KiteOrderExecutor:
         transaction_type: str,
         quantity: int,
         reference_price: Decimal,
+        tag: str | None = None,
     ) -> str:
         """Places a real NSE cash-equity order, product CNC (delivery --
         carries the position overnight, matching this strategy's multi-day
@@ -530,7 +531,15 @@ class KiteOrderExecutor:
         response recommending an explicit percentage instead. Even with an
         explicit percentage, execution past NSE's own exchange-side price-
         protection band still can't be guaranteed -- this reduces, not
-        eliminates, the chance of an order sitting unfilled."""
+        eliminates, the chance of an order sitting unfilled.
+
+        ``tag`` -- 2026-09-01: stamped with the caller's ``OrderIntent.
+        intent_id`` (see ``domain/order_intent.py``) so a crash between
+        Kite accepting this order and this process recording it locally
+        can still be found afterwards via ``find_todays_order_by_tag``,
+        instead of only being detectable by a human reading Kite's own
+        order book. Kite caps a tag at 20 alphanumeric characters -- the
+        caller is responsible for truncating a longer id."""
         return self._kite.place_order(
             variety=self._kite.VARIETY_REGULAR,
             exchange="NSE",
@@ -540,7 +549,31 @@ class KiteOrderExecutor:
             order_type=self._kite.ORDER_TYPE_MARKET,
             product=self._kite.PRODUCT_CNC,
             market_protection=_CASH_MARKET_PROTECTION_PERCENT,
+            tag=tag,
         )
+
+    def find_todays_order_by_tag(self, tag: str) -> dict | None:
+        """The most recent entry in *today's* order book (``kite.orders()``)
+        carrying ``tag``, or None if nothing does -- broker ground truth for
+        "did an order for this exact intent already reach Kite," used
+        before ``execute_cash_entry`` places a brand-new order under an
+        intent this process has no local record of (see that function's own
+        2026-09-01 docstring on the crash-window this closes: Kite accepted
+        an order, the process died before ``_record`` ever ran, and a
+        fresh process retrying the same signal must not blindly place a
+        second real order).
+
+        ``kite.orders()`` returns one row per order_id (its current/latest
+        state, not full history like ``order_history``) -- unlike
+        ``find_todays_order_by_tag``'s caller, which only ever expects at
+        most one order per intent tag in ordinary operation, so "most
+        recent" here is a defensive tie-break, not something relied on to
+        happen."""
+        orders = self._kite.orders()
+        matches = [order for order in orders if order.get("tag") == tag]
+        if not matches:
+            return None
+        return max(matches, key=lambda order: str(order.get("order_timestamp", "")))
 
     def place_cash_bracket_gtt(
         self,

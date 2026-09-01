@@ -91,21 +91,39 @@ class FakeOrderExecutor:
         scripted: dict[tuple[str, str], list[str]],
         holding_quantity: int | None = None,
         wait_for_fill_raises: bool = False,
+        tagged_order: dict | None = None,
+        find_by_tag_raises: bool = False,
     ) -> None:
         self._scripted = {key: list(values) for key, values in scripted.items()}
         self.calls: list[tuple[str, str, int]] = []
+        self.tags_used: list[str | None] = []
         self._order_counter = 0
         # None -- not configured -- raises, same as a real API error would.
         self._holding_quantity = holding_quantity
         self._wait_for_fill_raises = wait_for_fill_raises
+        # A single pre-scripted order for find_todays_order_by_tag to
+        # "find" (the P0 broker-ground-truth preflight) -- None means
+        # nothing is sitting in the broker's order book under any tag.
+        self._tagged_order = tagged_order
+        self._find_by_tag_raises = find_by_tag_raises
 
     def holding_quantity(self, tradingsymbol):
         if self._holding_quantity is None:
             raise RuntimeError("holding_quantity not configured for this fake")
         return self._holding_quantity
 
-    def place_cash_market_order(self, tradingsymbol, transaction_type, quantity, reference_price):
+    def find_todays_order_by_tag(self, tag):
+        if self._find_by_tag_raises:
+            raise RuntimeError("Kite order-book lookup failed")
+        if self._tagged_order is not None and self._tagged_order.get("tag") == tag:
+            return self._tagged_order
+        return None
+
+    def place_cash_market_order(
+        self, tradingsymbol, transaction_type, quantity, reference_price, tag=None
+    ):
         self.calls.append((tradingsymbol, transaction_type, quantity))
+        self.tags_used.append(tag)
         self._order_counter += 1
         return f"order-{self._order_counter}"
 
@@ -343,6 +361,154 @@ async def test_entry_allowed_when_the_same_intent_only_has_rejected_legs():
     ]
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository(legs_by_intent={intent_id: only_rejected})
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]
+
+
+# --- P0 broker-crash-window preflight (2026-09-01) -------------------------
+# The gap intent_id alone can't close: Kite accepts an order, the process
+# dies before _record ever runs, and a fresh attempt at the exact same
+# signal (new process, same deterministic intent_id) has zero local memory
+# of it. See _broker_ground_truth_preflight's own docstring.
+
+
+@pytest.mark.asyncio
+async def test_entry_tags_the_real_order_with_the_intent_id():
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    intent_id = order_intent.compute_intent_id("RELIANCE.NS", "BUY", signal_timestamp, "cash")
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is not None
+    assert executor.tags_used == [intent_id[:20]]
+
+
+@pytest.mark.asyncio
+async def test_entry_reconciles_instead_of_duplicating_when_broker_already_has_a_tagged_order():
+    # The core P0 scenario: this process has no local record of this intent
+    # at all (legs_by_intent is empty, same as a totally fresh process), but
+    # Kite's own order book already has a COMPLETE order tagged with this
+    # exact intent -- proof a previous attempt got through the broker
+    # before whatever recorded it locally crashed. Must reconcile, not
+    # place a second real BUY.
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    intent_id = order_intent.compute_intent_id("RELIANCE.NS", "BUY", signal_timestamp, "cash")
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor(
+        {("RELIANCE", "BUY"): ["COMPLETE"]},
+        tagged_order={
+            "tag": intent_id[:20], "order_id": "broker-order-1", "status": "COMPLETE",
+            "quantity": 5, "average_price": 1001.5,
+        },
+    )
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier,
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is None  # never returns a fresh basket_id -- no new order placed
+    assert executor.calls == []  # place_cash_market_order was never called
+    assert len(repo.recorded) == 1
+    reconciled = repo.recorded[0]
+    assert reconciled.order_id == "broker-order-1"
+    assert reconciled.status == "COMPLETE"
+    assert reconciled.quantity == 5
+    assert reconciled.intent_id == intent_id
+    assert any("RECONCILIATION REQUIRED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_proceeds_when_the_tagged_broker_order_is_confirmed_rejected():
+    # A tagged order found in the broker's book with a REJECTED/CANCELLED
+    # status is definitive proof no real position resulted -- must not
+    # block a fresh, legitimate attempt at the same signal.
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    intent_id = order_intent.compute_intent_id("RELIANCE.NS", "BUY", signal_timestamp, "cash")
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor(
+        {("RELIANCE", "BUY"): ["COMPLETE"]},
+        tagged_order={
+            "tag": intent_id[:20], "order_id": "broker-order-1", "status": "REJECTED",
+            "quantity": 5, "average_price": None,
+        },
+    )
+    repo = FakeLiveOrderRepository()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]  # the fresh attempt was placed
+    # both the audit-trail reconciliation row AND the fresh COMPLETE fill
+    # are recorded, in that order.
+    assert [leg.status for leg in repo.recorded] == ["REJECTED", "COMPLETE"]
+
+
+@pytest.mark.asyncio
+async def test_entry_blocked_when_broker_shows_a_real_holding_with_no_local_record():
+    # No tagged order (e.g. the signal that caused it will never recur, or
+    # the tag lookup missed it) but Kite's real holding_quantity shows
+    # shares are actually held -- the broader "hidden position" case
+    # (spec's test case 8: existing real broker position but missing local
+    # ledger row).
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]}, holding_quantity=5)
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier,
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is None
+    assert executor.calls == []
+    assert len(repo.recorded) == 1
+    reconciled = repo.recorded[0]
+    assert reconciled.order_id == "RECONCILED-HOLDING"
+    assert reconciled.status == "COMPLETE"
+    assert reconciled.quantity == 5
+    assert any("RECONCILIATION REQUIRED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_proceeds_when_broker_preflight_checks_are_unavailable():
+    # Both broker calls failing (a transient Kite API error) must NOT block
+    # every fresh entry -- the risk being closed is what happens when the
+    # check *succeeds* and finds real evidence, not when the check itself
+    # is unavailable. Matches gtt_bracket.reconcile_before_exit's own
+    # fallback discipline.
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor(
+        {("RELIANCE", "BUY"): ["COMPLETE"]}, find_by_tag_raises=True,
+        # holding_quantity left unconfigured -- raises, same as a real
+        # infrastructure failure would.
+    )
+    repo = FakeLiveOrderRepository()
 
     result = await live_cash_execution.execute_cash_entry(
         "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
