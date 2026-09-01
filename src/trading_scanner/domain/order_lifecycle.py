@@ -120,12 +120,27 @@ def derive_position_lifecycle(legs: Sequence[LiveOrderLeg]) -> PositionLifecycle
     The "opening" transaction_type is whichever the first leg used --
     always BUY for this app's real cash trades (see ``_net_unclosed_legs``
     in infrastructure/db/live_orders.py, the netting logic this mirrors).
+    This is a long-only-market invariant, not a generic "whatever came
+    first" rule -- deriving direction from mere leg order would silently
+    read a SELL-opened short as if it were the opening leg the moment this
+    module is ever pointed at a market that allows one (a future
+    derivatives/short-selling flow). Enforced below rather than left
+    implicit: the first leg not being BUY raises immediately instead of
+    quietly producing a wrong lifecycle.
     """
     if not legs:
         return PositionLifecycle.NONE
 
     ordered = sorted(legs, key=lambda leg: leg.placed_at)
     opening_type = ordered[0].transaction_type
+    if opening_type != "BUY":
+        raise ValueError(
+            f"derive_position_lifecycle assumes a long-only (BUY-opened) market -- got a "
+            f"first leg with transaction_type={opening_type!r} for basket "
+            f"{ordered[0].basket_id!r}. This function is not valid for a short/SELL-opened "
+            "position; a derivatives/short-selling flow needs its own lifecycle derivation, "
+            "not a silent reuse of this cash-only one."
+        )
 
     # Any UNKNOWN leg anywhere in the still-relevant history means local
     # records alone can't answer "is this open" -- broker ground truth is

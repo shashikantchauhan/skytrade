@@ -76,4 +76,4 @@ def evaluate_cash_quality_gates(
             None if conviction_passed else _CONVICTION_REASON,
         ),
     )
-    return EntryDecision(allowed=quality_passed and conviction_passed, gates=gates)
+    return EntryDecision(gates=gates)

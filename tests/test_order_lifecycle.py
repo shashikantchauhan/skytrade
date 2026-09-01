@@ -6,6 +6,8 @@ because they all used the narrower COMPLETE-only status set)."""
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
+
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.order_lifecycle import (
     LegStatus,
@@ -100,6 +102,50 @@ def test_a_partial_exit_leaves_the_remainder_active():
         _leg(1, order_id="o2", transaction_type="SELL", quantity=8, status="COMPLETE"),
     ]
     assert derive_position_lifecycle(legs) == PositionLifecycle.ACTIVE
+
+
+def test_a_sell_opened_first_leg_raises_rather_than_silently_deriving_direction():
+    # 2026-09-01: the long-only-market assumption behind "the opening
+    # transaction_type is whichever the first leg used" must be a loud
+    # invariant, not a silent one -- a future non-cash flow (short-selling,
+    # derivatives) must not inherit this cash-only lifecycle by accident.
+    legs = [_leg(0, order_id="o1", transaction_type="SELL", status="COMPLETE")]
+    with pytest.raises(ValueError, match="long-only"):
+        derive_position_lifecycle(legs)
+
+
+def test_an_open_exit_leg_is_exit_pending_even_when_unconfirmed():
+    legs = [
+        _leg(0, order_id="o1", status="COMPLETE"),
+        _leg(1, order_id="o2", transaction_type="SELL", status="OPEN", average_price=None,
+             quantity=5),
+    ]
+    assert derive_position_lifecycle(legs) == PositionLifecycle.EXIT_PENDING
+
+
+def test_multiple_baskets_net_correctly_across_the_whole_symbol_history():
+    # Two separate entry baskets (different basket_id, same tradingsymbol
+    # via the same LiveOrderLeg.symbol) plus one exit that only closes the
+    # first -- the remainder from the second basket must still read ACTIVE,
+    # matching _net_unclosed_legs' own FIFO semantics.
+    legs = [
+        _leg(0, basket_id="b1", order_id="o1", quantity=8, status="COMPLETE"),
+        _leg(1, basket_id="b2", order_id="o2", quantity=9, status="COMPLETE"),
+        _leg(2, basket_id="b3", order_id="o3", transaction_type="SELL", quantity=8,
+             status="COMPLETE"),
+    ]
+    assert derive_position_lifecycle(legs) == PositionLifecycle.ACTIVE
+
+
+def test_restart_recovery_ordering_is_unaffected_by_insertion_order():
+    # placed_at ordering, not list order, decides "opening" -- simulates
+    # legs coming back from a DB query in a different order than they were
+    # placed (e.g. after a process restart re-reads the ledger).
+    legs = [
+        _leg(1, order_id="o2", transaction_type="SELL", status="COMPLETE"),  # later, listed first
+        _leg(0, order_id="o1", status="COMPLETE"),  # earlier, listed second
+    ]
+    assert derive_position_lifecycle(legs) == PositionLifecycle.CLOSED
 
 
 def test_order_basket_outcome_prefers_a_non_terminal_failure_leg():
