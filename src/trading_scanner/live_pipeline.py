@@ -524,9 +524,25 @@ class LiveTickerPipeline:
             if symbol != self._config.index_symbol
         ))
 
+        # effective_config, not self._config -- the cash lane inside
+        # _collect_and_open_ranked_positions calls execute_cash_entry,
+        # which needs the dashboard-toggle-derived live_cash_trading_*
+        # fields (enabled/symbols/notional/max_positions), not this
+        # process's static startup config. 2026-09-01: passing self._config
+        # here was a real bug -- it silently used the static notional
+        # (Rs5,000, since TRADING_SCANNER_LIVE_CASH_TRADING_NOTIONAL isn't
+        # set in .env) and static live_cash_trading_enabled (False, also
+        # unset) instead of the toggle's real Rs50,000/enabled=True, so
+        # execute_cash_entry's own _is_gated_in check silently rejected
+        # every real candidate with NO log line (that specific check logs
+        # nothing) -- HCLTECH.NS cleared every real gate this morning and
+        # still got no order, only the "missed" notification, because of
+        # this. _process_symbol below already correctly used
+        # effective_config -- only this call site had the static one.
         paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
-            evaluated_by_symbol, self._config, self._repos["trade"], self._repos["paper_account"],
-            self._paper_account_lock, derivatives_chain, self._repos["futures_paper_account"],
+            evaluated_by_symbol, effective_config, self._repos["trade"],
+            self._repos["paper_account"], self._paper_account_lock, derivatives_chain,
+            self._repos["futures_paper_account"],
             self._futures_paper_symbols, self._notifier, order_executor,
             self._repos["live_order"], self._repos["gtt"], self._repos["paper_benchmark"],
         )
