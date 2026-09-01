@@ -2,6 +2,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from trading_scanner.domain.models import EntryDecisionRecord, SignalSide
 from trading_scanner.infrastructure.db import TursoEntryDecisionRepository, create_turso_client
 
@@ -113,5 +115,44 @@ async def test_opened_decision_round_trips_ranking_and_null_gate_fields(tmp_path
         assert rows[0].ranking_passed is True
         assert rows[0].final_decision == "opened"
         assert rows[0].blocked_reason is None
+    finally:
+        await client.close()
+
+
+# --- Phase 12 (DB invariants) -- CHECK constraints -------------------------
+# entry_decisions is new to this branch, never yet deployed -- unlike
+# live_order_legs, these constraints WILL take effect for real once this
+# table is first created in production.
+
+
+async def test_an_unknown_final_decision_is_rejected(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            await repository.record(_decision(final_decision="not-a-real-outcome"))
+    finally:
+        await client.close()
+
+
+async def test_an_unknown_signal_side_string_is_rejected(tmp_path: Path) -> None:
+    # record() always writes a real SignalSide's .value ("buy"/"sell") --
+    # this proves the constraint is real by writing raw SQL directly,
+    # bypassing the repository's own type safety.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        with pytest.raises(Exception, match="CHECK constraint failed"):
+            await client.execute(
+                "INSERT INTO entry_decisions "
+                "(symbol, strategy, signal_timestamp, signal_side, signal_price, "
+                " final_decision, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                ["RELIANCE.NS", "alpha_engine", "2026-09-01T10:15:00", "buy_and_hold",
+                 1234.5, "opened", "2026-09-01T10:16:00"],
+            )
     finally:
         await client.close()

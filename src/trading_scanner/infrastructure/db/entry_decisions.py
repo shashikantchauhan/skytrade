@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS entry_decisions (
     symbol TEXT NOT NULL,
     strategy TEXT NOT NULL,
     signal_timestamp TEXT NOT NULL,
-    signal_side TEXT NOT NULL,
+    signal_side TEXT NOT NULL CHECK (signal_side IN ('buy', 'sell')),
     signal_price REAL NOT NULL,
     track_record_passed INTEGER,
     quality_passed INTEGER,
@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS entry_decisions (
     capital_passed INTEGER,
     position_limit_passed INTEGER,
     cutoff_passed INTEGER,
-    final_decision TEXT NOT NULL,
+    final_decision TEXT NOT NULL
+        CHECK (final_decision IN ('opened', 'rejected', 'skipped', 'error')),
     blocked_reason TEXT,
     created_at TEXT NOT NULL
 )

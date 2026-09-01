@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import aiosqlite
 import pytest
 
 from trading_scanner.domain.models import LiveOrderLeg
@@ -291,5 +292,66 @@ async def test_get_legs_by_intent_is_empty_for_an_unknown_intent(tmp_path: Path)
         legs = await repository.get_legs_by_intent("never-recorded")
 
         assert legs == []
+    finally:
+        await client.close()
+
+
+# --- Phase 12 (DB invariants) -- CHECK constraints on a fresh database ------
+# Only meaningful against a fresh DB (this test always uses tmp_path, a new
+# file every time) -- see live_orders.py's own comment on why the already-
+# deployed production table isn't retroactively migrated.
+
+
+@pytest.mark.asyncio
+async def test_a_non_positive_quantity_is_rejected(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+
+        with pytest.raises(aiosqlite.IntegrityError):
+            await repository.record_leg(_leg(quantity=0))
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_purpose_is_rejected(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+
+        with pytest.raises(aiosqlite.IntegrityError):
+            await repository.record_leg(_leg(purpose="not-a-real-purpose"))
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_transaction_type_is_rejected(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+
+        with pytest.raises(aiosqlite.IntegrityError):
+            await repository.record_leg(_leg(transaction_type="HOLD"))
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_an_arbitrary_kite_status_string_is_still_accepted(tmp_path: Path) -> None:
+    # Deliberately NOT constrained -- see live_orders.py's own comment.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record_leg(_leg(status="TRIGGER PENDING"))  # must not raise
+
+        legs = await repository.get_legs("RELIANCE.NS-cash-entry-1")
+        assert legs[0].status == "TRIGGER PENDING"
     finally:
         await client.close()

@@ -12,10 +12,10 @@ CREATE TABLE IF NOT EXISTS live_order_legs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     basket_id TEXT NOT NULL,
     symbol TEXT NOT NULL,
-    purpose TEXT NOT NULL,
+    purpose TEXT NOT NULL CHECK (purpose IN ('cash', 'primary', 'hedge')),
     tradingsymbol TEXT NOT NULL,
-    transaction_type TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
+    transaction_type TEXT NOT NULL CHECK (transaction_type IN ('BUY', 'SELL')),
+    quantity INTEGER NOT NULL CHECK (quantity > 0),
     order_id TEXT NOT NULL,
     status TEXT NOT NULL,
     placed_at TEXT NOT NULL,
@@ -23,6 +23,25 @@ CREATE TABLE IF NOT EXISTS live_order_legs (
     rejection_reason TEXT
 )
 """
+# Phase 12 (DB invariants, projectedPlann.md): deliberately no CHECK on
+# `status` -- it's Kite's own order-status vocabulary, passed through
+# opaquely (see KiteOrderExecutor.wait_for_fill's own docstring: a timeout
+# can return an intermediate status like "TRIGGER PENDING", not just the
+# five this codebase's own logic branches on). A closed enum here that
+# turns out incomplete would make a real order's own execution record fail
+# to INSERT -- exactly the kind of lost-order risk this codebase has
+# already been bitten by once (see live_cash_execution.py's UNIONBANK.NS
+# incident). Constraining `purpose`/`transaction_type`/`quantity` above is
+# safe because this codebase fully controls that vocabulary; `status` is
+# not this codebase's vocabulary to close.
+#
+# SQLite can't add a CHECK constraint to an already-existing table via
+# ALTER TABLE (only ADD COLUMN) -- this DDL only takes effect for a
+# database where this table doesn't exist yet (a fresh test DB, or a
+# brand-new deployment). The already-deployed production `live_order_legs`
+# table predates this constraint and is NOT retroactively migrated --
+# rebuilding it (CREATE new + copy + drop + rename) is exactly the
+# destructive migration this phase is told to avoid without a real need.
 
 # Statuses a cash leg can be in that represent (or might still turn into) a
 # real held position -- see get_unclosed_cash_legs's own docstring.
