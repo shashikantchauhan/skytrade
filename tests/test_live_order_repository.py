@@ -192,6 +192,109 @@ async def test_a_fully_covered_multi_leg_position_shows_as_closed(tmp_path: Path
         await client.close()
 
 
+# --- _net_unclosed_legs regression matrix (spec's exact scenarios) --------
+
+
+@pytest.mark.asyncio
+async def test_two_buys_partly_closed_by_a_larger_sell_leaves_the_remainder(
+    tmp_path: Path,
+) -> None:
+    # BUY 8 + BUY 9, SELL 12 => 5 remains (FIFO: the 12-share sell fully
+    # closes the first 8-share leg and 4 of the second 9-share leg).
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(basket_id="x1", quantity=8, order_id="o1",
+                 placed_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC))
+        )
+        await repository.record_leg(
+            _leg(basket_id="x2", quantity=9, order_id="o2",
+                 placed_at=datetime(2026, 9, 1, 9, 5, tzinfo=UTC))
+        )
+        await repository.record_leg(
+            _leg(basket_id="x3", transaction_type="SELL", quantity=12, order_id="o3",
+                 placed_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC))
+        )
+
+        open_legs = await repository.get_open_cash_legs("RELIANCE.NS")
+
+        assert len(open_legs) == 1
+        assert open_legs[0].basket_id == "x2"
+        assert open_legs[0].quantity == 9  # the leg itself is unmodified --
+        # netting only decides whether it's still "open," not its quantity
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_single_buy_partially_sold_leaves_the_remainder_open(tmp_path: Path) -> None:
+    # BUY 8, SELL 3 => 5 remains (the leg stays "open," carrying its own
+    # original quantity -- there is no partial-quantity leg row).
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(quantity=8, order_id="o1"))
+        await repository.record_leg(
+            _leg(basket_id="x2", transaction_type="SELL", quantity=3, order_id="o2")
+        )
+
+        open_legs = await repository.get_open_cash_legs("RELIANCE.NS")
+
+        assert len(open_legs) == 1
+        assert open_legs[0].quantity == 8
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_single_buy_fully_sold_is_closed(tmp_path: Path) -> None:
+    # BUY 8, SELL 8 => closed.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(quantity=8, order_id="o1"))
+        await repository.record_leg(
+            _leg(basket_id="x2", transaction_type="SELL", quantity=8, order_id="o2")
+        )
+
+        open_legs = await repository.get_open_cash_legs("RELIANCE.NS")
+
+        assert open_legs == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_buy_netted_against_a_complete_sell_has_explicit_semantics(
+    tmp_path: Path,
+) -> None:
+    # BUY 8 UNKNOWN, SELL 8 COMPLETE -- get_open_cash_legs (COMPLETE-only
+    # openers) never counted the UNKNOWN leg as open in the first place, so
+    # it reports empty regardless of the sell. get_unclosed_cash_legs
+    # (COMPLETE/OPEN/UNKNOWN openers) DOES count it as an opener, and the
+    # COMPLETE sell nets it to fully closed -- also empty, but for the
+    # opposite reason (closed, not "never open"). Both must agree on the
+    # bottom line (nothing left to act on) without silently treating the
+    # UNKNOWN fill as either definitely real or definitely not.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(status="UNKNOWN", average_price=None, order_id="o1"))
+        await repository.record_leg(
+            _leg(basket_id="x2", transaction_type="SELL", quantity=5, order_id="o2")
+        )
+
+        assert await repository.get_open_cash_legs("RELIANCE.NS") == []
+        assert await repository.get_unclosed_cash_legs("RELIANCE.NS") == []
+    finally:
+        await client.close()
+
+
 @pytest.mark.asyncio
 async def test_intent_id_round_trips_through_record_and_get_legs(tmp_path: Path) -> None:
     client = create_turso_client(_local_url(tmp_path), None)

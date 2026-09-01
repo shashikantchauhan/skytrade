@@ -54,6 +54,24 @@ async def test_record_and_get_recent_round_trip(tmp_path: Path) -> None:
         assert row.blocked_reason == "conviction filter -- weak entry candle"
         assert row.ranking_score is None
         assert row.capital_passed is None
+        assert row.intent_id is None
+    finally:
+        await client.close()
+
+
+async def test_intent_id_round_trips_when_a_real_order_was_attempted(tmp_path: Path) -> None:
+    # 2026-09-01: links this audit-trail row to the exact live_order_legs/
+    # broker-order trail it led to -- see EntryDecisionRecord's own
+    # docstring.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record(_decision(final_decision="opened", intent_id="abc123"))
+        rows = await repository.get_recent("RELIANCE.NS")
+
+        assert rows[0].intent_id == "abc123"
     finally:
         await client.close()
 

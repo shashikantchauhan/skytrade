@@ -34,6 +34,7 @@ async def _persist_entry_decision(
     ranking_passed: bool | None = None,
     final_decision: str,
     blocked_reason: str | None,
+    intent_id: str | None = None,
 ) -> None:
     """Best-effort write of one ``EntryDecisionRecord`` row (Phase 3) --
     ``capital_passed``/``position_limit_passed``/``cutoff_passed`` are
@@ -43,7 +44,13 @@ async def _persist_entry_decision(
     optional, same convention as ``gtt_repository``/
     ``paper_benchmark_repository`` elsewhere in this module). Never raises
     into the caller's own decision flow -- this is an audit trail, not
-    something real trading depends on."""
+    something real trading depends on.
+
+    ``intent_id`` -- 2026-09-01: the deterministic ``OrderIntent`` id (see
+    ``domain/order_intent.py``) a real order was actually attempted under,
+    if any; ``None`` for a candidate rejected before ``execute_cash_entry``
+    was ever called. Links this decision row to the exact ``live_order_
+    legs``/broker-order trail it led to."""
     if entry_decision_repository is None:
         return
     try:
@@ -65,6 +72,7 @@ async def _persist_entry_decision(
                 final_decision=final_decision,
                 blocked_reason=blocked_reason,
                 created_at=datetime.now(UTC),
+                intent_id=intent_id,
             )
         )
     except Exception:

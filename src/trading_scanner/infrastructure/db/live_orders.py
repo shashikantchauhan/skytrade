@@ -64,6 +64,30 @@ class TursoLiveOrderRepository:
         # backfill of historical rows (see LiveOrderLeg.intent_id's own
         # docstring).
         await add_column_if_missing(self._client, "live_order_legs", "intent_id", "TEXT")
+        # 2026-09-01: every query in this file filters by one of these --
+        # intent_id (the crash-recovery preflight, get_legs_by_intent),
+        # order_id (occasional direct lookups), or (symbol, purpose[,
+        # status]) (every open/unclosed-legs derivation above). This table
+        # only grows (append-only ledger), so these matter more every day
+        # it runs. CREATE INDEX IF NOT EXISTS is safe against an
+        # already-deployed production table, unlike the CHECK constraints
+        # above.
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_intent_id "
+            "ON live_order_legs (intent_id)"
+        )
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_order_id "
+            "ON live_order_legs (order_id)"
+        )
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_symbol_purpose "
+            "ON live_order_legs (symbol, purpose)"
+        )
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_symbol_purpose_status "
+            "ON live_order_legs (symbol, purpose, status)"
+        )
 
     async def record_leg(self, leg: LiveOrderLeg) -> None:
         await self._client.execute(
@@ -158,6 +182,16 @@ class TursoLiveOrderRepository:
         reconciliation.py``). Public counterpart of ``_cash_legs`` scoped
         to one symbol."""
         return await self._cash_legs(symbol)
+
+    async def get_all_cash_legs(self) -> Sequence[LiveOrderLeg]:
+        """Every ``purpose='cash'`` leg across every symbol, at every
+        status -- the allowlist-wide analogue of ``get_cash_legs``. 2026-
+        09-01: added so ``broker_reconciliation.
+        get_reconciliation_required_symbols`` can compute every symbol's
+        lifecycle from one query instead of ``get_cash_symbols`` (1 query)
+        + one ``get_cash_legs`` call per symbol (N queries) -- same result,
+        one round trip."""
+        return await self._cash_legs(symbol=None)
 
     async def get_all_open_cash_legs(self) -> Sequence[LiveOrderLeg]:
         """Every currently-open (net quantity > 0) ``purpose='cash'`` leg

@@ -50,6 +50,12 @@ class TursoPaperAccountRepository:
         # PaperPosition.peak_price docstring) -- migrates any already-deployed
         # table forward.
         await add_column_if_missing(self._client, "paper_positions", "peak_price", "REAL")
+        # 2026-09-01: every query below filters by (symbol, status='open')
+        # or status='open' alone -- this table only grows.
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_paper_positions_symbol_status "
+            "ON paper_positions (symbol, status)"
+        )
 
     async def get_cash_balance(self) -> Decimal:
         result = await self._client.execute("SELECT cash_balance FROM paper_account WHERE id = 1")

@@ -49,6 +49,14 @@ class TursoTradeRepository:
             ("adx_filter_passed", "INTEGER"),
         ):
             await add_column_if_missing(self._client, "trades", column, definition)
+        # 2026-09-01: every query below filters by (symbol, interval,
+        # side, status='open') or (interval) alone -- this table only
+        # grows (every paper/win-rate trade ever taken), unindexed beyond
+        # the implicit rowid.
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_trades_symbol_interval_side_status "
+            "ON trades (symbol, interval, side, status)"
+        )
 
     async def open_trade(self, interval: str, trade: Trade) -> None:
         await self._client.execute(

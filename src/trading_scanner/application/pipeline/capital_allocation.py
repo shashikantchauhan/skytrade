@@ -29,6 +29,7 @@ from trading_scanner.application.ranking import (
 )
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import Candle, SignalSide
+from trading_scanner.domain.order_intent import compute_intent_id
 from trading_scanner.domain.ports import (
     FuturesPaperAccountRepository,
     Notifier,
@@ -211,6 +212,7 @@ async def _rank_and_open_cash_positions(
                 ranking_score=Decimal(str(score)), ranking_passed=True,
                 final_decision="opened" if opened else "skipped",
                 blocked_reason=None if opened else notes[symbol],
+                intent_id=compute_intent_id(symbol, "BUY", candidate.entry_timestamp, "cash"),
             )
         except Exception:
             logging.getLogger(__name__).exception(
@@ -225,6 +227,7 @@ async def _rank_and_open_cash_positions(
                 track_record_passed=True, quality_passed=True, conviction_passed=True,
                 ranking_score=Decimal(str(score)), ranking_passed=True,
                 final_decision="error", blocked_reason=notes[symbol],
+                intent_id=compute_intent_id(symbol, "BUY", candidate.entry_timestamp, "cash"),
             )
     return notes
 

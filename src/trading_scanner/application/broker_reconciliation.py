@@ -90,14 +90,20 @@ async def get_reconciliation_required_symbols(
     REQUIRED``) -- Phase 15 (observability): backs the dashboard's health
     surface, so an ``UNKNOWN``-status leg is visible somewhere even before
     a strategy exit signal or manual action happens to resolve it. Read-
-    only -- never places an order or otherwise acts on what it finds."""
-    symbols = await live_order_repository.get_cash_symbols()
-    flagged = []
-    for symbol in symbols:
-        lifecycle = await position_lifecycle(symbol, live_order_repository)
-        if lifecycle is PositionLifecycle.RECONCILIATION_REQUIRED:
-            flagged.append(symbol)
-    return flagged
+    only -- never places an order or otherwise acts on what it finds.
+
+    2026-09-01: one query (``get_all_cash_legs``), not
+    ``get_cash_symbols`` (1 query) + one ``position_lifecycle`` call per
+    symbol (N more queries) -- same result, grouped and derived in memory
+    instead of round-tripping the DB per symbol."""
+    legs_by_symbol: dict[str, list[LiveOrderLeg]] = {}
+    for leg in await live_order_repository.get_all_cash_legs():
+        legs_by_symbol.setdefault(leg.symbol, []).append(leg)
+    return [
+        symbol
+        for symbol, legs in legs_by_symbol.items()
+        if derive_position_lifecycle(legs) is PositionLifecycle.RECONCILIATION_REQUIRED
+    ]
 
 
 async def find_hidden_positions(

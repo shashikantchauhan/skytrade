@@ -8,7 +8,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import EntryDecisionRecord, SignalSide
-from trading_scanner.infrastructure.db._shared import DbClient
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_ENTRY_DECISIONS_TABLE = """
 CREATE TABLE IF NOT EXISTS entry_decisions (
@@ -52,6 +52,21 @@ class TursoEntryDecisionRepository:
 
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_ENTRY_DECISIONS_TABLE)
+        # Phase 9 (2026-09-01): links this append-only audit trail to the
+        # order it led to (if any) -- nullable, additive, no backfill of
+        # historical rows, same pattern as live_order_legs.intent_id.
+        await add_column_if_missing(self._client, "entry_decisions", "intent_id", "TEXT")
+        # get_recent's own query is (symbol, created_at DESC); a future
+        # "why wasn't this exact signal traded" lookup is (symbol,
+        # signal_timestamp). Append-only table -- grows every scan cycle.
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entry_decisions_symbol_created_at "
+            "ON entry_decisions (symbol, created_at)"
+        )
+        await self._client.execute(
+            "CREATE INDEX IF NOT EXISTS idx_entry_decisions_symbol_signal_timestamp "
+            "ON entry_decisions (symbol, signal_timestamp)"
+        )
 
     async def record(self, decision: EntryDecisionRecord) -> None:
         await self._client.execute(
@@ -61,8 +76,8 @@ class TursoEntryDecisionRepository:
                  track_record_passed, quality_passed, conviction_passed,
                  ranking_score, ranking_passed, capital_passed,
                  position_limit_passed, cutoff_passed, final_decision,
-                 blocked_reason, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 blocked_reason, created_at, intent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 decision.symbol,
@@ -81,6 +96,7 @@ class TursoEntryDecisionRepository:
                 decision.final_decision,
                 decision.blocked_reason,
                 decision.created_at.isoformat(),
+                decision.intent_id,
             ],
         )
 
@@ -93,7 +109,7 @@ class TursoEntryDecisionRepository:
                    track_record_passed, quality_passed, conviction_passed,
                    ranking_score, ranking_passed, capital_passed,
                    position_limit_passed, cutoff_passed, final_decision,
-                   blocked_reason, created_at
+                   blocked_reason, created_at, intent_id
             FROM entry_decisions WHERE symbol = ? ORDER BY created_at DESC LIMIT ?
             """,
             [symbol, limit],
@@ -119,4 +135,5 @@ def _row_to_decision(row) -> EntryDecisionRecord:
         final_decision=row[13],
         blocked_reason=row[14],
         created_at=datetime.fromisoformat(row[15]),
+        intent_id=row[16] if len(row) > 16 else None,
     )

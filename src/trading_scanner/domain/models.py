@@ -337,6 +337,13 @@ class EntryDecisionRecord:
 
     ``ranking_score``/``ranking_passed`` are ``None`` for a candidate that
     never reached ranking (rejected by an earlier gate).
+
+    ``intent_id`` -- 2026-09-01: links this decision row to the
+    ``OrderIntent``/``live_order_legs`` row it led to, if a real order was
+    actually attempted (``None`` otherwise -- most rows are rejected/
+    skipped before an intent is ever computed). Closes the traceability
+    gap between "why was this decided" and "what broker order resulted":
+    before this field, the two ledgers had no queryable link at all.
     """
 
     symbol: str
@@ -355,3 +362,4 @@ class EntryDecisionRecord:
     final_decision: str  # "opened" | "rejected" | "skipped" | "error"
     blocked_reason: str | None
     created_at: datetime
+    intent_id: str | None = None
