@@ -10,6 +10,7 @@ duplicating it; these are the short, scannable version.
 - [003-order-idempotency.md](003-order-idempotency.md)
 - [004-market-order-protection.md](004-market-order-protection.md)
 - [005-entry-retry-policy.md](005-entry-retry-policy.md)
+- [006-broker-crash-window.md](006-broker-crash-window.md)
 
 Note on scope: the in-code comments these summarize were deliberately
 **not** trimmed down to bare pointers, despite `projectedPlann.md`'s

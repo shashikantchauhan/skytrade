@@ -36,3 +36,10 @@ alongside the existing per-symbol `get_unclosed_cash_legs` check.
   ever proves costly in practice.
 
 See `domain/order_intent.py`'s own module docstring for the full reasoning.
+
+## Addendum (2026-09-01): the gap above is now closed
+
+See [006-broker-crash-window.md](006-broker-crash-window.md) --
+`execute_cash_entry` now runs a broker-ground-truth preflight (Kite order-
+tag lookup + `holding_quantity`) before the first placement attempt for a
+fresh intent, closing exactly the gap this decision recorded as open.

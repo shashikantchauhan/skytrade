@@ -92,21 +92,30 @@ async def _finalize_cash_entry(
     ``_process_symbol``'s own unranked fallback, so this bookkeeping has a
     single implementation instead of being duplicated between them.
 
-    ``get_open_cash_legs`` only ever returns a leg that is
-    ``status='COMPLETE'`` -- a rejected/incomplete real order never appears
-    there, so "a leg exists" reliably means "a real fill actually
-    happened," no extra status checking needed (same reasoning
-    ``application/paper_benchmark.py``'s own design doc already relies on).
-    """
-    opened = await live_order_repository.get_open_cash_legs(symbol)
-    if opened:
-        leg = opened[0]
+    broker_reconciliation.get_unclosed_entry_leg, not get_open_cash_legs
+    directly -- 2026-09-01: get_open_cash_legs only ever returns a
+    ``status='COMPLETE'`` leg, so a real BUY that filled ``UNKNOWN`` (fill
+    status unconfirmed -- see live_cash_execution.py's wait_for_fill
+    docstring) was invisible right here: no GTT bracket ever got placed on
+    a possibly-real fill, and the "missed" notification below fired even
+    though a real order may have gone through. This was the exact same
+    blind spot broker_reconciliation.py was built to close everywhere else
+    (manual_exit.py, the strategy SELL branch, the dashboard) -- this call
+    site was simply never migrated to it. See docs/decisions/002-broker-
+    reconciliation.md's 2026-09-01 addendum.
+
+    ``paper_benchmark.record_entry`` stays scoped to a leg with a real
+    ``average_price`` (an analytics comparison, not safety-critical -- an
+    ``UNKNOWN``/``OPEN`` leg has no confirmed fill price to benchmark
+    against yet)."""
+    leg = await broker_reconciliation.get_unclosed_entry_leg(symbol, live_order_repository)
+    if leg is not None:
         if gtt_repository is not None:
             await gtt_bracket.place_bracket(
                 symbol, leg.tradingsymbol, leg.quantity, leg.average_price or market_price,
                 cash_state, order_executor, gtt_repository, notifier,
             )
-        if paper_benchmark_repository is not None:
+        if paper_benchmark_repository is not None and leg.average_price is not None:
             try:
                 await paper_benchmark.record_entry(
                     symbol, market_price, leg, paper_benchmark_repository,
@@ -116,7 +125,10 @@ async def _finalize_cash_entry(
                     "Paper-benchmark entry recording raised for %s -- real trade unaffected.",
                     symbol,
                 )
-        return f"cash: opened {leg.quantity} qty (avg ₹{leg.average_price or market_price:.2f})"
+        price_note = (
+            f"avg ₹{leg.average_price:.2f}" if leg.average_price else f"status={leg.status}"
+        )
+        return f"cash: opened {leg.quantity} qty ({price_note})"
     # 2026-08-26: notify only for the specific miss that's actually costly --
     # a signal that cleared every real gate and still didn't get a real
     # order, which today only happens because execute_cash_entry's own

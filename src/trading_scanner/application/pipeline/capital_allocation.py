@@ -160,7 +160,8 @@ async def _rank_and_open_cash_positions(
     still does its own real capacity/cutoff/already-open check per call --
     this function doesn't pre-compute whether each candidate will fit, it
     just tries them in ranked order and lets that real check (surfaced via
-    ``_finalize_cash_entry``'s empty-``get_open_cash_legs`` case) decide.
+    ``_finalize_cash_entry``'s own broker_reconciliation-backed lookup)
+    decide.
     """
     notes: dict[str, str] = {}
     symbol_by_candidate = {candidate: symbol for symbol, candidate in candidates}

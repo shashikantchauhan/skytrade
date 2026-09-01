@@ -54,3 +54,19 @@ own, not only once something happens to try exiting it.
 
 See `docs/architecture/000-audit.md`'s gap #1 and
 `application/broker_reconciliation.py`'s own module docstring.
+
+## Addendum (2026-09-01): a leftover call site
+
+A follow-up review (the "final reliability hardening pass") found one call
+site this decision's migration missed: `application/pipeline/entry_
+decision.py`'s `_finalize_cash_entry`, called immediately after `live_
+cash_execution.execute_cash_entry` to decide whether to place the GTT
+bracket and whether to notify "opened" or "missed." It still called `get_
+open_cash_legs` (COMPLETE-only) directly, so an `UNKNOWN` fill got no GTT
+bracket on a possibly-real position, and the "MISSED BUY SIGNAL"
+notification fired even though a real order may have gone through -- an
+active false signal, not just a blind spot. Switched to `broker_
+reconciliation.get_unclosed_entry_leg`, matching every other call site.
+`paper_benchmark.record_entry` (an analytics comparison, not safety-
+critical) stays scoped to a leg with a confirmed `average_price`. See
+`_finalize_cash_entry`'s own docstring.
