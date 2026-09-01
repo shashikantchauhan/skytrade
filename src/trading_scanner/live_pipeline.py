@@ -24,7 +24,6 @@ enqueues (cheap, thread-safe), and an asyncio task drains it.
 """
 
 import asyncio
-import dataclasses
 import logging
 import queue
 from datetime import UTC, datetime
@@ -457,23 +456,24 @@ class LiveTickerPipeline:
         # "Go Live" dashboard toggle -- refreshed fresh every cycle from the
         # DB (not the static AppConfig loaded once at process start), so a
         # click on the dashboard takes effect on the very next cycle with
-        # no service restart. Everything else about config stays exactly
-        # as configured; only these three cash-trading fields can differ
-        # from self._config. See infrastructure/db/live_cash_toggle.py.
-        toggle_state = await self._repos["live_cash_toggle"].get_state(
+        # no service restart. toggle_state IS the cash_state threaded into
+        # every cash-related call below -- see live_cash_execution.py's
+        # module docstring for why this is its own explicit parameter
+        # rather than fields merged into a cloned AppConfig (that clone,
+        # "effective_config", used to exist here and was the exact cause
+        # of the 2026-09-01 incident: one call site below was passed
+        # self._config -- the static, un-toggled one -- instead of it, and
+        # nothing caught the mismatch until a real signal got silently no-
+        # ordered. Splitting cash settings into their own type instead of
+        # a same-shaped AppConfig clone makes that particular mistake a
+        # TypeError, not a silent wrong value).
+        cash_state = await self._repos["live_cash_toggle"].get_state(
             LiveCashToggleState(
                 enabled=self._config.live_cash_trading_enabled,
                 symbols=self._config.live_cash_trading_symbols,
                 notional=self._config.live_cash_trading_notional,
                 max_positions=self._config.live_cash_trading_max_positions,
             )
-        )
-        effective_config = dataclasses.replace(
-            self._config,
-            live_cash_trading_enabled=toggle_state.enabled,
-            live_cash_trading_symbols=toggle_state.symbols,
-            live_cash_trading_notional=toggle_state.notional,
-            live_cash_trading_max_positions=toggle_state.max_positions,
         )
 
         index_result = None
@@ -524,27 +524,13 @@ class LiveTickerPipeline:
             if symbol != self._config.index_symbol
         ))
 
-        # effective_config, not self._config -- the cash lane inside
-        # _collect_and_open_ranked_positions calls execute_cash_entry,
-        # which needs the dashboard-toggle-derived live_cash_trading_*
-        # fields (enabled/symbols/notional/max_positions), not this
-        # process's static startup config. 2026-09-01: passing self._config
-        # here was a real bug -- it silently used the static notional
-        # (Rs5,000, since TRADING_SCANNER_LIVE_CASH_TRADING_NOTIONAL isn't
-        # set in .env) and static live_cash_trading_enabled (False, also
-        # unset) instead of the toggle's real Rs50,000/enabled=True, so
-        # execute_cash_entry's own _is_gated_in check silently rejected
-        # every real candidate with NO log line (that specific check logs
-        # nothing) -- HCLTECH.NS cleared every real gate this morning and
-        # still got no order, only the "missed" notification, because of
-        # this. _process_symbol below already correctly used
-        # effective_config -- only this call site had the static one.
         paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
-            evaluated_by_symbol, effective_config, self._repos["trade"],
+            evaluated_by_symbol, self._config, self._repos["trade"],
             self._repos["paper_account"], self._paper_account_lock, derivatives_chain,
             self._repos["futures_paper_account"],
             self._futures_paper_symbols, self._notifier, order_executor,
             self._repos["live_order"], self._repos["gtt"], self._repos["paper_benchmark"],
+            cash_state,
         )
 
         async def _process_one(symbol: str) -> None:
@@ -554,7 +540,7 @@ class LiveTickerPipeline:
             async with semaphore:
                 try:
                     await _process_symbol(
-                        symbol, effective_config, None, self._engine,
+                        symbol, self._config, None, self._engine,
                         self._repos["candle"], self._repos["signal"], self._repos["engine_state"],
                         self._repos["trade"], self._repos["paper_account"], self._notifier,
                         index_result, self._paper_account_lock,
@@ -571,6 +557,7 @@ class LiveTickerPipeline:
                         paper_benchmark_repository=self._repos["paper_benchmark"],
                         live_cash_lock=self._live_cash_lock,
                         precomputed_cash_note=cash_notes.get(symbol),
+                        cash_state=cash_state,
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)

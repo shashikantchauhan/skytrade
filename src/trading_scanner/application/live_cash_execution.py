@@ -13,11 +13,30 @@ NFO NRML), one leg instead of two. Reuses the same
 order flows are queryable from the one table, but never touches or reads
 ``purpose="primary"``/``"hedge"`` rows -- entirely independent bookkeeping.
 
-Gated end-to-end behind ``AppConfig.live_cash_trading_enabled`` +
-``live_cash_trading_symbols`` -- every function here checks the gate
+Gated end-to-end behind ``LiveCashToggleState.enabled`` +
+``LiveCashToggleState.symbols`` -- every function here checks the gate
 itself and no-ops if it's off, so calling these from the signal pipeline
 is safe regardless of config, and nothing here ever places an order
 unless explicitly turned on for that exact symbol.
+
+``cash_state: LiveCashToggleState`` (not fields read off ``AppConfig``)
+is the single source of truth for every dashboard-adjustable cash setting
+(enabled/symbols/notional/max_positions) -- deliberately its own explicit
+parameter, not merged into a cloned ``AppConfig``. 2026-09-01: a real BUY
+signal (HCLTECH.NS) cleared every gate and got no order because
+``live_pipeline.py`` passed the wrong of two near-identical ``AppConfig``
+objects (a static one, cloned dashboard-toggle one) into this module's old
+``config``-only signature -- ``_is_gated_in`` silently returned False with
+zero log output. Threading ``cash_state`` as its own explicitly-named,
+distinctly-typed parameter means passing the wrong thing is a ``TypeError``
+at the call site, not a silently wrong value -- see
+``infrastructure/db/live_cash_toggle.py``'s ``LiveCashToggleState``,
+already built fresh from the DB toggle every scan cycle in
+``live_pipeline.py``, or from static config once per run in
+``run_signal_pipeline`` (which has no per-cycle DB refresh). ``config``
+(``AppConfig``) is still needed here, but now only ever for genuinely
+static settings that are NOT dashboard-adjustable --
+``live_cash_entry_cutoff_ist`` is the only one this module reads.
 """
 
 import asyncio
@@ -29,7 +48,7 @@ from decimal import Decimal
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.ports import Notifier
-from trading_scanner.infrastructure.db import TursoLiveOrderRepository
+from trading_scanner.infrastructure.db import LiveCashToggleState, TursoLiveOrderRepository
 from trading_scanner.infrastructure.kite import KiteOrderExecutor, to_kite_tradingsymbol
 from trading_scanner.infrastructure.kite_ticker import IST
 
@@ -50,8 +69,8 @@ class CashLegResult:
     rejection_reason: str | None
 
 
-def _is_gated_in(symbol: str, config: AppConfig) -> bool:
-    return config.live_cash_trading_enabled and symbol in config.live_cash_trading_symbols
+def _is_gated_in(symbol: str, cash_state: LiveCashToggleState) -> bool:
+    return cash_state.enabled and symbol in cash_state.symbols
 
 
 async def _place_and_wait(
@@ -154,27 +173,37 @@ async def execute_cash_entry(
     symbol: str,
     market_price: Decimal,
     config: AppConfig,
+    cash_state: LiveCashToggleState,
     order_executor: KiteOrderExecutor,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
     now: datetime | None = None,
 ) -> str | None:
-    """Real cash-equity BUY, sized from ``config.live_cash_trading_notional``
-    / ``market_price`` (a fixed rupee amount per symbol, not a fixed share
+    """Real cash-equity BUY, sized from ``cash_state.notional`` /
+    ``market_price`` (a fixed rupee amount per symbol, not a fixed share
     count -- a flat share count would mean wildly different real risk
     across a Rs50 stock and a Rs3,000 stock). Returns the basket_id if an
     order was placed, None if the gate was closed, it's past
-    ``live_cash_entry_cutoff_ist``, a real position for this symbol
+    ``config.live_cash_entry_cutoff_ist``, a real position for this symbol
     is already open (refuses to stack a second one), or
-    ``live_cash_trading_max_positions`` real positions are already open
-    across the whole allowlist (this is what makes a wide allowlist -- e.g.
-    the full symbol universe -- safe to run: breadth of what's *eligible*
-    to trade doesn't widen how much real capital can be at risk at once).
+    ``cash_state.max_positions`` real positions are already open across
+    the whole allowlist (this is what makes a wide allowlist -- e.g. the
+    full symbol universe -- safe to run: breadth of what's *eligible* to
+    trade doesn't widen how much real capital can be at risk at once).
 
     ``now`` -- defaults to the real wall clock; overridable for tests. Only
     used for the entry-cutoff check below; the rest of this function's
     gating is unrelated to time-of-day."""
-    if not _is_gated_in(symbol, config):
+    if not _is_gated_in(symbol, cash_state):
+        # 2026-09-01: logged now (previously silent) -- this exact gate
+        # returning an unexpected False with zero output is what let a
+        # config-threading bug hide a genuinely good signal (HCLTECH.NS)
+        # in production with no trace until the user noticed by hand.
+        logger.info(
+            "Live cash entry skipped for %s -- cash trading gate closed "
+            "(enabled=%s, symbol in allowlist=%s).",
+            symbol, cash_state.enabled, symbol in cash_state.symbols,
+        )
         return None
     if config.live_cash_entry_cutoff_ist is not None:
         current_ist_time = (now or datetime.now(UTC)).astimezone(IST).time()
@@ -195,16 +224,16 @@ async def execute_cash_entry(
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
         return None
     all_open = await live_order_repository.get_all_open_cash_legs()
-    if len(all_open) >= config.live_cash_trading_max_positions:
+    if len(all_open) >= cash_state.max_positions:
         logger.info(
             "Live cash entry skipped for %s -- max_positions (%d) already open.",
             symbol,
-            config.live_cash_trading_max_positions,
+            cash_state.max_positions,
         )
         return None
 
     tradingsymbol = to_kite_tradingsymbol(symbol)
-    quantity = max(1, int(config.live_cash_trading_notional / market_price))
+    quantity = max(1, int(cash_state.notional / market_price))
     basket_id = f"{symbol}-cash-entry-{datetime.now(UTC).isoformat()}"
 
     leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)

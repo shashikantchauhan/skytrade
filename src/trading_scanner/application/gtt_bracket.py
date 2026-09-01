@@ -36,7 +36,7 @@ from decimal import Decimal
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import GttBracket
 from trading_scanner.domain.ports import Notifier
-from trading_scanner.infrastructure.db import TursoGttRepository
+from trading_scanner.infrastructure.db import LiveCashToggleState, TursoGttRepository
 from trading_scanner.infrastructure.kite import KiteOrderExecutor, round_to_tick
 
 logger = logging.getLogger(__name__)
@@ -52,8 +52,8 @@ EXTENDED_TARGET_PERCENT = Decimal("15")
 _LIVE_STATUSES = frozenset({"active"})
 
 
-def _is_gated_in(symbol: str, config: AppConfig) -> bool:
-    return config.live_cash_trading_enabled and symbol in config.live_cash_trading_symbols
+def _is_gated_in(symbol: str, cash_state: LiveCashToggleState) -> bool:
+    return cash_state.enabled and symbol in cash_state.symbols
 
 
 async def place_bracket(
@@ -61,7 +61,7 @@ async def place_bracket(
     tradingsymbol: str,
     quantity: int,
     entry_price: Decimal,
-    config: AppConfig,
+    cash_state: LiveCashToggleState,
     order_executor: KiteOrderExecutor,
     gtt_repository: TursoGttRepository,
     notifier: Notifier,
@@ -69,8 +69,12 @@ async def place_bracket(
     """Places the initial 10%-target/3%-stop-loss OCO GTT for a real cash
     entry that just filled. Best-effort: a failure here notifies but never
     raises -- the real position stays open either way, just unmanaged by a
-    GTT until the next entry (there is no automatic retry)."""
-    if not _is_gated_in(symbol, config):
+    GTT until the next entry (there is no automatic retry).
+
+    ``cash_state`` -- see ``live_cash_execution.py``'s module docstring for
+    why this is its own explicit parameter instead of fields read off
+    ``config``."""
+    if not _is_gated_in(symbol, cash_state):
         return
     # 2026-08-25: was a flat .quantize(Decimal("0.05")) -- NSE requires the
     # exact tick size for this instrument (not always 0.05), see kite.py's
@@ -107,7 +111,7 @@ async def place_bracket(
 async def check_and_extend(
     symbol: str,
     current_price: Decimal,
-    config: AppConfig,
+    cash_state: LiveCashToggleState,
     order_executor: KiteOrderExecutor,
     gtt_repository: TursoGttRepository,
     notifier: Notifier,
@@ -116,7 +120,7 @@ async def check_and_extend(
     unless there's an active (not yet extended) bracket for ``symbol`` and
     price has reached ``EXTENSION_TRIGGER_PERCENT`` gain. See the module
     docstring's polling caveat."""
-    if not _is_gated_in(symbol, config):
+    if not _is_gated_in(symbol, cash_state):
         return
     bracket = await gtt_repository.get_active(symbol)
     if bracket is None or bracket.status != "active":

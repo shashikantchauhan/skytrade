@@ -31,6 +31,7 @@ from trading_scanner.domain.models import (
     Trade,
 )
 from trading_scanner.domain.ports import EngineState
+from trading_scanner.infrastructure.db import LiveCashToggleState
 from trading_scanner.infrastructure.yahoo import YahooProvider
 
 
@@ -1460,6 +1461,17 @@ def _cash_config(*, max_positions: int = 8, symbols: frozenset[str] = frozenset(
     )
 
 
+def _cash_state(
+    *, max_positions: int = 8, symbols: frozenset[str] = frozenset()
+) -> LiveCashToggleState:
+    """Mirrors ``_cash_config``'s kwargs -- the functions below take this
+    explicitly instead of reading enabled/symbols/notional/max_positions
+    off ``AppConfig`` (see live_cash_execution.py's module docstring)."""
+    return LiveCashToggleState(
+        enabled=True, symbols=symbols, notional=Decimal("5000"), max_positions=max_positions
+    )
+
+
 def _cash_candidate(symbol: str, prediction: int) -> RankedCandidate:
     return RankedCandidate(
         symbol=symbol, entry_timestamp=datetime(2026, 2, 1, tzinfo=UTC),
@@ -1473,12 +1485,13 @@ async def test_rank_and_open_cash_positions_opens_strongest_first_when_capacity_
     strong = _cash_candidate("STRONG.NS", prediction=8)  # highest score
     weak = _cash_candidate("WEAK.NS", prediction=1)  # lowest score
     config = _cash_config(max_positions=1, symbols=frozenset({"STRONG.NS", "WEAK.NS"}))
+    cash_state = _cash_state(max_positions=1, symbols=frozenset({"STRONG.NS", "WEAK.NS"}))
     live_order_repository = _StatefulFakeLiveOrderRepository()
     notifier = FakeNotifier()
 
     notes = await _rank_and_open_cash_positions(
         [("WEAK.NS", weak), ("STRONG.NS", strong)],  # listed weak-first -- ranking must reorder
-        config, _FakeCashOrderExecutor(), live_order_repository, notifier, None, None,
+        config, cash_state, _FakeCashOrderExecutor(), live_order_repository, notifier, None, None,
     )
 
     assert "opened" in notes["STRONG.NS"]
@@ -1494,11 +1507,12 @@ async def test_rank_and_open_cash_positions_rejects_below_score_floor(monkeypatc
     monkeypatch.setattr(signal_pipeline_module, "MIN_SCORE", 10_000.0)  # nothing can clear this
     candidate = _cash_candidate("RELIANCE.NS", prediction=5)
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     live_order_repository = _StatefulFakeLiveOrderRepository()
 
     notes = await _rank_and_open_cash_positions(
-        [("RELIANCE.NS", candidate)], config, _FakeCashOrderExecutor(), live_order_repository,
-        FakeNotifier(), None, None,
+        [("RELIANCE.NS", candidate)], config, cash_state, _FakeCashOrderExecutor(),
+        live_order_repository, FakeNotifier(), None, None,
     )
 
     assert "REJECTED" in notes["RELIANCE.NS"]
@@ -1543,11 +1557,12 @@ async def test_collect_and_open_ranked_positions_rejects_cash_on_weak_conviction
         ),
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
 
     paper_notes, _, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
         asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
-        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None,
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
     )
 
     assert "opened" in paper_notes["RELIANCE.NS"]  # paper unaffected by conviction
@@ -1568,11 +1583,12 @@ async def test_collect_and_open_ranked_positions_opens_cash_on_strong_conviction
         ),
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
 
     _, _, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
         asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
-        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None,
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
     )
 
     assert "opened" in cash_notes["RELIANCE.NS"]
@@ -1594,7 +1610,9 @@ class _FakeLiveOrderRepositoryForMissedNotify:
 async def test_missed_cash_entry_notification_names_a_full_capacity_miss():
     notifier = FakeNotifier()
     repo = _FakeLiveOrderRepositoryForMissedNotify(open_count=8)  # matches the 8-slot cap
-    await _notify_missed_cash_entry("RELIANCE.NS", Decimal("2500"), _config(), repo, notifier)
+    await _notify_missed_cash_entry(
+        "RELIANCE.NS", Decimal("2500"), _cash_state(max_positions=8), repo, notifier
+    )
     assert len(notifier.texts) == 1
     assert "MISSED BUY SIGNAL" in notifier.texts[0]
     assert "RELIANCE.NS" in notifier.texts[0]
@@ -1605,5 +1623,7 @@ async def test_missed_cash_entry_notification_names_a_full_capacity_miss():
 async def test_missed_cash_entry_notification_falls_back_when_slots_are_free():
     notifier = FakeNotifier()
     repo = _FakeLiveOrderRepositoryForMissedNotify(open_count=3)  # capacity wasn't the reason
-    await _notify_missed_cash_entry("RELIANCE.NS", Decimal("2500"), _config(), repo, notifier)
+    await _notify_missed_cash_entry(
+        "RELIANCE.NS", Decimal("2500"), _cash_state(max_positions=8), repo, notifier
+    )
     assert "entry cutoff" in notifier.texts[0]

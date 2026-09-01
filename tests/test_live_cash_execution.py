@@ -16,6 +16,7 @@ import pytest
 from trading_scanner.application import live_cash_execution
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg
+from trading_scanner.infrastructure.db import LiveCashToggleState
 
 _PRICE = Decimal("1000")  # Rs5,000 notional / Rs1,000 price = 5 shares, clean numbers
 
@@ -52,6 +53,19 @@ def _config(
         # pass `now` to execute_cash_entry flaky depending on wall-clock
         # time. See test_entry_cutoff_* below for the dedicated coverage.
         live_cash_entry_cutoff_ist=entry_cutoff_ist,
+    )
+
+
+def _cash_state(
+    *, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"}),
+    notional: Decimal = Decimal("5000"), max_positions: int = 8,
+) -> LiveCashToggleState:
+    """Mirrors ``_config``'s cash-related kwargs -- ``execute_cash_entry``
+    now takes this as its own explicit parameter instead of reading these
+    4 fields off ``AppConfig`` (see live_cash_execution.py's module
+    docstring for why)."""
+    return LiveCashToggleState(
+        enabled=enabled, symbols=symbols, notional=notional, max_positions=max_positions
     )
 
 
@@ -135,12 +149,13 @@ class FakeNotifier:
 @pytest.mark.asyncio
 async def test_entry_noop_when_cash_trading_disabled():
     config = _config(enabled=False)
+    cash_state = _cash_state(enabled=False)
     executor = FakeOrderExecutor({})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
     )
 
     assert result is None
@@ -151,11 +166,12 @@ async def test_entry_noop_when_cash_trading_disabled():
 @pytest.mark.asyncio
 async def test_entry_noop_when_symbol_not_allowlisted():
     config = _config(enabled=True, symbols=frozenset({"TCS.NS"}))
+    cash_state = _cash_state(enabled=True, symbols=frozenset({"TCS.NS"}))
     executor = FakeOrderExecutor({})
     repo = FakeLiveOrderRepository()
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert result is None
@@ -165,12 +181,13 @@ async def test_entry_noop_when_symbol_not_allowlisted():
 @pytest.mark.asyncio
 async def test_entry_sizes_quantity_from_notional_over_price():
     config = _config(enabled=True, notional=Decimal("5000"))
+    cash_state = _cash_state(enabled=True, notional=Decimal("5000"))
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
 
     basket_id = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
     )
 
     assert basket_id is not None
@@ -185,11 +202,12 @@ async def test_entry_sizing_floors_to_at_least_one_share():
     # Rs5,000 notional against a Rs12,000 stock would floor to 0 -- must
     # still buy 1 share rather than skip the trade silently.
     config = _config(enabled=True, notional=Decimal("5000"))
+    cash_state = _cash_state(enabled=True, notional=Decimal("5000"))
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository()
 
     await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", Decimal("12000"), config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", Decimal("12000"), config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert executor.calls == [("RELIANCE", "BUY", 1)]
@@ -198,6 +216,7 @@ async def test_entry_sizing_floors_to_at_least_one_share():
 @pytest.mark.asyncio
 async def test_entry_refuses_to_stack_a_second_position():
     config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
     already_open = [
         LiveOrderLeg(
             basket_id="x", symbol="RELIANCE.NS", purpose="cash", tradingsymbol="RELIANCE",
@@ -209,7 +228,7 @@ async def test_entry_refuses_to_stack_a_second_position():
     repo = FakeLiveOrderRepository(open_cash=already_open)
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert result is None
@@ -224,6 +243,7 @@ async def test_entry_refuses_to_stack_when_the_first_orders_fill_is_still_unconf
     # legs, so the next cycle saw an apparently-empty position and bought a
     # second time. An OPEN (or UNKNOWN) leg must block a second entry too.
     config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
     still_pending = [
         LiveOrderLeg(
             basket_id="x", symbol="PERSISTENT.NS", purpose="cash", tradingsymbol="PERSISTENT",
@@ -235,7 +255,7 @@ async def test_entry_refuses_to_stack_when_the_first_orders_fill_is_still_unconf
     repo = FakeLiveOrderRepository(open_cash=[], unclosed_cash=still_pending)
 
     result = await live_cash_execution.execute_cash_entry(
-        "PERSISTENT.NS", _PRICE, config, executor, repo, FakeNotifier()
+        "PERSISTENT.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert result is None
@@ -248,6 +268,7 @@ async def test_entry_blocked_when_max_positions_already_open():
     # at risk -- once max_positions real positions are open *anywhere*,
     # a new symbol (itself not yet open) still gets refused.
     config = _config(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
+    cash_state = _cash_state(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
     other_symbols_open = [
         LiveOrderLeg(
             basket_id=f"x{i}", symbol=f"SYM{i}.NS", purpose="cash", tradingsymbol=f"SYM{i}",
@@ -260,7 +281,7 @@ async def test_entry_blocked_when_max_positions_already_open():
     repo = FakeLiveOrderRepository(open_cash=[], all_open_cash=other_symbols_open)
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert result is None
@@ -270,6 +291,7 @@ async def test_entry_blocked_when_max_positions_already_open():
 @pytest.mark.asyncio
 async def test_entry_allowed_when_under_max_positions():
     config = _config(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
+    cash_state = _cash_state(enabled=True, symbols=frozenset({"RELIANCE.NS"}), max_positions=2)
     one_other_open = [
         LiveOrderLeg(
             basket_id="x", symbol="TCS.NS", purpose="cash", tradingsymbol="TCS",
@@ -281,7 +303,7 @@ async def test_entry_allowed_when_under_max_positions():
     repo = FakeLiveOrderRepository(open_cash=[], all_open_cash=one_other_open)
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, FakeNotifier()
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier()
     )
 
     assert result is not None
@@ -291,12 +313,13 @@ async def test_entry_allowed_when_under_max_positions():
 @pytest.mark.asyncio
 async def test_entry_failure_notifies_but_does_not_raise():
     config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED"]})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
 
     basket_id = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
     )
 
     assert basket_id is not None
@@ -445,13 +468,14 @@ async def test_entry_noop_when_past_the_cutoff():
     # minutes either took far longer than the fill-timeout to match, or got
     # cancelled outright by the exchange for lack of a counterparty.
     config = _config(enabled=True, entry_cutoff_ist=time(15, 15))
+    cash_state = _cash_state(enabled=True)
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
     past_cutoff = datetime(2026, 8, 25, 9, 50, tzinfo=UTC)  # 15:20 IST
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=past_cutoff,
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier, now=past_cutoff,
     )
 
     assert result is None
@@ -461,13 +485,14 @@ async def test_entry_noop_when_past_the_cutoff():
 @pytest.mark.asyncio
 async def test_entry_allowed_right_up_to_the_cutoff():
     config = _config(enabled=True, entry_cutoff_ist=time(15, 15))
+    cash_state = _cash_state(enabled=True)
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
     before_cutoff = datetime(2026, 8, 25, 9, 44, tzinfo=UTC)  # 15:14 IST
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=before_cutoff,
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier, now=before_cutoff,
     )
 
     assert result is not None
@@ -477,13 +502,14 @@ async def test_entry_allowed_right_up_to_the_cutoff():
 @pytest.mark.asyncio
 async def test_entry_cutoff_disabled_when_none():
     config = _config(enabled=True, entry_cutoff_ist=None)
+    cash_state = _cash_state(enabled=True)
     executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
     late = datetime(2026, 8, 25, 10, 0, tzinfo=UTC)  # 15:30 IST, market close itself
 
     result = await live_cash_execution.execute_cash_entry(
-        "RELIANCE.NS", _PRICE, config, executor, repo, notifier, now=late,
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier, now=late,
     )
 
     assert result is not None

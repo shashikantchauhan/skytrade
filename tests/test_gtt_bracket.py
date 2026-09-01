@@ -16,6 +16,7 @@ import pytest
 from trading_scanner.application import gtt_bracket
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import GttBracket
+from trading_scanner.infrastructure.db import LiveCashToggleState
 
 
 def _config(
@@ -42,6 +43,15 @@ def _config(
         live_cash_trading_symbols=symbols,
         live_cash_trading_notional=Decimal("5000"),
     )
+
+
+def _cash_state(
+    *, enabled: bool = True, symbols: frozenset[str] = frozenset({"RELIANCE.NS"})
+) -> LiveCashToggleState:
+    """``place_bracket``/``check_and_extend`` take this explicitly instead
+    of reading enabled/symbols off ``AppConfig`` -- see
+    live_cash_execution.py's module docstring for why."""
+    return LiveCashToggleState(enabled=enabled, symbols=symbols, notional=Decimal("5000"))
 
 
 class FakeOrderExecutor:
@@ -140,7 +150,7 @@ async def test_place_bracket_noop_when_gate_closed():
     repo = FakeGttRepository()
     await gtt_bracket.place_bracket(
         "RELIANCE.NS", "RELIANCE", 1, Decimal("1400"),
-        _config(enabled=False), executor, repo, FakeNotifier(),
+        _cash_state(enabled=False), executor, repo, FakeNotifier(),
     )
     assert executor.placed == []
     assert repo.recorded == []
@@ -153,7 +163,7 @@ async def test_place_bracket_computes_10pct_target_and_3pct_stop():
     notifier = FakeNotifier()
 
     await gtt_bracket.place_bracket(
-        "RELIANCE.NS", "RELIANCE", 1, Decimal("1400"), _config(), executor, repo, notifier,
+        "RELIANCE.NS", "RELIANCE", 1, Decimal("1400"), _cash_state(), executor, repo, notifier,
     )
 
     assert len(executor.placed) == 1
@@ -176,7 +186,7 @@ async def test_place_bracket_rounds_to_the_instruments_real_tick_size():
     notifier = FakeNotifier()
 
     await gtt_bracket.place_bracket(
-        "BDL.NS", "BDL", 3, Decimal("1380.5"), _config(symbols=frozenset({"BDL.NS"})),
+        "BDL.NS", "BDL", 3, Decimal("1380.5"), _cash_state(symbols=frozenset({"BDL.NS"})),
         executor, repo, notifier,
     )
 
@@ -194,7 +204,7 @@ async def test_extend_noop_below_threshold():
     repo = FakeGttRepository(active=_bracket())
     # 1400 -> 1500 is ~7.1% gain, below the 8% extension trigger.
     await gtt_bracket.check_and_extend(
-        "RELIANCE.NS", Decimal("1500"), _config(), executor, repo, FakeNotifier(),
+        "RELIANCE.NS", Decimal("1500"), _cash_state(), executor, repo, FakeNotifier(),
     )
     assert executor.modified == []
 
@@ -207,7 +217,7 @@ async def test_extend_fires_at_8pct_gain_moves_stop_to_breakeven():
     notifier = FakeNotifier()
 
     await gtt_bracket.check_and_extend(
-        "RELIANCE.NS", Decimal("1520"), _config(), executor, repo, notifier,  # ~8.6% gain
+        "RELIANCE.NS", Decimal("1520"), _cash_state(), executor, repo, notifier,  # ~8.6% gain
     )
 
     assert len(executor.modified) == 1
@@ -223,7 +233,7 @@ async def test_extend_only_fires_once():
     executor = FakeOrderExecutor()
     repo = FakeGttRepository(active=_bracket(status="extended"))
     await gtt_bracket.check_and_extend(
-        "RELIANCE.NS", Decimal("1700"), _config(), executor, repo, FakeNotifier(),
+        "RELIANCE.NS", Decimal("1700"), _cash_state(), executor, repo, FakeNotifier(),
     )
     assert executor.modified == []  # already extended -- left alone
 

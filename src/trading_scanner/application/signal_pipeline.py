@@ -49,6 +49,7 @@ from trading_scanner.domain.ports import (
     TradeRepository,
 )
 from trading_scanner.infrastructure.db import (
+    LiveCashToggleState,
     TursoFuturesTradeRepository,
     TursoGttRepository,
     TursoKiteSessionRepository,
@@ -199,6 +200,19 @@ async def run_signal_pipeline(
     # shadow already no-op on a None order_executor regardless of the flag.
     order_executor = KiteOrderExecutor(kite) if kite is not None else None
 
+    # This path (the hourly cron/CLI runner) has no per-cycle dashboard-
+    # toggle refresh -- see AppConfig.live_cash_trading_enabled's own
+    # docstring -- so cash_state is just a static repackaging of the same
+    # 4 fields config already carries, built once here rather than re-read
+    # off config at each call site. See live_cash_execution.py's module
+    # docstring for why this is threaded as its own explicit parameter.
+    cash_state = LiveCashToggleState(
+        enabled=config.live_cash_trading_enabled,
+        symbols=config.live_cash_trading_symbols,
+        notional=config.live_cash_trading_notional,
+        max_positions=config.live_cash_trading_max_positions,
+    )
+
     index_result = None
     if config.index_symbol:
         try:
@@ -282,6 +296,7 @@ async def run_signal_pipeline(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
         paper_account_lock, derivatives_chain, futures_account_repository, futures_paper_symbols,
         notifier, order_executor, live_order_repository, gtt_repository, paper_benchmark_repository,
+        cash_state,
     )
 
     async def _process_with_limit(symbol: str) -> None:
@@ -317,6 +332,7 @@ async def run_signal_pipeline(
                     paper_benchmark_repository=paper_benchmark_repository,
                     live_cash_lock=live_cash_lock,
                     precomputed_cash_note=cash_notes.get(symbol),
+                    cash_state=cash_state,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
@@ -560,6 +576,7 @@ async def _process_symbol(
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
     live_cash_lock: asyncio.Lock | None = None,
     precomputed_cash_note: str | None = None,
+    cash_state: LiveCashToggleState | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -635,10 +652,10 @@ async def _process_symbol(
     futures_note = None
     cash_note = None
 
-    if order_executor is not None and gtt_repository is not None:
+    if order_executor is not None and gtt_repository is not None and cash_state is not None:
         try:
             await gtt_bracket.check_and_extend(
-                symbol, market_price, config, order_executor, gtt_repository, notifier,
+                symbol, market_price, cash_state, order_executor, gtt_repository, notifier,
             )
         except Exception:
             logging.getLogger(__name__).exception(
@@ -681,7 +698,11 @@ async def _process_symbol(
             # entry/GTT/paper-benchmark sequence below, in ranked order,
             # for this cycle -- trust its outcome instead of redeciding.
             cash_note = precomputed_cash_note
-        elif order_executor is not None and live_order_repository is not None:
+        elif (
+            order_executor is not None
+            and live_order_repository is not None
+            and cash_state is not None
+        ):
             try:
                 # 2026-08-25: real cash entries now clear the same 55%-win-
                 # rate/>=5-closed-trades bar the old paper simulator used
@@ -722,11 +743,11 @@ async def _process_symbol(
                     # possible there.)
                     async with (live_cash_lock or asyncio.Lock()):
                         await live_cash_execution.execute_cash_entry(
-                            symbol, market_price, config, order_executor, live_order_repository,
-                            notifier,
+                            symbol, market_price, config, cash_state, order_executor,
+                            live_order_repository, notifier,
                         )
                     cash_note = await _finalize_cash_entry(
-                        symbol, market_price, config, live_order_repository, notifier,
+                        symbol, market_price, cash_state, live_order_repository, notifier,
                         gtt_repository, paper_benchmark_repository, order_executor,
                     )
             except Exception:
@@ -929,7 +950,7 @@ async def _process_symbol(
 async def _finalize_cash_entry(
     symbol: str,
     market_price: Decimal,
-    config: AppConfig,
+    cash_state: LiveCashToggleState,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
     gtt_repository: TursoGttRepository | None,
@@ -957,7 +978,7 @@ async def _finalize_cash_entry(
         if gtt_repository is not None:
             await gtt_bracket.place_bracket(
                 symbol, leg.tradingsymbol, leg.quantity, leg.average_price or market_price,
-                config, order_executor, gtt_repository, notifier,
+                cash_state, order_executor, gtt_repository, notifier,
             )
         if paper_benchmark_repository is not None:
             try:
@@ -975,14 +996,16 @@ async def _finalize_cash_entry(
     # order, which today only happens because execute_cash_entry's own
     # capacity check (max_positions already full) or its cutoff/execution
     # check turned it away. See _notify_missed_cash_entry's own docstring.
-    await _notify_missed_cash_entry(symbol, market_price, config, live_order_repository, notifier)
+    await _notify_missed_cash_entry(
+        symbol, market_price, cash_state, live_order_repository, notifier
+    )
     return "cash: SKIPPED (no free slot, past cutoff, or execution failed -- see logs)"
 
 
 async def _notify_missed_cash_entry(
     symbol: str,
     market_price: Decimal,
-    config: AppConfig,
+    cash_state: LiveCashToggleState,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
 ) -> None:
@@ -1000,8 +1023,8 @@ async def _notify_missed_cash_entry(
     on 2026-08-21, which fired for every signal regardless of outcome.
     """
     all_open = await live_order_repository.get_all_open_cash_legs()
-    if len(all_open) >= config.live_cash_trading_max_positions:
-        reason = f"all {config.live_cash_trading_max_positions} real slots are already full"
+    if len(all_open) >= cash_state.max_positions:
+        reason = f"all {cash_state.max_positions} real slots are already full"
     else:
         reason = "past the entry cutoff or the order didn't go through -- check logs"
     await notifier.send_text(
@@ -1158,6 +1181,7 @@ async def _rank_and_open_paper_positions(
 async def _rank_and_open_cash_positions(
     candidates: list[tuple[str, RankedCandidate]],
     config: AppConfig,
+    cash_state: LiveCashToggleState,
     order_executor: KiteOrderExecutor,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
@@ -1203,11 +1227,11 @@ async def _rank_and_open_cash_positions(
             break
         try:
             await live_cash_execution.execute_cash_entry(
-                symbol, candidate.entry_price, config, order_executor, live_order_repository,
-                notifier,
+                symbol, candidate.entry_price, config, cash_state, order_executor,
+                live_order_repository, notifier,
             )
             notes[symbol] = await _finalize_cash_entry(
-                symbol, candidate.entry_price, config, live_order_repository, notifier,
+                symbol, candidate.entry_price, cash_state, live_order_repository, notifier,
                 gtt_repository, paper_benchmark_repository, order_executor,
             )
         except Exception:
@@ -1275,6 +1299,7 @@ async def _collect_and_open_ranked_positions(
     live_order_repository: TursoLiveOrderRepository | None = None,
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
+    cash_state: LiveCashToggleState | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """One scan cycle's ranked capital allocation for ALL THREE books --
     paper (BUY-only, ``_rank_and_open_paper_positions``), futures (BUY+SELL,
@@ -1298,10 +1323,14 @@ async def _collect_and_open_ranked_positions(
     pass (see both modules' own docstrings for the evidence) before a
     candidate is even allowed to compete for ranked capital -- a real-money
     order is held to a higher bar than the paper benchmark. Cash ranking
-    only runs at all when ``order_executor``/``live_order_repository`` are
-    given (mirrors every existing cash call site's own
-    ``if order_executor is not None and live_order_repository is not None``
-    gating).
+    only runs at all when ``order_executor``/``live_order_repository``/
+    ``cash_state`` are all given.
+
+    ``cash_state`` -- see ``live_cash_execution.py``'s module docstring:
+    the single ``LiveCashToggleState`` the caller built for this cycle
+    (from the DB toggle in ``live_pipeline.py``, from static config once
+    per run in ``run_signal_pipeline``), passed explicitly rather than
+    read off a possibly-stale clone of ``config``.
 
     Returns ``(paper_notes, futures_notes, cash_notes)``, all
     ``symbol -> note``, for the caller to pass into ``_process_symbol`` as
@@ -1316,7 +1345,9 @@ async def _collect_and_open_ranked_positions(
     cash_notes: dict[str, str] = {}
     cash_candidates: list[tuple[str, RankedCandidate]] = []
     futures_enabled = derivatives_chain is not None and futures_account_repository is not None
-    cash_enabled = order_executor is not None and live_order_repository is not None
+    cash_enabled = (
+        order_executor is not None and live_order_repository is not None and cash_state is not None
+    )
 
     for symbol, evaluated in evaluated_by_symbol.items():
         if evaluated is None:
@@ -1417,8 +1448,8 @@ async def _collect_and_open_ranked_positions(
     if cash_enabled:
         cash_notes.update(
             await _rank_and_open_cash_positions(
-                cash_candidates, config, order_executor, live_order_repository, notifier,
-                gtt_repository, paper_benchmark_repository,
+                cash_candidates, config, cash_state, order_executor, live_order_repository,
+                notifier, gtt_repository, paper_benchmark_repository,
             )
         )
     return paper_notes, futures_notes, cash_notes
