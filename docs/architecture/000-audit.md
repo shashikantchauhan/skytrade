@@ -114,6 +114,21 @@ generalize this pattern, not invent a new one.
   reconnect/stale-hang scenarios through `run_forever` remain untested
   (they need the same seam). Be honest about this in the final report.
 
+- **Phase 16 (dashboard decomposition)**: deliberately partial, same
+  reasoning as Phase 9. `webapp.py`'s large inline HTML/CSS/JS was
+  already externalized into `templates/` before this refactor (not new
+  work here). Split out: `web/services/auth.py` (session state +
+  `_authenticate`/`_require_session`/`_require_admin`) -- the one piece
+  every other route already depends on, and the most security-sensitive
+  code in the file, now with its own focused module and dedicated tests
+  (`tests/test_web_auth.py`) that didn't exist before. The remaining ~30
+  routes stay in `webapp.py`: there is no FastAPI `TestClient`/route-level
+  test suite for this file (confirmed absent before this refactor too),
+  so a larger mechanical split (into `web/routes/*.py` per group) would
+  have no automated safety net against a mistake in a live, already-in-use
+  dashboard -- exactly the risk profile this refactor's own ground rules
+  say to avoid attempting without characterization tests first.
+
 ## Non-goals reaffirmed
 
 Every threshold, filter, and formula below is a read-only input to the new

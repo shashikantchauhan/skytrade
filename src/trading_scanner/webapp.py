@@ -63,6 +63,14 @@ from trading_scanner.infrastructure.kite import (
 )
 from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 from trading_scanner.infrastructure.yahoo import YahooProvider
+from trading_scanner.web.services.auth import (
+    _SESSION_COOKIE,
+    _SESSION_TTL_SECONDS,
+    _authenticate,
+    _require_admin,
+    _require_session,
+    _sessions,
+)
 
 _yahoo = YahooProvider()
 
@@ -72,8 +80,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = _REPO_ROOT / ".env"
 _LOG_PATH = Path(os.getenv("TRADING_SCANNER_LOG_PATH", "/var/log/p-trade/signals.log"))
 _BACKTEST_LOG_PATH = _LOG_PATH.with_name("derivatives-backtest.log")
-_SESSION_COOKIE = "ptrade_session"
-_SESSION_TTL_SECONDS = 30 * 24 * 60 * 60  # 30 days
 
 # 2026-08-16: skytrade-smallcap (Nifty Smallcap 250, weekly signals) is a
 # separate fork deployed as a subfolder alongside this app (/opt/p-trade/
@@ -92,74 +98,6 @@ _SMALLCAP_TARGET_SLOTS = 10
 _SMALLCAP_MIN_POSITION_SIZE = Decimal("50000")
 
 app = FastAPI(title="SkyTrade dashboard")
-
-# token -> {expiry, role, name}. In-memory: fine for a single-process
-# personal tool; a restart just means logging in again.
-_sessions: dict[str, dict] = {}
-
-
-def _dashboard_password() -> str:
-    password = os.getenv("TRADING_SCANNER_DASHBOARD_PASSWORD")
-    if not password:
-        raise HTTPException(
-            status_code=500,
-            detail="TRADING_SCANNER_DASHBOARD_PASSWORD is not set on the server.",
-        )
-    return password
-
-
-def _viewer_credentials() -> dict[str, str]:
-    """Named view-only logins, e.g. for a spouse/friend who should see the
-    dashboard but never touch Kite login or trigger a pipeline run.
-
-    ``TRADING_SCANNER_VIEWER_LOGINS="wife:somepassword,friend:otherpassword"``
-    -- each name gets its own password so access can be revoked individually
-    later without changing the admin password everyone else still uses.
-    """
-    raw = os.getenv("TRADING_SCANNER_VIEWER_LOGINS", "")
-    result: dict[str, str] = {}
-    for entry in raw.split(","):
-        entry = entry.strip()
-        if not entry or ":" not in entry:
-            continue
-        name, password = entry.split(":", 1)
-        if name.strip() and password:
-            result[name.strip()] = password
-    return result
-
-
-def _authenticate(password: str) -> tuple[str, str] | None:
-    """Returns (role, name) on a password match, checking the admin
-    password first, then each named viewer -- None if it matches nothing."""
-    if secrets.compare_digest(password, _dashboard_password()):
-        return "admin", "admin"
-    for name, viewer_password in _viewer_credentials().items():
-        if secrets.compare_digest(password, viewer_password):
-            return "viewer", name
-    return None
-
-
-def _require_session(ptrade_session: str | None = Cookie(default=None)) -> None:
-    """API-route auth: 401 JSON if the session cookie is missing/expired.
-    Allows both admin and viewer roles -- use ``_require_admin`` for routes
-    that touch Kite or trigger the pipeline."""
-    session = _sessions.get(ptrade_session or "")
-    if session is None or session["expiry"] < time.time():
-        raise HTTPException(status_code=401, detail="Not logged in.")
-
-
-def _require_admin(ptrade_session: str | None = Cookie(default=None)) -> None:
-    """Admin-only routes: Kite login/status, triggering the pipeline or a
-    backtest, and config changes -- a viewer (e.g. a spouse checking in on
-    the numbers) should never be able to touch any of these, both to keep
-    Kite credentials private and because a second person clicking 'Kite
-    login' can stomp the one active session the pipeline depends on (this
-    happened once -- see the commit that added this check)."""
-    session = _sessions.get(ptrade_session or "")
-    if session is None or session["expiry"] < time.time():
-        raise HTTPException(status_code=401, detail="Not logged in.")
-    if session["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin only.")
 
 
 def _client():
