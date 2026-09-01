@@ -189,3 +189,72 @@ async def test_a_fully_covered_multi_leg_position_shows_as_closed(tmp_path: Path
         assert open_legs == []
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_intent_id_round_trips_through_record_and_get_legs(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(intent_id="deadbeef"))
+
+        legs = await repository.get_legs("RELIANCE.NS-cash-entry-1")
+
+        assert legs[0].intent_id == "deadbeef"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_a_leg_recorded_without_an_intent_id_defaults_to_none(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg())
+
+        legs = await repository.get_legs("RELIANCE.NS-cash-entry-1")
+
+        assert legs[0].intent_id is None
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_legs_by_intent_gathers_every_retry_attempt(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        # Two attempts under the same intent (a retry), one unrelated leg
+        # under a different intent.
+        await repository.record_leg(
+            _leg(basket_id="b1", order_id="o1", status="REJECTED", intent_id="intent-a")
+        )
+        await repository.record_leg(
+            _leg(basket_id="b1", order_id="o2", status="COMPLETE", intent_id="intent-a")
+        )
+        await repository.record_leg(
+            _leg(basket_id="b2", order_id="o3", intent_id="intent-b")
+        )
+
+        legs = await repository.get_legs_by_intent("intent-a")
+
+        assert [leg.order_id for leg in legs] == ["o1", "o2"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_legs_by_intent_is_empty_for_an_unknown_intent(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+
+        legs = await repository.get_legs_by_intent("never-recorded")
+
+        assert legs == []
+    finally:
+        await client.close()

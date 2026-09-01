@@ -250,6 +250,13 @@ class LiveOrderLeg:
     placed_at: datetime
     average_price: Decimal | None = None
     rejection_reason: str | None = None
+    # Phase 4 (see domain/order_intent.py): the deterministic id shared by
+    # every attempt at the same logical trade, across retries and process
+    # restarts alike -- unlike basket_id, which is fresh per call. None on
+    # every row written before this column existed, and on any leg a
+    # caller doesn't (yet) compute an intent for (e.g. primary/hedge
+    # futures legs -- only the cash-entry retry path sets this today).
+    intent_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

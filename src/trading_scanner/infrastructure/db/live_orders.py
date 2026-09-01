@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import LiveOrderLeg
-from trading_scanner.infrastructure.db._shared import DbClient
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_LIVE_ORDER_LEGS_TABLE = """
 CREATE TABLE IF NOT EXISTS live_order_legs (
@@ -41,14 +41,19 @@ class TursoLiveOrderRepository:
 
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_LIVE_ORDER_LEGS_TABLE)
+        # Phase 4 (domain/order_intent.py) -- additive, nullable, no
+        # backfill of historical rows (see LiveOrderLeg.intent_id's own
+        # docstring).
+        await add_column_if_missing(self._client, "live_order_legs", "intent_id", "TEXT")
 
     async def record_leg(self, leg: LiveOrderLeg) -> None:
         await self._client.execute(
             """
             INSERT INTO live_order_legs
                 (basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                 quantity, order_id, status, placed_at, average_price, rejection_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 quantity, order_id, status, placed_at, average_price, rejection_reason,
+                 intent_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 leg.basket_id,
@@ -62,14 +67,36 @@ class TursoLiveOrderRepository:
                 leg.placed_at.isoformat(),
                 float(leg.average_price) if leg.average_price is not None else None,
                 leg.rejection_reason,
+                leg.intent_id,
             ],
         )
+
+    async def get_legs_by_intent(self, intent_id: str) -> Sequence[LiveOrderLeg]:
+        """Every leg (any status) recorded under ``intent_id`` -- see
+        ``domain/order_intent.py``. Used before the first placement
+        attempt for a logical trade to detect "a previous attempt at this
+        exact signal already got as far as recording a real/unconfirmed
+        order," independent of the fresh ``basket_id`` a new call would
+        otherwise generate. Does NOT catch a broker-accepted order that
+        crashed before any local write at all -- see that module's own
+        docstring."""
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason,
+                   intent_id
+            FROM live_order_legs WHERE intent_id = ? ORDER BY placed_at ASC
+            """,
+            [intent_id],
+        )
+        return [_row_to_leg(row) for row in result.rows]
 
     async def get_legs(self, basket_id: str) -> Sequence[LiveOrderLeg]:
         result = await self._client.execute(
             """
             SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
+                   quantity, order_id, status, placed_at, average_price, rejection_reason,
+                   intent_id
             FROM live_order_legs WHERE basket_id = ? ORDER BY placed_at ASC
             """,
             [basket_id],
@@ -82,7 +109,8 @@ class TursoLiveOrderRepository:
         open/unclosed derivations below."""
         query = """
             SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
+                   quantity, order_id, status, placed_at, average_price, rejection_reason,
+                   intent_id
             FROM live_order_legs WHERE purpose = 'cash'
         """
         params: list = []
@@ -143,7 +171,8 @@ class TursoLiveOrderRepository:
         result = await self._client.execute(
             """
             SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
-                   quantity, order_id, status, placed_at, average_price, rejection_reason
+                   quantity, order_id, status, placed_at, average_price, rejection_reason,
+                   intent_id
             FROM live_order_legs
             WHERE symbol = ? AND purpose = 'primary' AND status = 'COMPLETE'
               AND tradingsymbol NOT IN (
@@ -174,6 +203,7 @@ def _row_to_leg(row: Sequence) -> LiveOrderLeg:
         placed_at=datetime.fromisoformat(row[8]),
         average_price=Decimal(str(row[9])) if row[9] is not None else None,
         rejection_reason=row[10],
+        intent_id=row[11] if len(row) > 11 else None,
     )
 
 

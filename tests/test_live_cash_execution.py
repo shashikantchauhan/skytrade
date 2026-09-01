@@ -15,6 +15,7 @@ import pytest
 
 from trading_scanner.application import live_cash_execution
 from trading_scanner.config.settings import AppConfig
+from trading_scanner.domain import order_intent
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.infrastructure.db import LiveCashToggleState
 
@@ -123,6 +124,7 @@ class FakeLiveOrderRepository:
         self, open_cash: list[LiveOrderLeg] | None = None,
         all_open_cash: list[LiveOrderLeg] | None = None,
         unclosed_cash: list[LiveOrderLeg] | None = None,
+        legs_by_intent: dict[str, list[LiveOrderLeg]] | None = None,
     ) -> None:
         self.recorded: list[LiveOrderLeg] = []
         self._open_cash = open_cash or []
@@ -135,6 +137,10 @@ class FakeLiveOrderRepository:
         # pass unclosed_cash explicitly to simulate an OPEN/UNKNOWN leg
         # that get_open_cash_legs itself wouldn't count.
         self._unclosed_cash = unclosed_cash if unclosed_cash is not None else self._open_cash
+        # Phase 4 (domain/order_intent.py): intent_id -> legs already
+        # recorded under it -- empty by default (no prior attempt), pass
+        # explicitly to simulate a crash-then-restart scenario.
+        self._legs_by_intent = legs_by_intent or {}
 
     async def get_unclosed_cash_legs(self, symbol: str):
         return self._unclosed_cash
@@ -147,6 +153,9 @@ class FakeLiveOrderRepository:
 
     async def get_all_open_cash_legs(self):
         return self._all_open_cash
+
+    async def get_legs_by_intent(self, intent_id: str):
+        return self._legs_by_intent.get(intent_id, [])
 
 
 class FakeNotifier:
@@ -271,6 +280,69 @@ async def test_entry_refuses_to_stack_when_the_first_orders_fill_is_still_unconf
 
     assert result is None
     assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_refuses_a_duplicate_under_the_same_intent_after_a_restart():
+    # Phase 4 (domain/order_intent.py): simulates a process that placed a
+    # real order, recorded it, then crashed/restarted before the caller
+    # saw the result -- the next attempt at the exact same signal (same
+    # symbol/side/signal_timestamp) computes the same intent_id and must
+    # refuse to place a second real order, even though get_unclosed_cash_
+    # legs (a plain per-symbol check) would independently already catch
+    # this too -- this is the intent-keyed line of defense, tested in
+    # isolation via a repo where the symbol-level checks are empty but the
+    # intent-level lookup is not.
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    intent_id = order_intent.compute_intent_id("RELIANCE.NS", "BUY", signal_timestamp, "cash")
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    already_recorded = [
+        LiveOrderLeg(
+            basket_id="x", symbol="RELIANCE.NS", purpose="cash", tradingsymbol="RELIANCE",
+            transaction_type="BUY", quantity=5, order_id="o1", status="COMPLETE",
+            placed_at=datetime.now(UTC), intent_id=intent_id,
+        )
+    ]
+    executor = FakeOrderExecutor({})
+    repo = FakeLiveOrderRepository(legs_by_intent={intent_id: already_recorded})
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is None
+    assert executor.calls == []
+
+
+@pytest.mark.asyncio
+async def test_entry_allowed_when_the_same_intent_only_has_rejected_legs():
+    # A prior attempt at this exact signal that only ever got REJECTED/
+    # CANCELLED legs must NOT block a fresh attempt -- that's a real
+    # signal that's simply never resulted in a live order, not evidence of
+    # a duplicate in flight.
+    signal_timestamp = datetime(2026, 9, 1, 10, 15, tzinfo=UTC)
+    intent_id = order_intent.compute_intent_id("RELIANCE.NS", "BUY", signal_timestamp, "cash")
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    only_rejected = [
+        LiveOrderLeg(
+            basket_id="x", symbol="RELIANCE.NS", purpose="cash", tradingsymbol="RELIANCE",
+            transaction_type="BUY", quantity=5, order_id="o1", status="REJECTED",
+            placed_at=datetime.now(UTC), intent_id=intent_id,
+        )
+    ]
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository(legs_by_intent={intent_id: only_rejected})
+
+    result = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, FakeNotifier(),
+        signal_timestamp=signal_timestamp,
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5)]
 
 
 @pytest.mark.asyncio

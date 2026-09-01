@@ -1449,6 +1449,9 @@ class _StatefulFakeLiveOrderRepository:
         open_symbols = self._open_symbols()
         return [leg for leg in self.recorded if leg.symbol in open_symbols]
 
+    async def get_legs_by_intent(self, intent_id: str):
+        return [leg for leg in self.recorded if leg.intent_id == intent_id]
+
 
 def _cash_config(*, max_positions: int = 8, symbols: frozenset[str] = frozenset()) -> AppConfig:
     return replace(

@@ -744,6 +744,7 @@ async def _process_symbol(
                         await live_cash_execution.execute_cash_entry(
                             symbol, market_price, config, cash_state, order_executor,
                             live_order_repository, notifier,
+                            signal_timestamp=newest_candle.timestamp,
                         )
                     cash_note = await _finalize_cash_entry(
                         symbol, market_price, cash_state, live_order_repository, notifier,
@@ -1290,6 +1291,7 @@ async def _rank_and_open_cash_positions(
             await live_cash_execution.execute_cash_entry(
                 symbol, candidate.entry_price, config, cash_state, order_executor,
                 live_order_repository, notifier,
+                signal_timestamp=candidate.entry_timestamp,
             )
             notes[symbol] = await _finalize_cash_entry(
                 symbol, candidate.entry_price, cash_state, live_order_repository, notifier,

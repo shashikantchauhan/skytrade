@@ -47,6 +47,7 @@ from decimal import Decimal
 
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg
+from trading_scanner.domain.order_intent import new_intent
 from trading_scanner.domain.ports import Notifier
 from trading_scanner.infrastructure.db import LiveCashToggleState, TursoLiveOrderRepository
 from trading_scanner.infrastructure.kite import KiteOrderExecutor, to_kite_tradingsymbol
@@ -56,6 +57,10 @@ logger = logging.getLogger(__name__)
 
 _FILL_TIMEOUT_SECONDS = 30.0
 _PURPOSE = "cash"
+# Leg statuses that represent a real or still-unconfirmed order -- same set
+# TursoLiveOrderRepository.get_unclosed_cash_legs uses (see its own
+# docstring for the incident this excludes REJECTED/CANCELLED for).
+_UNCLOSED_ENTRY_STATUSES = frozenset({"COMPLETE", "OPEN", "UNKNOWN"})
 # 2026-09-01: a REJECTED/CANCELLED real BUY used to just notify and give
 # up -- a genuinely good signal (already cleared eligibility, quality
 # filter, and conviction filter to get this far) could lose its slot to a
@@ -170,7 +175,11 @@ async def _place_and_wait(
 
 
 async def _record(
-    live_order_repository: TursoLiveOrderRepository, basket_id: str, symbol: str, leg: CashLegResult
+    live_order_repository: TursoLiveOrderRepository,
+    basket_id: str,
+    symbol: str,
+    leg: CashLegResult,
+    intent_id: str | None = None,
 ) -> None:
     await live_order_repository.record_leg(
         LiveOrderLeg(
@@ -185,6 +194,7 @@ async def _record(
             placed_at=datetime.now(UTC),
             average_price=leg.average_price,
             rejection_reason=leg.rejection_reason,
+            intent_id=intent_id,
         )
     )
 
@@ -198,6 +208,7 @@ async def execute_cash_entry(
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
     now: datetime | None = None,
+    signal_timestamp: datetime | None = None,
 ) -> str | None:
     """Real cash-equity BUY, sized from ``cash_state.notional`` /
     ``market_price`` (a fixed rupee amount per symbol, not a fixed share
@@ -215,10 +226,25 @@ async def execute_cash_entry(
     used for the entry-cutoff check below; the rest of this function's
     gating is unrelated to time-of-day.
 
+    ``signal_timestamp`` -- the candle/signal's own timestamp (e.g.
+    ``RankedCandidate.entry_timestamp``), used to compute a deterministic
+    ``OrderIntent`` (see ``domain/order_intent.py``) shared by every retry
+    attempt in this call *and* by a second, independent call for the same
+    signal after a process restart -- unlike ``basket_id``, which is fresh
+    every call. Defaults to ``now`` (or the wall clock) when not given,
+    which keeps intent lookups well-defined but loses the cross-restart
+    correlation -- every real caller should pass the actual signal
+    timestamp.
+
     A REJECTED/CANCELLED placement is retried up to ``_MAX_ENTRY_ATTEMPTS``
     times (backing off ``_ENTRY_RETRY_BACKOFF_SECONDS`` between attempts)
     before giving up -- COMPLETE/OPEN/UNKNOWN never retry, since those all
-    mean a real order state already exists at the broker."""
+    mean a real order state already exists at the broker. Before the first
+    attempt, a leg already recorded under this call's intent (e.g. this
+    exact signal was already attempted by a process that has since
+    restarted) blocks a second placement the same way an already-open
+    position does -- see ``domain/order_intent.py``'s own docstring for
+    what this does and doesn't protect against."""
     if not _is_gated_in(symbol, cash_state):
         # 2026-09-01: logged now (previously silent) -- this exact gate
         # returning an unexpected False with zero output is what let a
@@ -257,6 +283,29 @@ async def execute_cash_entry(
         )
         return None
 
+    resolved_now = now or datetime.now(UTC)
+    intent = new_intent(symbol, "BUY", signal_timestamp or resolved_now, _PURPOSE)
+    # Phase 4 (domain/order_intent.py): a leg already recorded under this
+    # exact intent means a previous call -- possibly a process that has
+    # since crashed and restarted -- already got as far as recording a
+    # real or unconfirmed order for this exact signal. get_unclosed_cash_
+    # legs above already blocks a new BUY whenever *any* unclosed leg
+    # exists for the symbol regardless of intent; this is an independent,
+    # more specific check keyed on the signal itself rather than just the
+    # symbol, and is the mechanism that makes the intent -- not just the
+    # basket -- a real, queryable identity for "this attempt." It does NOT
+    # catch a broker-accepted order lost before any local write ever
+    # happened -- see new_intent's own docstring.
+    existing_intent_legs = await live_order_repository.get_legs_by_intent(intent.intent_id)
+    if any(leg.status in _UNCLOSED_ENTRY_STATUSES for leg in existing_intent_legs):
+        logger.warning(
+            "Live cash entry for %s skipped -- intent %s already has a real/unconfirmed "
+            "order recorded (likely a retry after a process restart); refusing to place "
+            "a duplicate.",
+            symbol, intent.intent_id,
+        )
+        return None
+
     tradingsymbol = to_kite_tradingsymbol(symbol)
     quantity = max(1, int(cash_state.notional / market_price))
     basket_id = f"{symbol}-cash-entry-{datetime.now(UTC).isoformat()}"
@@ -289,7 +338,7 @@ async def execute_cash_entry(
 
         leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)
         attempts_made += 1
-        await _record(live_order_repository, basket_id, symbol, leg)
+        await _record(live_order_repository, basket_id, symbol, leg, intent.intent_id)
 
         if leg.status not in ("REJECTED", "CANCELLED"):
             # COMPLETE, OPEN, or UNKNOWN -- a real order state now exists
