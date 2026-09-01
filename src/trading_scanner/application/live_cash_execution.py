@@ -59,12 +59,23 @@ _PURPOSE = "cash"
 # 2026-09-01: a REJECTED/CANCELLED real BUY used to just notify and give
 # up -- a genuinely good signal (already cleared eligibility, quality
 # filter, and conviction filter to get this far) could lose its slot to a
-# transient placement failure alone. Retry up to this many total attempts
-# (so 2 extra retries beyond the first), backing off between them -- see
-# execute_cash_entry's own retry loop for exactly what does and doesn't
-# get retried.
-_MAX_ENTRY_ATTEMPTS = 3
-_ENTRY_RETRY_BACKOFF_SECONDS = 15.0
+# transient placement failure alone. Retry up to this many total attempts,
+# backing off between them -- see execute_cash_entry's own retry loop for
+# exactly what does and doesn't get retried.
+#
+# Deliberately bounded, not "keep retrying until the entry cutoff" --
+# _rank_and_open_cash_positions attempts one scan cycle's candidates
+# sequentially, so a retry loop that ran for hours would block every other
+# candidate behind it in that same cycle (and likely still be running when
+# the next hourly cycle closes). 10 attempts / 20s apart is ~3 minutes of
+# backoff -- enough to ride out a real transient failure (a network blip,
+# a momentary RMS/rate-limit hiccup, both of which resolve in seconds to
+# low minutes), while still leaving the rest of the cycle's candidates a
+# real chance. If it's still failing after ~3 minutes of retrying, that's
+# very likely a persistent rejection reason (bad instrument, insufficient
+# margin, ...) that more retrying wouldn't fix anyway.
+_MAX_ENTRY_ATTEMPTS = 10
+_ENTRY_RETRY_BACKOFF_SECONDS = 20.0
 
 
 @dataclass(frozen=True, slots=True)

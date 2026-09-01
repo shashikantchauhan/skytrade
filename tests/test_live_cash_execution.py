@@ -350,10 +350,13 @@ async def test_entry_retries_a_rejected_order_and_succeeds():
         "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
     )
 
+    max_attempts = live_cash_execution._MAX_ENTRY_ATTEMPTS
     assert basket_id is not None
     assert executor.calls == [("RELIANCE", "BUY", 5), ("RELIANCE", "BUY", 5)]  # 2 real attempts
     assert [leg.status for leg in repo.recorded] == ["REJECTED", "COMPLETE"]  # both recorded
-    assert any("LIVE CASH ORDER PLACED" in t and "attempt 2/3" in t for t in notifier.texts)
+    assert any(
+        "LIVE CASH ORDER PLACED" in t and f"attempt 2/{max_attempts}" in t for t in notifier.texts
+    )
     assert not any("FAILED" in t for t in notifier.texts)
 
 
@@ -361,7 +364,8 @@ async def test_entry_retries_a_rejected_order_and_succeeds():
 async def test_entry_gives_up_after_max_attempts_all_rejected():
     config = _config(enabled=True)
     cash_state = _cash_state(enabled=True)
-    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED", "REJECTED", "REJECTED"]})
+    max_attempts = live_cash_execution._MAX_ENTRY_ATTEMPTS
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED"] * max_attempts})
     repo = FakeLiveOrderRepository()
     notifier = FakeNotifier()
 
@@ -370,10 +374,11 @@ async def test_entry_gives_up_after_max_attempts_all_rejected():
     )
 
     assert basket_id is not None
-    assert len(executor.calls) == 3  # _MAX_ENTRY_ATTEMPTS, no more
-    assert len(repo.recorded) == 3
+    assert len(executor.calls) == max_attempts  # no more than this
+    assert len(repo.recorded) == max_attempts
     assert any(
-        "LIVE CASH ORDER FAILED" in t and "after 3 attempts" in t for t in notifier.texts
+        "LIVE CASH ORDER FAILED" in t and f"after {max_attempts} attempts" in t
+        for t in notifier.texts
     )
 
 
