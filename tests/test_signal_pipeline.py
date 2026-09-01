@@ -1595,6 +1595,81 @@ async def test_collect_and_open_ranked_positions_opens_cash_on_strong_conviction
     assert live_order_repository.recorded[0].symbol == "RELIANCE.NS"
 
 
+class _FakeEntryDecisionRepository:
+    """In-memory stand-in for TursoEntryDecisionRepository -- records
+    every EntryDecisionRecord passed to it, nothing else."""
+
+    def __init__(self) -> None:
+        self.recorded: list = []
+
+    async def record(self, decision) -> None:
+        self.recorded.append(decision)
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_persists_a_rejected_decision():
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    entry_decision_repository = _FakeEntryDecisionRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (
+            _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _weak_conviction_candle("RELIANCE.NS"),
+        ),
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+
+    await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
+        entry_decision_repository,
+    )
+
+    assert len(entry_decision_repository.recorded) == 1
+    decision = entry_decision_repository.recorded[0]
+    assert decision.symbol == "RELIANCE.NS"
+    assert decision.track_record_passed is True
+    assert decision.quality_passed is True
+    assert decision.conviction_passed is False
+    assert decision.final_decision == "rejected"
+    assert decision.blocked_reason == "conviction filter -- weak entry candle"
+
+
+@pytest.mark.asyncio
+async def test_collect_and_open_ranked_positions_persists_an_opened_decision_with_ranking():
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    entry_decision_repository = _FakeEntryDecisionRepository()
+    evaluated_by_symbol = {
+        "RELIANCE.NS": (
+            _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _strong_conviction_candle("RELIANCE.NS"),
+        ),
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+
+    await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
+        entry_decision_repository,
+    )
+
+    assert len(entry_decision_repository.recorded) == 1
+    decision = entry_decision_repository.recorded[0]
+    assert decision.final_decision == "opened"
+    assert decision.blocked_reason is None
+    assert decision.ranking_passed is True
+    assert decision.ranking_score is not None
+
+
 class _FakeLiveOrderRepositoryForMissedNotify:
     """Only what ``_notify_missed_cash_entry`` reads -- the current real
     open-position count, to tell a full-capacity miss from any other."""

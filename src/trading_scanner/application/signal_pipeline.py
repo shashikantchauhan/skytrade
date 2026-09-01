@@ -36,7 +36,7 @@ from trading_scanner.application.ranking import (
     symbol_expectancy,
 )
 from trading_scanner.config.settings import AppConfig
-from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
+from trading_scanner.domain.models import Candle, EntryDecisionRecord, Signal, SignalSide, Trade
 from trading_scanner.domain.ports import (
     CandleRepository,
     EngineState,
@@ -49,6 +49,7 @@ from trading_scanner.domain.ports import (
 )
 from trading_scanner.infrastructure.db import (
     LiveCashToggleState,
+    TursoEntryDecisionRepository,
     TursoFuturesTradeRepository,
     TursoGttRepository,
     TursoKiteSessionRepository,
@@ -143,6 +144,7 @@ async def run_signal_pipeline(
     futures_paper_symbols: frozenset[str] = frozenset(),
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
+    entry_decision_repository: TursoEntryDecisionRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -295,7 +297,7 @@ async def run_signal_pipeline(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
         paper_account_lock, derivatives_chain, futures_account_repository, futures_paper_symbols,
         notifier, order_executor, live_order_repository, gtt_repository, paper_benchmark_repository,
-        cash_state,
+        cash_state, entry_decision_repository,
     )
 
     async def _process_with_limit(symbol: str) -> None:
@@ -1175,6 +1177,58 @@ async def _rank_and_open_paper_positions(
     return notes
 
 
+async def _persist_entry_decision(
+    entry_decision_repository: TursoEntryDecisionRepository | None,
+    *,
+    symbol: str,
+    signal_timestamp: datetime,
+    signal_price: Decimal,
+    track_record_passed: bool | None,
+    quality_passed: bool | None,
+    conviction_passed: bool | None,
+    ranking_score: Decimal | None = None,
+    ranking_passed: bool | None = None,
+    final_decision: str,
+    blocked_reason: str | None,
+) -> None:
+    """Best-effort write of one ``EntryDecisionRecord`` row (Phase 3) --
+    ``capital_passed``/``position_limit_passed``/``cutoff_passed`` are
+    always ``None`` here (see that dataclass's own docstring for why);
+    ``blocked_reason`` still carries the free-text explanation for those.
+    A no-op when no repository was threaded through (every caller stays
+    optional, same convention as ``gtt_repository``/
+    ``paper_benchmark_repository`` elsewhere in this module). Never raises
+    into the caller's own decision flow -- this is an audit trail, not
+    something real trading depends on."""
+    if entry_decision_repository is None:
+        return
+    try:
+        await entry_decision_repository.record(
+            EntryDecisionRecord(
+                symbol=symbol,
+                strategy="alpha_engine",
+                signal_timestamp=signal_timestamp,
+                signal_side=SignalSide.BUY,
+                signal_price=signal_price,
+                track_record_passed=track_record_passed,
+                quality_passed=quality_passed,
+                conviction_passed=conviction_passed,
+                ranking_score=ranking_score,
+                ranking_passed=ranking_passed,
+                capital_passed=None,
+                position_limit_passed=None,
+                cutoff_passed=None,
+                final_decision=final_decision,
+                blocked_reason=blocked_reason,
+                created_at=datetime.now(UTC),
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).exception(
+            "Failed to persist entry decision for %s -- decision itself unaffected.", symbol,
+        )
+
+
 async def _rank_and_open_cash_positions(
     candidates: list[tuple[str, RankedCandidate]],
     config: AppConfig,
@@ -1184,6 +1238,7 @@ async def _rank_and_open_cash_positions(
     notifier: Notifier,
     gtt_repository: TursoGttRepository | None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None,
+    entry_decision_repository: TursoEntryDecisionRepository | None = None,
 ) -> dict[str, str]:
     """Open REAL cash-equity BUY positions for one cycle's already-gated
     candidates (track record, entry_quality_filter, and conviction_filter
@@ -1221,6 +1276,15 @@ async def _rank_and_open_cash_positions(
                 notes[weaker_symbol] = (
                     f"cash: REJECTED (score {weaker_score:.0f} below minimum {MIN_SCORE:.0f})"
                 )
+                await _persist_entry_decision(
+                    entry_decision_repository,
+                    symbol=weaker_symbol,
+                    signal_timestamp=weaker_candidate.entry_timestamp,
+                    signal_price=weaker_candidate.entry_price,
+                    track_record_passed=True, quality_passed=True, conviction_passed=True,
+                    ranking_score=Decimal(str(weaker_score)), ranking_passed=False,
+                    final_decision="rejected", blocked_reason=notes[weaker_symbol],
+                )
             break
         try:
             await live_cash_execution.execute_cash_entry(
@@ -1231,12 +1295,30 @@ async def _rank_and_open_cash_positions(
                 symbol, candidate.entry_price, cash_state, live_order_repository, notifier,
                 gtt_repository, paper_benchmark_repository, order_executor,
             )
+            opened = notes[symbol].startswith("cash: opened")
+            await _persist_entry_decision(
+                entry_decision_repository,
+                symbol=symbol,
+                signal_timestamp=candidate.entry_timestamp, signal_price=candidate.entry_price,
+                track_record_passed=True, quality_passed=True, conviction_passed=True,
+                ranking_score=Decimal(str(score)), ranking_passed=True,
+                final_decision="opened" if opened else "skipped",
+                blocked_reason=None if opened else notes[symbol],
+            )
         except Exception:
             logging.getLogger(__name__).exception(
                 "Live cash order entry raised for %s -- rest of signal handling still stands.",
                 symbol,
             )
             notes[symbol] = "cash: ERROR placing order (see logs)"
+            await _persist_entry_decision(
+                entry_decision_repository,
+                symbol=symbol,
+                signal_timestamp=candidate.entry_timestamp, signal_price=candidate.entry_price,
+                track_record_passed=True, quality_passed=True, conviction_passed=True,
+                ranking_score=Decimal(str(score)), ranking_passed=True,
+                final_decision="error", blocked_reason=notes[symbol],
+            )
     return notes
 
 
@@ -1297,6 +1379,7 @@ async def _collect_and_open_ranked_positions(
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
     cash_state: LiveCashToggleState | None = None,
+    entry_decision_repository: TursoEntryDecisionRepository | None = None,
 ) -> tuple[dict[str, str], dict[str, str], dict[str, str]]:
     """One scan cycle's ranked capital allocation for ALL THREE books --
     paper (BUY-only, ``_rank_and_open_paper_positions``), futures (BUY+SELL,
@@ -1383,10 +1466,27 @@ async def _collect_and_open_ranked_positions(
                         cash_candidates.append((symbol, candidate))
                     else:
                         cash_notes[symbol] = f"cash: REJECTED ({quality_decision.blocked_reason})"
+                        await _persist_entry_decision(
+                            entry_decision_repository,
+                            symbol=symbol,
+                            signal_timestamp=newest_candle.timestamp, signal_price=entry_price,
+                            track_record_passed=True,
+                            quality_passed=quality_decision.gates[0].passed,
+                            conviction_passed=quality_decision.gates[1].passed,
+                            final_decision="rejected",
+                            blocked_reason=quality_decision.blocked_reason,
+                        )
             else:
                 paper_notes[symbol] = f"paper: {track_record_gate.reason}"
                 if cash_enabled:
                     cash_notes[symbol] = f"cash: {track_record_gate.reason}"
+                    await _persist_entry_decision(
+                        entry_decision_repository,
+                        symbol=symbol,
+                        signal_timestamp=newest_candle.timestamp, signal_price=entry_price,
+                        track_record_passed=False, quality_passed=None, conviction_passed=None,
+                        final_decision="rejected", blocked_reason=track_record_gate.reason,
+                    )
 
         if futures_enabled and symbol in futures_paper_symbols:
             side = SignalSide.BUY if result.signal == "BUY" else SignalSide.SELL
@@ -1439,7 +1539,7 @@ async def _collect_and_open_ranked_positions(
         cash_notes.update(
             await _rank_and_open_cash_positions(
                 cash_candidates, config, cash_state, order_executor, live_order_repository,
-                notifier, gtt_repository, paper_benchmark_repository,
+                notifier, gtt_repository, paper_benchmark_repository, entry_decision_repository,
             )
         )
     return paper_notes, futures_notes, cash_notes

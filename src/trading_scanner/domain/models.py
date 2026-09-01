@@ -308,3 +308,43 @@ class GttBracket:
     target_price: Decimal
     created_at: datetime
     status: str = "active"
+
+
+@dataclass(frozen=True, slots=True)
+class EntryDecisionRecord:
+    """One persisted "why was this signal traded or not" row for a real
+    cash-equity BUY candidate -- Phase 3 of ``projectedPlann.md`` (see
+    ``application/entry_gates.py``, ``infrastructure/db/entry_decisions.py``).
+    Written once per candidate per scan cycle, whether it was opened,
+    rejected, or skipped, so the answer is queryable without reading logs
+    by hand.
+
+    The four ``*_passed`` gate fields are ``None`` when that gate was never
+    reached (e.g. ``quality_passed``/``conviction_passed`` are ``None`` if
+    ``track_record_passed`` was already ``False``) or -- for
+    ``capital_passed``/``position_limit_passed``/``cutoff_passed`` -- not
+    yet independently instrumented (see ``execute_cash_entry``'s own
+    capacity/cutoff checks, deliberately still live-checked in place rather
+    than pre-computed, per ``entry_gates.py``'s module docstring); in that
+    case ``blocked_reason`` still carries the free-text explanation.
+
+    ``ranking_score``/``ranking_passed`` are ``None`` for a candidate that
+    never reached ranking (rejected by an earlier gate).
+    """
+
+    symbol: str
+    strategy: str
+    signal_timestamp: datetime
+    signal_side: SignalSide
+    signal_price: Decimal
+    track_record_passed: bool | None
+    quality_passed: bool | None
+    conviction_passed: bool | None
+    ranking_score: Decimal | None
+    ranking_passed: bool | None
+    capital_passed: bool | None
+    position_limit_passed: bool | None
+    cutoff_passed: bool | None
+    final_decision: str  # "opened" | "rejected" | "skipped" | "error"
+    blocked_reason: str | None
+    created_at: datetime

@@ -54,6 +54,7 @@ from trading_scanner.infrastructure.db import (
     LiveCashToggleState,
     TursoCandleRepository,
     TursoEngineStateRepository,
+    TursoEntryDecisionRepository,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
     TursoGttRepository,
@@ -215,6 +216,7 @@ class LiveTickerPipeline:
             "futures_trade": TursoFuturesTradeRepository(self._client),
             "live_order": TursoLiveOrderRepository(self._client),
             "gtt": TursoGttRepository(self._client),
+            "entry_decision": TursoEntryDecisionRepository(self._client),
             "paper_benchmark": TursoPaperBenchmarkRepository(self._client),
             "live_cash_toggle": TursoLiveCashToggleRepository(self._client),
             "futures_paper_account": TursoFuturesPaperAccountRepository(
@@ -530,7 +532,7 @@ class LiveTickerPipeline:
             self._repos["futures_paper_account"],
             self._futures_paper_symbols, self._notifier, order_executor,
             self._repos["live_order"], self._repos["gtt"], self._repos["paper_benchmark"],
-            cash_state,
+            cash_state, self._repos["entry_decision"],
         )
 
         async def _process_one(symbol: str) -> None:
