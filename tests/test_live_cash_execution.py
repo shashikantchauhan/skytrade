@@ -21,6 +21,17 @@ from trading_scanner.infrastructure.db import LiveCashToggleState
 _PRICE = Decimal("1000")  # Rs5,000 notional / Rs1,000 price = 5 shares, clean numbers
 
 
+@pytest.fixture(autouse=True)
+def _no_real_retry_backoff(monkeypatch):
+    """execute_cash_entry's retry loop sleeps _ENTRY_RETRY_BACKOFF_SECONDS
+    between attempts -- without this, any test whose FakeOrderExecutor
+    scripts a REJECTED/CANCELLED outcome (most of them) would incur a real
+    ~15s sleep per retry. Real backoff timing isn't what any test here
+    verifies -- only behavior/ordering -- so it's zeroed for every test in
+    this file."""
+    monkeypatch.setattr(live_cash_execution, "_ENTRY_RETRY_BACKOFF_SECONDS", 0)
+
+
 def _config(
     *, enabled: bool, symbols: frozenset[str] = frozenset({"RELIANCE.NS"}),
     notional: Decimal = Decimal("5000"), max_positions: int = 8,
@@ -323,6 +334,107 @@ async def test_entry_failure_notifies_but_does_not_raise():
     )
 
     assert basket_id is not None
+    assert repo.recorded[0].status == "REJECTED"
+    assert any("LIVE CASH ORDER FAILED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_retries_a_rejected_order_and_succeeds():
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED", "COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert executor.calls == [("RELIANCE", "BUY", 5), ("RELIANCE", "BUY", 5)]  # 2 real attempts
+    assert [leg.status for leg in repo.recorded] == ["REJECTED", "COMPLETE"]  # both recorded
+    assert any("LIVE CASH ORDER PLACED" in t and "attempt 2/3" in t for t in notifier.texts)
+    assert not any("FAILED" in t for t in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_entry_gives_up_after_max_attempts_all_rejected():
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED", "REJECTED", "REJECTED"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert len(executor.calls) == 3  # _MAX_ENTRY_ATTEMPTS, no more
+    assert len(repo.recorded) == 3
+    assert any(
+        "LIVE CASH ORDER FAILED" in t and "after 3 attempts" in t for t in notifier.texts
+    )
+
+
+@pytest.mark.asyncio
+async def test_entry_does_not_retry_an_unconfirmed_order():
+    # UNKNOWN means a real order state might already exist at the broker
+    # (the fill-status check itself failed, not the order) -- retrying
+    # would risk placing a second real order on top of one that may have
+    # already filled. Same reasoning as OPEN: never retry past it.
+    config = _config(enabled=True)
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({}, wait_for_fill_raises=True)
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier
+    )
+
+    assert basket_id is not None
+    assert len(executor.calls) == 1  # exactly one attempt, no retry
+    assert repo.recorded[0].status == "UNKNOWN"
+
+
+@pytest.mark.asyncio
+async def test_entry_retry_abandoned_once_past_the_cutoff(monkeypatch):
+    class _AdvancingClock:
+        """Stands in for the ``datetime`` name inside
+        live_cash_execution.py -- only ``.now(tz)`` is ever called on it
+        there. Returns ``before`` on the first call (so the pre-loop
+        cutoff check and attempt 1's own timestamps look normal), ``after``
+        on every call from the second onward -- simulates real time
+        (specifically, crossing the entry cutoff) passing during the
+        retry backoff without an actual sleep."""
+
+        def __init__(self, before: datetime, after: datetime) -> None:
+            self._before = before
+            self._after = after
+            self._calls = 0
+
+        def now(self, tz=None):
+            self._calls += 1
+            return self._before if self._calls == 1 else self._after
+
+    config = _config(enabled=True, entry_cutoff_ist=time(15, 15))
+    cash_state = _cash_state(enabled=True)
+    executor = FakeOrderExecutor({("RELIANCE", "BUY"): ["REJECTED", "COMPLETE"]})
+    repo = FakeLiveOrderRepository()
+    notifier = FakeNotifier()
+    before_cutoff = datetime(2026, 8, 25, 9, 44, tzinfo=UTC)  # 15:14 IST
+    after_cutoff = datetime(2026, 8, 25, 9, 50, tzinfo=UTC)  # 15:20 IST
+    monkeypatch.setattr(
+        live_cash_execution, "datetime", _AdvancingClock(before_cutoff, after_cutoff)
+    )
+
+    basket_id = await live_cash_execution.execute_cash_entry(
+        "RELIANCE.NS", _PRICE, config, cash_state, executor, repo, notifier, now=before_cutoff,
+    )
+
+    assert basket_id is not None
+    assert len(executor.calls) == 1  # retry abandoned -- never got a second real attempt
     assert repo.recorded[0].status == "REJECTED"
     assert any("LIVE CASH ORDER FAILED" in t for t in notifier.texts)
 

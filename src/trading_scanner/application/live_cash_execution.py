@@ -56,6 +56,15 @@ logger = logging.getLogger(__name__)
 
 _FILL_TIMEOUT_SECONDS = 30.0
 _PURPOSE = "cash"
+# 2026-09-01: a REJECTED/CANCELLED real BUY used to just notify and give
+# up -- a genuinely good signal (already cleared eligibility, quality
+# filter, and conviction filter to get this far) could lose its slot to a
+# transient placement failure alone. Retry up to this many total attempts
+# (so 2 extra retries beyond the first), backing off between them -- see
+# execute_cash_entry's own retry loop for exactly what does and doesn't
+# get retried.
+_MAX_ENTRY_ATTEMPTS = 3
+_ENTRY_RETRY_BACKOFF_SECONDS = 15.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -193,7 +202,12 @@ async def execute_cash_entry(
 
     ``now`` -- defaults to the real wall clock; overridable for tests. Only
     used for the entry-cutoff check below; the rest of this function's
-    gating is unrelated to time-of-day."""
+    gating is unrelated to time-of-day.
+
+    A REJECTED/CANCELLED placement is retried up to ``_MAX_ENTRY_ATTEMPTS``
+    times (backing off ``_ENTRY_RETRY_BACKOFF_SECONDS`` between attempts)
+    before giving up -- COMPLETE/OPEN/UNKNOWN never retry, since those all
+    mean a real order state already exists at the broker."""
     if not _is_gated_in(symbol, cash_state):
         # 2026-09-01: logged now (previously silent) -- this exact gate
         # returning an unexpected False with zero output is what let a
@@ -236,20 +250,64 @@ async def execute_cash_entry(
     quantity = max(1, int(cash_state.notional / market_price))
     basket_id = f"{symbol}-cash-entry-{datetime.now(UTC).isoformat()}"
 
-    leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)
-    await _record(live_order_repository, basket_id, symbol, leg)
+    attempts_made = 0
+    for attempt in range(1, _MAX_ENTRY_ATTEMPTS + 1):
+        if attempt > 1:
+            # Re-validate the two time/state-sensitive checks before
+            # retrying -- the backoff sleep below could have crossed the
+            # entry cutoff, or something else could have opened a real
+            # position for this symbol in the meantime. Never retry past
+            # either of those (that's exactly how a second/stacked
+            # position gets placed -- see get_unclosed_cash_legs's own
+            # docstring for the incident this discipline comes from).
+            if config.live_cash_entry_cutoff_ist is not None:
+                current_ist_time = datetime.now(UTC).astimezone(IST).time()
+                if current_ist_time >= config.live_cash_entry_cutoff_ist:
+                    logger.info(
+                        "Live cash entry retry for %s abandoned -- now past the %s IST "
+                        "entry cutoff.", symbol, config.live_cash_entry_cutoff_ist,
+                    )
+                    break
+            if await live_order_repository.get_unclosed_cash_legs(symbol):
+                logger.info(
+                    "Live cash entry retry for %s abandoned -- a real position opened "
+                    "for it during the retry backoff.", symbol,
+                )
+                break
+            await asyncio.sleep(_ENTRY_RETRY_BACKOFF_SECONDS)
+
+        leg = await _place_and_wait(order_executor, tradingsymbol, "BUY", quantity, market_price)
+        attempts_made += 1
+        await _record(live_order_repository, basket_id, symbol, leg)
+
+        if leg.status not in ("REJECTED", "CANCELLED"):
+            # COMPLETE, OPEN, or UNKNOWN -- a real order state now exists
+            # at the broker. Never retry past this point.
+            break
+        if attempt < _MAX_ENTRY_ATTEMPTS:
+            logger.info(
+                "Live cash entry for %s was %s (attempt %d/%d) -- retrying in %.0fs.",
+                symbol, leg.status, attempt, _MAX_ENTRY_ATTEMPTS, _ENTRY_RETRY_BACKOFF_SECONDS,
+            )
 
     if leg.status != "COMPLETE":
+        retry_note = f" after {attempts_made} attempts" if attempts_made > 1 else ""
         await notifier.send_text(
             "⚠️ <b>LIVE CASH ORDER FAILED</b>\n"
-            f"{symbol}: {tradingsymbol} BUY x{quantity} did not fill (status={leg.status})."
+            f"{symbol}: {tradingsymbol} BUY x{quantity} did not fill{retry_note} "
+            f"(status={leg.status})."
         )
         return basket_id
 
+    retry_note = (
+        f" (succeeded on attempt {attempts_made}/{_MAX_ENTRY_ATTEMPTS})"
+        if attempts_made > 1 else ""
+    )
     await notifier.send_text(
         "✅ <b>LIVE CASH ORDER PLACED</b>\n"
         f"{symbol}: {tradingsymbol} BUY x{quantity}"
         + (f" @ {leg.average_price}" if leg.average_price else "")
+        + retry_note
     )
     return basket_id
 
