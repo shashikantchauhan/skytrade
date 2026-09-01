@@ -153,6 +153,42 @@ generalize this pattern, not invent a new one.
   here); first real verification happens on the next actual deploy after
   merge.
 
+## Final reliability hardening pass (2026-09-01, branch `reliability/final-hardening`)
+
+A second, separate review pass over the architecture refactor's finished
+result (not another architecture change) -- see `docs/decisions/006-
+broker-crash-window.md` for the headline fix. Summary of what landed and
+what was deliberately scoped down:
+
+- **Fixed**: the broker-crash-window duplicate-order gap (ADR 006), a
+  leftover `get_open_cash_legs` call site in `_finalize_cash_entry` (ADR
+  002 addendum), `EntryDecision.allowed` derived instead of caller-set,
+  the cash long-only lifecycle assumption made a loud invariant,
+  `GateResult.metadata` removed (unused), DB indexes on the tables real
+  query patterns actually hit, the `get_reconciliation_required_symbols`
+  N+1, `entry_decisions.intent_id` traceability, a deploy-time config
+  validation step.
+- **Verified, not changed**: the concurrency locking around real cash
+  entries (`live_cash_lock`) and paper capital (`paper_account_lock`) --
+  both of `_process_symbol`'s two real production call sites (`live_
+  pipeline.py`, `application/pipeline/orchestrator.py`) always thread a
+  real lock instance through; the documented "fresh lock if none passed"
+  fallback in `orchestrator.py`'s unranked cash-entry branch is dead code
+  in production today, confirmed by reading rather than assumed.
+- **Scoped down**: `run_signal_pipeline` (18 params) and `_process_symbol`
+  (23 params) are exactly as unwieldy as the review spec says, and a
+  `PipelineRepositories` bundle was the plan's own proposed fix -- but
+  with 16+ existing call sites across `tests/test_signal_pipeline.py`
+  alone plus `live_pipeline.py`/`signals.py`/`orchestrator.py` itself, a
+  mechanical signature rewrite of the single highest-blast-radius
+  production path in the whole system is a large, purely cosmetic
+  (no correctness payoff) change with a shrinking safety margin the
+  more of it gets done under time pressure. Same judgment call already
+  made for Phases 9/11/13/16 above: not attempted this pass. A future
+  pass with its own dedicated budget and characterization tests for the
+  exact call signature (not just current behavior, which the existing
+  suite already pins) is the right way to do this safely.
+
 ## Non-goals reaffirmed
 
 Every threshold, filter, and formula below is a read-only input to the new

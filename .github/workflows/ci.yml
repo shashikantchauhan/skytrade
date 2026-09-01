@@ -51,6 +51,15 @@ jobs:
             # itself being installed on the VPS. Quiet and idempotent: a
             # no-op whenever dependencies haven't actually changed.
             .venv/bin/pip install -q -e .
+            # 2026-09-01 (reliability hardening pass): fail the deploy here,
+            # before touching either running service, if the real VPS
+            # environment can't even build an AppConfig (a malformed env
+            # var -- load_config's own _positive_int etc. raise on a bad
+            # value) -- previously a bad config would only surface as a
+            # crash-loop after the restart below, past the point where
+            # this workflow could stop it from replacing a healthy running
+            # service.
+            .venv/bin/python -c "from trading_scanner.config.settings import load_config; load_config()"
             systemctl restart p-trade-live
             systemctl restart p-trade-dashboard
             # Phase 19: fail the deploy (not just log a warning) if either
