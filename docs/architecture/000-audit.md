@@ -91,6 +91,29 @@ generalize this pattern, not invent a new one.
    Not part of this refactor's scope (`projectedPlann.md` doesn't ask for
    an auth hardening pass); flagged here so it isn't lost.
 
+## Stage progress notes (updated as the refactor lands)
+
+- **Phase 8 (pipeline decomposition)**: done in full -- `signal_pipeline.py`
+  is now a 101-line facade over `application/pipeline/*`.
+- **Phase 9 (live ticker pipeline refactor)**: deliberately partial.
+  `live_pipeline.py`'s `LiveTickerPipeline` is a single stateful class with
+  tightly-coupled mutable state (ticker connection, tick queue,
+  aggregators, caches) shared between what would become the
+  `KiteTickerAdapter` and the application-level orchestration -- unlike
+  `signal_pipeline.py`'s free functions, there is no risk-free "just move
+  it" split here; a real extraction needs `KiteTicker`/`KiteConnect`
+  construction pulled out from where `__init__`/`_connect_ticker`
+  currently build them inline, into an injectable seam. That's real,
+  further work, not done in this pass. What *is* done: a genuine
+  characterization-test harness (`tests/test_live_pipeline.py`) for every
+  piece of `LiveTickerPipeline` testable without that seam -- tick
+  callbacks, the tick-level stop-loss/trailing-stop check, and
+  `_run_until_first_exit` (the exact mechanism behind the 2026-08-18
+  orphaned-task incident) -- so the adapter extraction, if/when attempted,
+  has a real regression net for at least those pieces. Full connection/
+  reconnect/stale-hang scenarios through `run_forever` remain untested
+  (they need the same seam). Be honest about this in the final report.
+
 ## Non-goals reaffirmed
 
 Every threshold, filter, and formula below is a read-only input to the new
