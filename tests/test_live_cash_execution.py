@@ -154,6 +154,14 @@ class FakeLiveOrderRepository:
     async def get_all_open_cash_legs(self):
         return self._all_open_cash
 
+    async def get_all_unclosed_cash_legs(self):
+        # execute_cash_entry's max_positions check now goes through
+        # broker_reconciliation.get_all_unclosed_positions -- same list as
+        # get_all_open_cash_legs for these tests (none script an UNKNOWN
+        # leg specifically for the capacity check; that has its own
+        # dedicated coverage in test_broker_reconciliation.py).
+        return self._all_open_cash
+
     async def get_legs_by_intent(self, intent_id: str):
         return self._legs_by_intent.get(intent_id, [])
 

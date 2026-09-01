@@ -247,6 +247,41 @@ async def test_get_legs_by_intent_gathers_every_retry_attempt(tmp_path: Path) ->
 
 
 @pytest.mark.asyncio
+async def test_get_cash_legs_returns_every_status_for_the_symbol(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(order_id="o1", status="REJECTED"))
+        await repository.record_leg(_leg(order_id="o2", status="UNKNOWN", average_price=None))
+
+        legs = await repository.get_cash_legs("RELIANCE.NS")
+
+        assert [leg.order_id for leg in legs] == ["o1", "o2"]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_all_unclosed_cash_legs_counts_an_unknown_leg(tmp_path: Path) -> None:
+    # The exact gap this method exists to close: get_all_open_cash_legs
+    # (COMPLETE-only) would miss this entirely.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(_leg(status="UNKNOWN", average_price=None))
+
+        open_only = await repository.get_all_open_cash_legs()
+        unclosed = await repository.get_all_unclosed_cash_legs()
+
+        assert open_only == []
+        assert len(unclosed) == 1
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_get_legs_by_intent_is_empty_for_an_unknown_intent(tmp_path: Path) -> None:
     client = create_turso_client(_local_url(tmp_path), None)
     try:

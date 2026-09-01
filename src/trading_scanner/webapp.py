@@ -29,7 +29,12 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from kiteconnect import KiteConnect
 from pydantic import BaseModel
 
-from trading_scanner.application import futures_trading, manual_exit, paper_trading
+from trading_scanner.application import (
+    broker_reconciliation,
+    futures_trading,
+    manual_exit,
+    paper_trading,
+)
 from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
@@ -488,7 +493,11 @@ async def live_cash_positions(_: None = Depends(_require_session)) -> JSONRespon
         gtt_repository = TursoGttRepository(client)
         await gtt_repository.ensure_schema()
 
-        legs = await live_order_repository.get_all_open_cash_legs()
+        # broker_reconciliation, not get_all_open_cash_legs directly -- the
+        # latter is COMPLETE-only and would hide a real position stuck at
+        # status=UNKNOWN from this view entirely. See that module's own
+        # docstring.
+        legs = await broker_reconciliation.get_all_unclosed_positions(live_order_repository)
         brackets = {leg.symbol: await gtt_repository.get_active(leg.symbol) for leg in legs}
         last_prices = await _last_prices(
             [SimpleNamespace(symbol=leg.symbol) for leg in legs], client, config
@@ -546,8 +555,15 @@ async def exit_live_cash_position(
 
         live_order_repository = TursoLiveOrderRepository(client)
         await live_order_repository.ensure_schema()
-        open_legs = await live_order_repository.get_open_cash_legs(symbol)
-        if not open_legs:
+        # broker_reconciliation, not get_open_cash_legs directly -- this is
+        # exactly the pre-check that used to 404 before manual_exit.
+        # exit_position ever got a chance to run its own (already-fixed)
+        # reconciliation for a real position stuck at status=UNKNOWN. See
+        # that module's own docstring.
+        entry_leg = await broker_reconciliation.get_unclosed_entry_leg(
+            symbol, live_order_repository
+        )
+        if entry_leg is None:
             raise HTTPException(status_code=404, detail=f"No real open position for {symbol}.")
 
         kite = KiteConnect(api_key=config.kite_api_key)

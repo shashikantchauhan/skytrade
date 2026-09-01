@@ -11,6 +11,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
+    broker_reconciliation,
     entry_gates,
     futures_shadow,
     futures_trading,
@@ -797,8 +798,15 @@ async def _process_symbol(
         )
         if order_executor is not None and live_order_repository is not None:
             try:
-                open_legs = await live_order_repository.get_open_cash_legs(symbol)
-                entry_leg = open_legs[0] if open_legs else None
+                # broker_reconciliation.get_unclosed_entry_leg, not get_
+                # open_cash_legs directly -- the latter is COMPLETE-only
+                # and would leave entry_leg None (skipping the
+                # reconcile_before_exit ground-truth check entirely) for a
+                # real entry stuck at status=UNKNOWN. See that module's
+                # own docstring for the incident this fixes.
+                entry_leg = await broker_reconciliation.get_unclosed_entry_leg(
+                    symbol, live_order_repository
+                )
                 should_exit = True
                 if gtt_repository is not None and entry_leg is not None:
                     should_exit = await gtt_bracket.reconcile_before_exit(
@@ -1022,7 +1030,7 @@ async def _notify_missed_cash_entry(
     taking passed by. Distinct from the entry-signal notification silenced
     on 2026-08-21, which fired for every signal regardless of outcome.
     """
-    all_open = await live_order_repository.get_all_open_cash_legs()
+    all_open = await broker_reconciliation.get_all_unclosed_positions(live_order_repository)
     if len(all_open) >= cash_state.max_positions:
         reason = f"all {cash_state.max_positions} real slots are already full"
     else:

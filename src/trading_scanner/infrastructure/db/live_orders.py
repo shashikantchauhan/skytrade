@@ -121,15 +121,35 @@ class TursoLiveOrderRepository:
         result = await self._client.execute(query, params)
         return [_row_to_leg(row) for row in result.rows]
 
+    async def get_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
+        """Every ``purpose='cash'`` leg for ``symbol``, at every status,
+        ``placed_at``-ordered -- raw material for ``domain.order_lifecycle.
+        derive_position_lifecycle`` (see ``application/broker_
+        reconciliation.py``). Public counterpart of ``_cash_legs`` scoped
+        to one symbol."""
+        return await self._cash_legs(symbol)
+
     async def get_all_open_cash_legs(self) -> Sequence[LiveOrderLeg]:
         """Every currently-open (net quantity > 0) ``purpose='cash'`` leg
-        across all symbols -- used by the dashboard's real-positions view
-        (see webapp.py's /api/live-cash-positions) and the max_positions
-        capacity check, which both need to list all of them, not check one
-        symbol at a time. See ``_net_unclosed_legs``'s docstring for the
-        netting logic."""
+        across all symbols, COMPLETE fills only -- see ``get_all_unclosed_
+        cash_legs`` for the broader (COMPLETE/OPEN/UNKNOWN) view every
+        exit-eligibility/capacity check should use instead (see
+        ``application/broker_reconciliation.py``). Kept for callers that
+        specifically need "a confirmed real fill exists," same reasoning
+        as ``get_open_cash_legs``'s own docstring."""
         legs = await self._cash_legs(symbol=None)
         return _net_unclosed_legs(legs, opener_statuses=frozenset({"COMPLETE"}))
+
+    async def get_all_unclosed_cash_legs(self) -> Sequence[LiveOrderLeg]:
+        """Every currently-unclosed (net quantity > 0, COMPLETE/OPEN/
+        UNKNOWN) ``purpose='cash'`` leg across all symbols -- the broader
+        analogue of ``get_all_open_cash_legs``, for the dashboard's real-
+        positions view and the max_positions capacity check, both of which
+        must count an UNKNOWN-status leg as real capital at risk (see
+        ``get_unclosed_cash_legs``'s own docstring for the incident this
+        broader status set fixes)."""
+        legs = await self._cash_legs(symbol=None)
+        return _net_unclosed_legs(legs, opener_statuses=_UNCLOSED_STATUSES)
 
     async def get_open_cash_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
         """Every currently-open (net quantity > 0) ``purpose='cash'`` leg

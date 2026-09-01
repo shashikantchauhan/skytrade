@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from trading_scanner.application import broker_reconciliation
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.order_intent import new_intent
@@ -274,7 +275,12 @@ async def execute_cash_entry(
     if already_open:
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
         return None
-    all_open = await live_order_repository.get_all_open_cash_legs()
+    # broker_reconciliation.get_all_unclosed_positions, not get_all_open_
+    # cash_legs directly -- an UNKNOWN-status position is real capital at
+    # risk too and must count toward the cap (see that module's own
+    # docstring); the old COMPLETE-only count could under-report how many
+    # real positions were actually open.
+    all_open = await broker_reconciliation.get_all_unclosed_positions(live_order_repository)
     if len(all_open) >= cash_state.max_positions:
         logger.info(
             "Live cash entry skipped for %s -- max_positions (%d) already open.",
@@ -438,10 +444,16 @@ async def execute_cash_exit(
     ``market_price`` -- reference price for the protected limit order
     ``_place_and_wait`` places (see its own docstring); this symbol's
     current bar close/candle price, not the original entry price."""
-    open_legs = await live_order_repository.get_open_cash_legs(symbol)
-    if not open_legs:
+    # broker_reconciliation.get_unclosed_entry_leg, not get_open_cash_legs
+    # directly -- see that module's own docstring. Every real caller
+    # already ran gtt_bracket.reconcile_before_exit before reaching here,
+    # so by this point "should_exit" is already known true; this lookup
+    # just needs the tradingsymbol/quantity to close, which an UNKNOWN
+    # leg carries just as reliably as a COMPLETE one (recorded at
+    # placement time either way).
+    open_leg = await broker_reconciliation.get_unclosed_entry_leg(symbol, live_order_repository)
+    if open_leg is None:
         return None
-    open_leg = open_legs[0]
 
     # 2026-08-28, then reverted same day: a redundant ground-truth
     # holding_quantity() check used to run here too (see

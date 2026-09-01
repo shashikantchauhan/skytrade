@@ -94,6 +94,14 @@ class FakeLiveOrderRepository:
     async def get_open_cash_legs(self, symbol: str):
         return [self._open_leg] if self._open_leg else []
 
+    async def get_unclosed_cash_legs(self, symbol: str):
+        # broker_reconciliation.get_unclosed_entry_leg's own lookup --
+        # same underlying leg as get_open_cash_legs for these tests, which
+        # only ever script a COMPLETE _open_leg (the UNKNOWN-leg
+        # reconciliation case has its own dedicated coverage in
+        # test_broker_reconciliation.py).
+        return [self._open_leg] if self._open_leg else []
+
     async def record_leg(self, leg: LiveOrderLeg) -> None:
         self.recorded.append(leg)
 
@@ -212,6 +220,35 @@ async def test_records_the_paper_benchmark_close_when_reconciling_a_flat_positio
     assert symbol == "RELIANCE.NS"
     assert basket_id == "RELIANCE.NS-cash-entry-42"
     assert real_price == Decimal("1550")
+
+
+@pytest.mark.asyncio
+async def test_exits_an_unknown_status_entry_leg_via_broker_ground_truth():
+    # The reviewed bug, exercised end-to-end: an entry recorded status=
+    # UNKNOWN (fill status never confirmed) used to be invisible here --
+    # get_open_cash_legs (COMPLETE-only) reported "No real open position"
+    # and the manual exit button couldn't touch it, even if the order had
+    # actually filled at the broker. broker_reconciliation.
+    # get_unclosed_entry_leg now finds it, and Kite's own holding_quantity
+    # (confirming real shares are actually held) is what decides the rest.
+    unconfirmed_entry = LiveOrderLeg(
+        basket_id="RELIANCE.NS-cash-entry-1", symbol="RELIANCE.NS", purpose="cash",
+        tradingsymbol="RELIANCE", transaction_type="BUY", quantity=10, order_id="order-entry",
+        status="UNKNOWN", placed_at=datetime.now(UTC), average_price=None,
+    )
+    executor = FakeOrderExecutor(gtt_status="active", holding_quantity=10)
+    live_order_repository = FakeLiveOrderRepository(open_leg=unconfirmed_entry)
+    notifier = FakeNotifier()
+
+    result = await manual_exit.exit_position(
+        "RELIANCE.NS", Decimal("1550"), _config(), executor,
+        FakeGttRepository(active=None), live_order_repository, None, notifier,
+    )
+
+    assert result.ok is True
+    assert "closed" in result.message
+    assert executor.calls == [("RELIANCE", "SELL", 10)]
+    assert any("LIVE CASH POSITION CLOSED" in text for text in notifier.texts)
 
 
 @pytest.mark.asyncio

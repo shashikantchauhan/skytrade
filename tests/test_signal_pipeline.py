@@ -1449,6 +1449,9 @@ class _StatefulFakeLiveOrderRepository:
         open_symbols = self._open_symbols()
         return [leg for leg in self.recorded if leg.symbol in open_symbols]
 
+    async def get_all_unclosed_cash_legs(self):
+        return await self.get_all_open_cash_legs()
+
     async def get_legs_by_intent(self, intent_id: str):
         return [leg for leg in self.recorded if leg.intent_id == intent_id]
 
@@ -1680,7 +1683,7 @@ class _FakeLiveOrderRepositoryForMissedNotify:
     def __init__(self, open_count: int) -> None:
         self._open_count = open_count
 
-    async def get_all_open_cash_legs(self):
+    async def get_all_unclosed_cash_legs(self):
         return [object()] * self._open_count
 
 

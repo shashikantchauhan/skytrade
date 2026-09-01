@@ -15,7 +15,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from trading_scanner.application import gtt_bracket, live_cash_execution, paper_benchmark
+from trading_scanner.application import (
+    broker_reconciliation,
+    gtt_bracket,
+    live_cash_execution,
+    paper_benchmark,
+)
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.ports import Notifier
 from trading_scanner.infrastructure.db import (
@@ -51,10 +56,14 @@ async def exit_position(
     function's own docstring), same as a strategy-driven exit uses the
     current bar's close.
     """
-    open_legs = await live_order_repository.get_open_cash_legs(symbol)
-    if not open_legs:
+    # broker_reconciliation.get_unclosed_entry_leg, not get_open_cash_legs
+    # directly -- the latter is COMPLETE-only and would report "nothing to
+    # exit" for a real entry stuck at status=UNKNOWN (fill unconfirmed),
+    # which is exactly the case a manual exit is most likely to be needed
+    # for. See that module's own docstring.
+    entry_leg = await broker_reconciliation.get_unclosed_entry_leg(symbol, live_order_repository)
+    if entry_leg is None:
         return ManualExitResult(False, f"No real open position for {symbol}.")
-    entry_leg = open_legs[0]
 
     should_exit = True
     if gtt_repository is not None:
