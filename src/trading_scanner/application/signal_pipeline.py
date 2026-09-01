@@ -11,8 +11,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
-    conviction_filter,
-    entry_quality_filter,
+    entry_gates,
     futures_shadow,
     futures_trading,
     gtt_bracket,
@@ -716,16 +715,14 @@ async def _process_symbol(
                 # indicator floor) and conviction_filter (entry-candle
                 # close-location-value >= 0.7, see that module's own
                 # docstring for the evidence behind both).
-                track_record_ok = await paper_trading.is_eligible(
+                track_record_gate = await entry_gates.evaluate_track_record_gate(
                     symbol, config.candle_interval, trade_repository
                 )
-                quality_ok = entry_quality_filter.passes_indicator_filter(
-                    result.volatility_margin, result.regime_normalized
+                quality_decision = entry_gates.evaluate_cash_quality_gates(
+                    result.volatility_margin, result.regime_normalized,
+                    newest_candle.high, newest_candle.low, newest_candle.close,
                 )
-                conviction_ok = conviction_filter.passes_conviction_filter(
-                    newest_candle.high, newest_candle.low, newest_candle.close
-                )
-                cash_eligible = track_record_ok and quality_ok and conviction_ok
+                cash_eligible = track_record_gate.passed and quality_decision.allowed
                 if cash_eligible:
                     # 2026-08-25: serialize real entries -- execute_cash_entry's
                     # own max_positions check reads the current open count and
@@ -1358,7 +1355,10 @@ async def _collect_and_open_ranked_positions(
         entry_price = _market_price(newest_candle)
 
         if result.signal == "BUY":
-            if await paper_trading.is_eligible(symbol, config.candle_interval, trade_repository):
+            track_record_gate = await entry_gates.evaluate_track_record_gate(
+                symbol, config.candle_interval, trade_repository
+            )
+            if track_record_gate.passed:
                 expectancy = await symbol_expectancy(
                     symbol, SignalSide.BUY, config.candle_interval, trade_repository
                 )
@@ -1375,28 +1375,18 @@ async def _collect_and_open_ranked_positions(
                 ranked_candidates.append((symbol, candidate))
 
                 if cash_enabled:
-                    quality_ok = entry_quality_filter.passes_indicator_filter(
-                        result.volatility_margin, result.regime_normalized
+                    quality_decision = entry_gates.evaluate_cash_quality_gates(
+                        result.volatility_margin, result.regime_normalized,
+                        newest_candle.high, newest_candle.low, newest_candle.close,
                     )
-                    conviction_ok = conviction_filter.passes_conviction_filter(
-                        newest_candle.high, newest_candle.low, newest_candle.close
-                    )
-                    if quality_ok and conviction_ok:
+                    if quality_decision.allowed:
                         cash_candidates.append((symbol, candidate))
                     else:
-                        reason = (
-                            "entry_quality_filter" if not quality_ok
-                            else "conviction filter -- weak entry candle"
-                        )
-                        cash_notes[symbol] = f"cash: REJECTED ({reason})"
+                        cash_notes[symbol] = f"cash: REJECTED ({quality_decision.blocked_reason})"
             else:
-                paper_notes[symbol] = (
-                    "paper: not eligible yet (win_rate<55% or insufficient trade history)"
-                )
+                paper_notes[symbol] = f"paper: {track_record_gate.reason}"
                 if cash_enabled:
-                    cash_notes[symbol] = (
-                        "cash: not eligible yet (win_rate<55% or insufficient trade history)"
-                    )
+                    cash_notes[symbol] = f"cash: {track_record_gate.reason}"
 
         if futures_enabled and symbol in futures_paper_symbols:
             side = SignalSide.BUY if result.signal == "BUY" else SignalSide.SELL
