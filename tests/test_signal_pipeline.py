@@ -1024,7 +1024,7 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
         newest_candle = _seed_candles(symbol, 1)[0]
         if symbol == "^NSEI":
             # Index disagrees with the stock signal below -- must still notify.
-            return (
+            return [(
                 FastPredictResult(
                     signal="SELL",
                     prediction=-4,
@@ -1036,8 +1036,8 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
                     exit_state=ExitState(),
                 ),
                 newest_candle,
-            )
-        return (
+            )]
+        return [(
             FastPredictResult(
                 signal="BUY",
                 prediction=6,
@@ -1049,7 +1049,7 @@ async def test_index_disagreement_never_blocks_the_stock_signal(
                 exit_state=ExitState(),
             ),
             newest_candle,
-        )
+        )]
 
     monkeypatch.setattr(
         "trading_scanner.application.pipeline.orchestrator._evaluate_symbol", fake_evaluate_symbol
@@ -1357,7 +1357,7 @@ async def test_collect_and_open_ranked_positions_populates_both_books():
     paper_account_repository = FakePaperAccountRepository()
     futures_account_repository = _FakeFuturesPaperAccountRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
+        "RELIANCE.NS": [(_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS"))],
     }
 
     paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
@@ -1379,7 +1379,7 @@ async def test_collect_and_open_ranked_positions_skips_futures_when_not_allowlis
     paper_account_repository = FakePaperAccountRepository()
     futures_account_repository = _FakeFuturesPaperAccountRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS")),
+        "RELIANCE.NS": [(_fast_predict_result("BUY", 5), _fake_candle("RELIANCE.NS"))],
     }
 
     paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
@@ -1557,13 +1557,13 @@ async def test_collect_and_open_ranked_positions_rejects_cash_on_weak_conviction
     futures_account_repository = _FakeFuturesPaperAccountRepository()
     live_order_repository = _StatefulFakeLiveOrderRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (
+        "RELIANCE.NS": [(
             # volatility_margin/regime_normalized comfortably clear
             # entry_quality_filter's floor -- isolates conviction as the
             # only variable this test is about.
             _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
             _weak_conviction_candle("RELIANCE.NS"),
-        ),
+        )],
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
@@ -1586,10 +1586,10 @@ async def test_collect_and_open_ranked_positions_opens_cash_on_strong_conviction
     futures_account_repository = _FakeFuturesPaperAccountRepository()
     live_order_repository = _StatefulFakeLiveOrderRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (
+        "RELIANCE.NS": [(
             _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
             _strong_conviction_candle("RELIANCE.NS"),
-        ),
+        )],
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
@@ -1623,10 +1623,10 @@ async def test_collect_and_open_ranked_positions_persists_a_rejected_decision():
     live_order_repository = _StatefulFakeLiveOrderRepository()
     entry_decision_repository = _FakeEntryDecisionRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (
+        "RELIANCE.NS": [(
             _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
             _weak_conviction_candle("RELIANCE.NS"),
-        ),
+        )],
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
@@ -1656,10 +1656,10 @@ async def test_collect_and_open_ranked_positions_persists_an_opened_decision_wit
     live_order_repository = _StatefulFakeLiveOrderRepository()
     entry_decision_repository = _FakeEntryDecisionRepository()
     evaluated_by_symbol = {
-        "RELIANCE.NS": (
+        "RELIANCE.NS": [(
             _fast_predict_result("BUY", 5, volatility_margin=10.0, regime_normalized=2.0),
             _strong_conviction_candle("RELIANCE.NS"),
-        ),
+        )],
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
     cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))

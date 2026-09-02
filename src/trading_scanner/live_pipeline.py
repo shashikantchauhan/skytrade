@@ -34,6 +34,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import broker_reconciliation
+from trading_scanner.application.fast_predict import FastPredictResult
 from trading_scanner.application.futures_trading import FUTURES_INITIAL_CAPITAL
 from trading_scanner.application.paper_trading import (
     INITIAL_CAPITAL,
@@ -45,7 +46,8 @@ from trading_scanner.application.signal_pipeline import (
     _close_paper_position,
     _collect_and_open_ranked_positions,
     _evaluate_from_stored_candles,
-    _notify_kite_expired_once_per_day,
+    _notify_kite_expired_periodically,
+    _notify_stale_catch_up_signals,
     _process_symbol,
 )
 from trading_scanner.application.symbols import SymbolLoader, SymbolLoadError
@@ -58,6 +60,7 @@ from trading_scanner.infrastructure.db import (
     TursoEntryDecisionRepository,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
+    TursoGateStatusRepository,
     TursoGttRepository,
     TursoKiteSessionRepository,
     TursoLiveCashToggleRepository,
@@ -230,6 +233,7 @@ class LiveTickerPipeline:
             "futures_paper_account": TursoFuturesPaperAccountRepository(
                 self._client, FUTURES_INITIAL_CAPITAL
             ),
+            "gate_status": TursoGateStatusRepository(self._client),
         }
         for repo in self._repos.values():
             await repo.ensure_schema()
@@ -531,7 +535,10 @@ class LiveTickerPipeline:
                 self._config.index_symbol, self._config, self._engine,
                 self._repos["candle"], self._repos["engine_state"],
             )
-            index_result = evaluated[0] if evaluated is not None else None
+            # Only the current (last) bar -- the index is never itself
+            # traded, so any stale catch-up entries from a gap don't need
+            # their own notification here.
+            index_result = evaluated[-1][0] if evaluated else None
 
         semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SYMBOLS)
 
@@ -547,7 +554,7 @@ class LiveTickerPipeline:
         # each symbol's bookkeeping/notifications concurrently, with both
         # outcomes already decided so they aren't redecided per-symbol,
         # unranked, first-come-first-served like before.
-        evaluated_by_symbol: dict[str, tuple] = {}
+        evaluated_by_symbol: dict[str, list[tuple[FastPredictResult, Candle]]] = {}
 
         async def _evaluate_one(symbol: str, candle: Candle) -> None:
             async with semaphore:
@@ -561,13 +568,22 @@ class LiveTickerPipeline:
                     )
                 except Exception:
                     logger.exception("Unexpected exception evaluating closed candle for %s", symbol)
-                    evaluated_by_symbol[symbol] = None
+                    evaluated_by_symbol[symbol] = []
 
         await asyncio.gather(*(
             _evaluate_one(symbol, candle)
             for symbol, candle in candles.items()
             if symbol != self._config.index_symbol
         ))
+
+        # 2026-09-02: tell the user about anything caught up from an outage
+        # gap (more than one candle closed since the last run -- Kite
+        # session expired, process down) before ranking -- see evaluation.
+        # py's _evaluate_from_stored_candles docstring. Every entry but the
+        # last in each symbol's list is stale catch-up.
+        for symbol, evaluations in evaluated_by_symbol.items():
+            if len(evaluations) > 1:
+                await _notify_stale_catch_up_signals(symbol, evaluations[:-1], self._notifier)
 
         paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
             evaluated_by_symbol, self._config, self._repos["trade"],
@@ -579,9 +595,13 @@ class LiveTickerPipeline:
         )
 
         async def _process_one(symbol: str) -> None:
-            evaluated = evaluated_by_symbol.get(symbol)
-            if evaluated is None:
+            evaluations = evaluated_by_symbol.get(symbol)
+            if not evaluations:
                 return
+            # Only the current (last) entry is processed for trades/orders/
+            # notifications here -- any stale catch-up entries were already
+            # handled (notify-only) above, before ranking.
+            evaluated = evaluations[-1]
             async with semaphore:
                 try:
                     await _process_symbol(
@@ -603,6 +623,7 @@ class LiveTickerPipeline:
                         live_cash_lock=self._live_cash_lock,
                         precomputed_cash_note=cash_notes.get(symbol),
                         cash_state=cash_state,
+                        gate_status_repository=self._repos["gate_status"],
                     )
                 except Exception:
                     logger.exception("Unexpected exception processing closed candle for %s", symbol)
@@ -698,12 +719,12 @@ class LiveTickerPipeline:
 
         Also fixes a second gap from the same incident: this run never got
         a Telegram alert that the Kite session needed attention, because
-        _notify_kite_expired_once_per_day was only ever wired into the old
+        _notify_kite_expired_periodically was only ever wired into the old
         download-based run_signal_pipeline() path, not this always-on one
         -- so staleness here was invisible except in the server's own log.
-        Reused directly (same once-per-calendar-day dedup via
-        kite_session_repository.expiry_notified_date) rather than
-        reinventing it."""
+        Reused directly (same 15-minute re-notify dedup via
+        kite_session_repository.expiry_notified_at, see market_data.py's
+        _notify_kite_expired_periodically) rather than reinventing it."""
         while True:
             await asyncio.sleep(_TICKER_WATCHDOG_CHECK_SECONDS)
             if not is_market_hours(datetime.now(UTC)):
@@ -726,7 +747,7 @@ class LiveTickerPipeline:
             logger.info("Live pipeline heartbeat -- last tick %.0fs ago.", stale_for)
             if stale_for > _TICKER_STALE_SECONDS:
                 try:
-                    await _notify_kite_expired_once_per_day(
+                    await _notify_kite_expired_periodically(
                         self._repos["kite_session"], self._notifier
                     )
                 except Exception:
@@ -777,7 +798,7 @@ class LiveTickerPipeline:
                         "Stored Kite token is no longer valid -- waiting for a fresh login."
                     )
                     try:
-                        await _notify_kite_expired_once_per_day(
+                        await _notify_kite_expired_periodically(
                             self._repos["kite_session"], self._notifier
                         )
                     except Exception:

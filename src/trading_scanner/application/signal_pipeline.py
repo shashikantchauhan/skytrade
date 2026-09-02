@@ -28,10 +28,12 @@ from trading_scanner.application.pipeline.entry_decision import (
 from trading_scanner.application.pipeline.evaluation import (
     _BACKFILL_WINDOW_DAYS,
     _FULL_HISTORY,
+    _MAX_CATCH_UP_BARS,
     _MINIMUM_CANDLES,
     _RECENT_WINDOW_DAYS,
     _evaluate_from_stored_candles,
     _evaluate_symbol,
+    _notify_stale_catch_up_signals,
 )
 from trading_scanner.application.pipeline.lifecycle import (
     _HEDGE_OTM_PCT,
@@ -51,7 +53,7 @@ from trading_scanner.application.pipeline.market_data import (
     _dataframe_to_candles,
     _is_kite_token_error,
     _market_price,
-    _notify_kite_expired_once_per_day,
+    _notify_kite_expired_periodically,
     _select_provider,
 )
 from trading_scanner.application.pipeline.orchestrator import (
@@ -69,6 +71,7 @@ __all__ = [
     "_ENGINE_SETTINGS",
     "_FULL_HISTORY",
     "_HEDGE_OTM_PCT",
+    "_MAX_CATCH_UP_BARS",
     "_MAX_CONCURRENT_SYMBOLS",
     "_MINIMUM_CANDLES",
     "_RECENT_WINDOW_DAYS",
@@ -85,8 +88,9 @@ __all__ = [
     "_is_kite_token_error",
     "_market_price",
     "_notify_exit",
-    "_notify_kite_expired_once_per_day",
+    "_notify_kite_expired_periodically",
     "_notify_missed_cash_entry",
+    "_notify_stale_catch_up_signals",
     "_open_derivatives_shadow",
     "_open_futures_paper",
     "_open_paper_position",

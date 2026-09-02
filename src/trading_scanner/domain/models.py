@@ -363,3 +363,43 @@ class EntryDecisionRecord:
     blocked_reason: str | None
     created_at: datetime
     intent_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class GateStatusSnapshot:
+    """One symbol's latest gate state, refreshed every pipeline cycle --
+    2026-09-02, for the dashboard's gate-transparency table (see
+    ``docs/decisions/008-gate-status-snapshot.md``).
+
+    Unlike ``EntryDecisionRecord`` (append-only, one row per real decision,
+    only written for a symbol that already has an active BUY/SELL signal
+    and reaches ranking), this is a single, always-overwritten row per
+    symbol -- computed for *every* allowlist symbol *every* cycle
+    regardless of whether AlphaEngine's own signal is currently BUY, SELL,
+    or NEUTRAL, so a symbol that's close to qualifying but hasn't fired yet
+    is still visible. Exists so a human watching the dashboard can see
+    "how close is every symbol, right now" and manually place an order if
+    the automated system fails to (the 2026-09-02 incident this exists to
+    cover: two symbols cleared every real gate and still missed, purely on
+    a processing-time race against the entry cutoff -- see ``docs/
+    decisions/007-hidden-position-sweep-batching.md``).
+
+    ``quality_passed``/``conviction_passed`` are computed from the same
+    ``entry_quality_filter``/``conviction_filter`` calls real cash entries
+    use (``application/entry_gates.py``), independent of AlphaEngine's own
+    signal state -- both only need ``adx``/``regime_normalized``/
+    ``volatility_margin``/OHLC, all already produced by ``evaluate_latest_
+    bar`` every cycle for every symbol. ``track_record_passed`` is the same
+    ``paper_trading.is_eligible`` check real entries use."""
+
+    symbol: str
+    interval: str
+    signal: str  # "BUY" | "SELL" | "NEUTRAL"
+    adx: float
+    regime_normalized: float
+    volatility_margin: float
+    track_record_passed: bool
+    quality_passed: bool
+    conviction_passed: bool
+    evaluated_at: datetime  # the candle's own timestamp, not wall clock
+    updated_at: datetime

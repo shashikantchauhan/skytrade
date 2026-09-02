@@ -6,7 +6,7 @@ function's body moved as-is.
 
 import asyncio
 import logging
-from datetime import UTC, date
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pandas as pd
@@ -79,12 +79,14 @@ async def _select_provider(
     stored token blindly -- catches both an expired/revoked token and a
     stale index mapping in one check.
 
-    Also sends one "please log in again" notification per calendar day
-    (deduped via ``kite_session_repository``'s ``expiry_notified_date``,
-    see ``TursoKiteSessionRepository``) -- Kite tokens expire daily with
-    no documented exact time, so this piggybacks on the pipeline's own
-    hourly cron rather than needing separate infrastructure to detect
-    expiry.
+    Also re-sends a "please log in again" notification every 15 minutes
+    for as long as the session stays broken (deduped via
+    ``kite_session_repository``'s ``expiry_notified_at``, see
+    ``TursoKiteSessionRepository`` and ``_notify_kite_expired_
+    periodically``'s own docstring for why this isn't once-per-day
+    anymore) -- Kite tokens expire daily with no documented exact time, so
+    this piggybacks on the pipeline's own hourly cron rather than needing
+    separate infrastructure to detect expiry.
     """
     logger = logging.getLogger(__name__)
     if config.kite_api_key and kite_session_repository is not None:
@@ -103,28 +105,47 @@ async def _select_provider(
                     obtained_at,
                     exc_info=True,
                 )
-        await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
+        await _notify_kite_expired_periodically(kite_session_repository, notifier)
     elif kite_session_repository is not None:
-        await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
+        await _notify_kite_expired_periodically(kite_session_repository, notifier)
     raise NoValidKiteSession("No valid Kite session -- skipping this run rather than using Yahoo.")
 
 
-async def _notify_kite_expired_once_per_day(
+# 2026-09-02: was once-per-calendar-day -- a single missed/late-seen alert
+# could then sit unattended for the rest of the day. In production, an
+# expired token blocked real trading for 30-104 minutes at market open on
+# three consecutive trading days (2026-08-31, 2026-09-01, 2026-09-02)
+# because that one alert came and went unnoticed each time. Re-nudging
+# every 15 minutes instead can't guarantee a human sees it any faster, but
+# it stops one missed ping from silently costing the rest of the morning.
+_EXPIRY_RENOTIFY_INTERVAL = timedelta(minutes=15)
+
+
+async def _notify_kite_expired_periodically(
     kite_session_repository: TursoKiteSessionRepository, notifier: Notifier | None
 ) -> None:
+    """Re-sends the "Kite session expired, please re-login" alert every
+    ``_EXPIRY_RENOTIFY_INTERVAL`` for as long as the session stays broken --
+    see that constant's own comment for why this replaced the old once-per-
+    day version. Callers already retry this whole check every ~60s (the
+    live-ticker path's poll loop, or the next hourly run), so this function
+    only needs to decide whether *enough time has passed* to re-send, not
+    to run its own timer."""
     if notifier is None:
         return
-    today = date.today().isoformat()
+    now = datetime.now(UTC)
     try:
-        last_notified = await kite_session_repository.get_expiry_notified_date()
-        if last_notified == today:
-            return
+        last_notified_raw = await kite_session_repository.get_expiry_notified_at()
+        if last_notified_raw is not None:
+            last_notified = datetime.fromisoformat(last_notified_raw)
+            if now - last_notified < _EXPIRY_RENOTIFY_INTERVAL:
+                return
         await notifier.send_text(
             "⚠️ <b>SYSTEM ALERT</b>\n"
             "Kite session expired/missing -- this run is being skipped (no Yahoo fallback).\n"
             "Log in again: https://skytrade.oneatem.com/kite/login"
         )
-        await kite_session_repository.set_expiry_notified_date(today)
+        await kite_session_repository.set_expiry_notified_at(now.isoformat())
     except Exception:
         logging.getLogger(__name__).exception("Failed to send Kite-expiry notification")
 

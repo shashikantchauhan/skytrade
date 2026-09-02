@@ -222,6 +222,7 @@
 <div class="tabnav">
   <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
   <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
+  <button class="tab-btn" data-tab="gates" onclick="switchTab('gates')">Gates</button>
   <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
 </div>
 
@@ -257,6 +258,31 @@
       <tbody><tr class="empty-row"><td colspan="8">Loading...</td></tr></tbody>
     </table>
   </div>
+</section>
+
+<section class="tab-panel" data-tab="gates" hidden>
+  <div class="row between">
+    <h2>Gate status <span class="hint">every tracked symbol, refreshed each cycle -- what AlphaEngine sees right now</span></h2>
+    <label class="field">Filter by signal
+      <select id="gates-signal-filter" onchange="renderGates()">
+        <option value="">All symbols</option>
+        <option value="BUY">BUY only</option>
+        <option value="SELL">SELL only</option>
+        <option value="NEUTRAL">NEUTRAL only</option>
+      </select>
+    </label>
+  </div>
+  <div class="panel table-wrap">
+    <table id="gates-table">
+      <thead><tr>
+        <th>Symbol</th><th>Signal</th><th>Track record</th><th>Quality filter</th>
+        <th>Conviction</th><th class="num">ADX</th><th class="num">Regime</th>
+        <th class="num">Vol margin</th><th>Evaluated</th>
+      </tr></thead>
+      <tbody><tr class="empty-row"><td colspan="9">Loading...</td></tr></tbody>
+    </table>
+  </div>
+  <div class="note">Track record / quality / conviction are the exact three gates a real cash order has to clear -- computed the same way for every symbol every cycle, whether or not it currently has an active BUY/SELL signal, so you can see how close a NEUTRAL symbol is too. ADX/regime/volatility margin are the raw numbers behind the quality filter.</div>
 </section>
 
 <section class="tab-panel" data-tab="settings" hidden>
@@ -499,6 +525,33 @@ async function loadTrades() {
   }).join("") || `<tr class="empty-row"><td colspan="8">No closed trades yet.</td></tr>`;
 }
 
+let _gatesData = [];
+
+async function loadGates() {
+  _gatesData = await api("/api/gate-status");
+  renderGates();
+}
+
+function renderGates() {
+  const filter = document.getElementById("gates-signal-filter").value;
+  const rows = filter ? _gatesData.filter(g => g.signal === filter) : _gatesData;
+  const pass = (ok) => `<span class="pill ${ok ? "green" : "red"}">${ok ? "PASS" : "fail"}</span>`;
+  const signalCls = (s) => s === "BUY" ? "green" : s === "SELL" ? "red" : "neutral";
+  document.querySelector("#gates-table tbody").innerHTML = rows.map(g => `
+    <tr>
+      <td><strong>${g.symbol}</strong></td>
+      <td><span class="pill ${signalCls(g.signal)}">${g.signal}</span></td>
+      <td>${pass(g.track_record_passed)}</td>
+      <td>${pass(g.quality_passed)}</td>
+      <td>${pass(g.conviction_passed)}</td>
+      <td class="num">${fmt(g.adx)}</td>
+      <td class="num">${fmt(g.regime_normalized)}</td>
+      <td class="num">${fmt(g.volatility_margin)}</td>
+      <td>${fmtTime(g.evaluated_at)}</td>
+    </tr>
+  `).join("") || `<tr class="empty-row"><td colspan="9">No gate data yet -- refreshes once the live pipeline has run a cycle.</td></tr>`;
+}
+
 async function loadConfig() {
   const c = await api("/api/config");
   document.getElementById("cfg-capital").value = c.capital;
@@ -616,7 +669,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadLogs(), loadPipelineHealth()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadGates(), loadLogs(), loadPipelineHealth()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
   }

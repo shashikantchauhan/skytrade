@@ -8,6 +8,7 @@ submodule together into one scan cycle.
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 
 from trading_scanner.alpha_engine import AlphaEngine
 from trading_scanner.application import (
@@ -23,7 +24,10 @@ from trading_scanner.application.pipeline.capital_allocation import (
     _open_paper_position,
 )
 from trading_scanner.application.pipeline.entry_decision import _finalize_cash_entry
-from trading_scanner.application.pipeline.evaluation import _evaluate_symbol
+from trading_scanner.application.pipeline.evaluation import (
+    _evaluate_symbol,
+    _notify_stale_catch_up_signals,
+)
 from trading_scanner.application.pipeline.lifecycle import (
     _close_derivatives_shadow,
     _close_futures_paper,
@@ -39,11 +43,11 @@ from trading_scanner.application.pipeline.market_data import (
     NoValidKiteSession,
     _is_kite_token_error,
     _market_price,
-    _notify_kite_expired_once_per_day,
+    _notify_kite_expired_periodically,
     _select_provider,
 )
 from trading_scanner.config.settings import AppConfig
-from trading_scanner.domain.models import Candle, Signal, SignalSide, Trade
+from trading_scanner.domain.models import Candle, GateStatusSnapshot, Signal, SignalSide, Trade
 from trading_scanner.domain.ports import (
     CandleRepository,
     EngineStateRepository,
@@ -57,6 +61,7 @@ from trading_scanner.infrastructure.db import (
     LiveCashToggleState,
     TursoEntryDecisionRepository,
     TursoFuturesTradeRepository,
+    TursoGateStatusRepository,
     TursoGttRepository,
     TursoKiteSessionRepository,
     TursoLiveOrderRepository,
@@ -105,6 +110,7 @@ async def run_signal_pipeline(
     gtt_repository: TursoGttRepository | None = None,
     paper_benchmark_repository: TursoPaperBenchmarkRepository | None = None,
     entry_decision_repository: TursoEntryDecisionRepository | None = None,
+    gate_status_repository: TursoGateStatusRepository | None = None,
 ) -> None:
     """Ingest recent candles and notify on new BUY/SELL signals for each symbol.
 
@@ -181,7 +187,10 @@ async def run_signal_pipeline(
                 config.index_symbol, config, provider, engine, candle_repository,
                 engine_state_repository,
             )
-            index_result = index_evaluated[0] if index_evaluated is not None else None
+            # Only the current (last) bar -- the index is never itself
+            # traded, just used as market-regime context, so any stale
+            # catch-up entries from a gap don't need their own notification.
+            index_result = index_evaluated[-1][0] if index_evaluated else None
         except Exception:
             logger.exception("Unexpected exception while evaluating index %s", config.index_symbol)
 
@@ -226,7 +235,7 @@ async def run_signal_pipeline(
             async with mid_run_notify_lock:
                 if not mid_run_notified:
                     mid_run_notified = True
-                    await _notify_kite_expired_once_per_day(kite_session_repository, notifier)
+                    await _notify_kite_expired_periodically(kite_session_repository, notifier)
 
     # Ranking (see application/ranking.py) needs one scan cycle's full set of
     # BUY candidates before any of them can open a paper position -- so
@@ -238,7 +247,7 @@ async def run_signal_pipeline(
     # open paper positions for them strongest-first, (3) run the rest of
     # each symbol's bookkeeping/notifications concurrently again, now with
     # the paper-position outcome already decided so it isn't redecided.
-    evaluated_by_symbol: dict[str, tuple[FastPredictResult, Candle] | None] = {}
+    evaluated_by_symbol: dict[str, list[tuple[FastPredictResult, Candle]]] = {}
 
     async def _evaluate_with_limit(symbol: str) -> None:
         async with semaphore:
@@ -248,10 +257,18 @@ async def run_signal_pipeline(
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while evaluating %s", symbol)
-                evaluated_by_symbol[symbol] = None
+                evaluated_by_symbol[symbol] = []
                 await _notify_mid_run_kite_expiry_once(error)
 
     await asyncio.gather(*(_evaluate_with_limit(symbol) for symbol in symbols))
+
+    # 2026-09-02: tell the user about anything caught up from an outage gap
+    # (more than one candle closed since the last run) before ranking --
+    # see evaluation.py's _evaluate_from_stored_candles docstring. Every
+    # entry but the last in each symbol's list is stale catch-up.
+    for symbol, evaluations in evaluated_by_symbol.items():
+        if len(evaluations) > 1:
+            await _notify_stale_catch_up_signals(symbol, evaluations[:-1], notifier)
 
     paper_notes, futures_notes, cash_notes = await _collect_and_open_ranked_positions(
         evaluated_by_symbol, config, trade_repository, paper_account_repository,
@@ -261,9 +278,13 @@ async def run_signal_pipeline(
     )
 
     async def _process_with_limit(symbol: str) -> None:
-        evaluated = evaluated_by_symbol.get(symbol)
-        if evaluated is None:
+        evaluations = evaluated_by_symbol.get(symbol)
+        if not evaluations:
             return  # Nothing new for this symbol this cycle -- same as before.
+        # Only the current (last) entry is processed for trades/orders/
+        # notifications here -- any stale catch-up entries were already
+        # handled (notify-only) above, before ranking.
+        evaluated = evaluations[-1]
         async with semaphore:
             try:
                 await _process_symbol(
@@ -294,12 +315,65 @@ async def run_signal_pipeline(
                     live_cash_lock=live_cash_lock,
                     precomputed_cash_note=cash_notes.get(symbol),
                     cash_state=cash_state,
+                    gate_status_repository=gate_status_repository,
                 )
             except Exception as error:
                 logger.exception("Unexpected exception while processing %s", symbol)
                 await _notify_mid_run_kite_expiry_once(error)
 
     await asyncio.gather(*(_process_with_limit(symbol) for symbol in symbols))
+
+
+async def _record_gate_status(
+    symbol: str,
+    config: AppConfig,
+    result: FastPredictResult,
+    newest_candle: Candle,
+    trade_repository: TradeRepository,
+    gate_status_repository: TursoGateStatusRepository,
+) -> None:
+    """Snapshot this symbol's gate state for the dashboard's Gates tab --
+    2026-09-02, see domain/models.py's GateStatusSnapshot and docs/
+    decisions/008-gate-status-snapshot.md.
+
+    Computed for *every* symbol evaluated this cycle regardless of
+    ``result.signal`` (BUY, SELL, or NEUTRAL) -- unlike the real cash-entry
+    gates below (only reached for an active BUY/SELL that already won
+    ranking), this exists so a NEUTRAL symbol that's close to qualifying is
+    visible too. Reuses the exact same ``entry_gates`` calls a real cash
+    order would use -- no separate/duplicated gate logic -- so what the
+    dashboard shows always matches what a real decision would actually see.
+
+    Best-effort: never allowed to raise into the caller (a dashboard
+    convenience must not be able to break real trade processing)."""
+    try:
+        track_record_gate = await entry_gates.evaluate_track_record_gate(
+            symbol, config.candle_interval, trade_repository
+        )
+        quality_decision = entry_gates.evaluate_cash_quality_gates(
+            result.volatility_margin, result.regime_normalized,
+            newest_candle.high, newest_candle.low, newest_candle.close,
+        )
+        quality_passed = quality_decision.gates[0].passed
+        conviction_passed = quality_decision.gates[1].passed
+        now = datetime.now(UTC)
+        await gate_status_repository.set_snapshot(
+            GateStatusSnapshot(
+                symbol=symbol,
+                interval=config.candle_interval,
+                signal=result.signal,
+                adx=result.adx,
+                regime_normalized=result.regime_normalized,
+                volatility_margin=result.volatility_margin,
+                track_record_passed=track_record_gate.passed,
+                quality_passed=quality_passed,
+                conviction_passed=conviction_passed,
+                evaluated_at=newest_candle.timestamp,
+                updated_at=now,
+            )
+        )
+    except Exception:
+        logging.getLogger(__name__).exception("Failed to record gate status for %s", symbol)
 
 
 async def _process_symbol(
@@ -330,6 +404,7 @@ async def _process_symbol(
     live_cash_lock: asyncio.Lock | None = None,
     precomputed_cash_note: str | None = None,
     cash_state: LiveCashToggleState | None = None,
+    gate_status_repository: TursoGateStatusRepository | None = None,
 ) -> None:
     """Evaluate the newest bar, record/close trades, and notify for one symbol.
 
@@ -393,9 +468,14 @@ async def _process_symbol(
     if precomputed_evaluation is not None:
         evaluated = precomputed_evaluation
     else:
-        evaluated = await _evaluate_symbol(
+        # Dead in production (see this docstring above) -- only the
+        # current bar is used here even if a gap left stale catch-up
+        # entries too, since this fallback path has no ranking/notifier
+        # wiring around it to handle them the way the real call sites do.
+        evaluations = await _evaluate_symbol(
             symbol, config, provider, engine, candle_repository, engine_state_repository
         )
+        evaluated = evaluations[-1] if evaluations else None
     if evaluated is None:
         return
     result, newest_candle = evaluated
@@ -404,6 +484,11 @@ async def _process_symbol(
     derivatives_note = None
     futures_note = None
     cash_note = None
+
+    if gate_status_repository is not None:
+        await _record_gate_status(
+            symbol, config, result, newest_candle, trade_repository, gate_status_repository
+        )
 
     if order_executor is not None and gtt_repository is not None and cash_state is not None:
         try:

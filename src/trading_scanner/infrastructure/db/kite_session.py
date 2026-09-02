@@ -7,7 +7,8 @@ CREATE TABLE IF NOT EXISTS kite_session (
     id INTEGER PRIMARY KEY CHECK (id = 1),
     access_token TEXT NOT NULL,
     obtained_at TEXT NOT NULL,
-    expiry_notified_date TEXT
+    expiry_notified_date TEXT,
+    expiry_notified_at TEXT
 )
 """
 
@@ -28,6 +29,7 @@ class TursoKiteSessionRepository:
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_KITE_SESSION_TABLE)
         await add_column_if_missing(self._client, "kite_session", "expiry_notified_date", "TEXT")
+        await add_column_if_missing(self._client, "kite_session", "expiry_notified_at", "TEXT")
 
     async def set_token(self, access_token: str, obtained_at: str) -> None:
         await self._client.execute(
@@ -49,11 +51,9 @@ class TursoKiteSessionRepository:
         return result.rows[0][0], result.rows[0][1]
 
     async def get_expiry_notified_date(self) -> str | None:
-        """Last calendar date (YYYY-MM-DD) the "Kite session expired,
-        please re-login" alert was sent -- see ``application/
-        signal_pipeline.py``'s ``_select_provider``, which sends at most
-        one per day so an all-day expired session doesn't spam Telegram
-        every hourly run."""
+        """Superseded 2026-09-02 by ``get_expiry_notified_at`` (see that
+        method's docstring for why) -- kept only because it's a real,
+        already-persisted column; no longer written to by anything."""
         result = await self._client.execute(
             "SELECT expiry_notified_date FROM kite_session WHERE id = 1"
         )
@@ -73,4 +73,36 @@ class TursoKiteSessionRepository:
             ON CONFLICT (id) DO UPDATE SET expiry_notified_date = excluded.expiry_notified_date
             """,
             [date_str],
+        )
+
+    async def get_expiry_notified_at(self) -> str | None:
+        """UTC ISO timestamp of the last "Kite session expired, please
+        re-login" alert -- see ``application/pipeline/market_data.py``'s
+        ``_notify_kite_expired_periodically``, which re-sends every 15
+        minutes (not once per calendar day, the old ``expiry_notified_
+        date`` behavior) while the session stays unfixed.
+
+        2026-09-02: the once-per-day version let a single missed/late-seen
+        alert sit unattended for hours -- in production, an expired token
+        blocked real trading for 30-104 minutes at market open on three
+        consecutive trading days (2026-08-31, 2026-09-01, 2026-09-02)
+        because the one alert for the day came and went unnoticed. A
+        15-minute re-nudge can't fully prevent that (still requires a
+        human to see it and log in), but it stops one missed ping from
+        silently costing the rest of the morning."""
+        result = await self._client.execute(
+            "SELECT expiry_notified_at FROM kite_session WHERE id = 1"
+        )
+        if not result.rows:
+            return None
+        return result.rows[0][0]
+
+    async def set_expiry_notified_at(self, timestamp: str) -> None:
+        await self._client.execute(
+            """
+            INSERT INTO kite_session (id, access_token, obtained_at, expiry_notified_at)
+            VALUES (1, '', '', ?)
+            ON CONFLICT (id) DO UPDATE SET expiry_notified_at = excluded.expiry_notified_at
+            """,
+            [timestamp],
         )

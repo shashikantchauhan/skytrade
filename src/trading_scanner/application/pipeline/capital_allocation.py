@@ -275,7 +275,7 @@ async def _rank_and_open_futures_positions(
 
 
 async def _collect_and_open_ranked_positions(
-    evaluated_by_symbol: dict[str, tuple[FastPredictResult, Candle] | None],
+    evaluated_by_symbol: dict[str, list[tuple[FastPredictResult, Candle]]],
     config: AppConfig,
     trade_repository: TradeRepository,
     paper_account_repository: PaperAccountRepository,
@@ -339,10 +339,14 @@ async def _collect_and_open_ranked_positions(
         order_executor is not None and live_order_repository is not None and cash_state is not None
     )
 
-    for symbol, evaluated in evaluated_by_symbol.items():
-        if evaluated is None:
+    for symbol, evaluations in evaluated_by_symbol.items():
+        if not evaluations:
             continue
-        result, newest_candle = evaluated
+        # 2026-09-02: only the *last* (current) entry competes for ranked
+        # capital -- anything before it is stale catch-up from an outage
+        # gap (see application/pipeline/evaluation.py's own docstring),
+        # already notified separately, never acted on with a real order.
+        result, newest_candle = evaluations[-1]
         if result.signal not in ("BUY", "SELL"):
             continue
         entry_price = _market_price(newest_candle)

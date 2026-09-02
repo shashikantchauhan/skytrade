@@ -21,6 +21,7 @@ from trading_scanner.infrastructure.db.futures_paper_account import (
     TursoFuturesPaperAccountRepository,
 )
 from trading_scanner.infrastructure.db.futures_trades import TursoFuturesTradeRepository
+from trading_scanner.infrastructure.db.gate_status import TursoGateStatusRepository
 from trading_scanner.infrastructure.db.gtt import TursoGttRepository
 from trading_scanner.infrastructure.db.kite_session import TursoKiteSessionRepository
 from trading_scanner.infrastructure.db.live_cash_toggle import (
@@ -42,6 +43,7 @@ __all__ = [
     "TursoEntryDecisionRepository",
     "TursoFuturesPaperAccountRepository",
     "TursoFuturesTradeRepository",
+    "TursoGateStatusRepository",
     "TursoGttRepository",
     "TursoKiteSessionRepository",
     "LiveCashToggleState",

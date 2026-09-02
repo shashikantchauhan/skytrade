@@ -42,6 +42,7 @@ from trading_scanner.infrastructure.db import (
     LiveCashToggleState,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
+    TursoGateStatusRepository,
     TursoGttRepository,
     TursoKiteSessionRepository,
     TursoLiveCashToggleRepository,
@@ -526,6 +527,38 @@ async def exit_live_cash_position(
             gtt_repository, live_order_repository, paper_benchmark_repository, notifier,
         )
         return JSONResponse({"ok": result.ok, "message": result.message})
+    finally:
+        await client.close()
+
+
+@app.get("/api/gate-status")
+async def gate_status(_: None = Depends(_require_session)) -> JSONResponse:
+    """Every tracked symbol's latest gate state -- 2026-09-02, see domain/
+    models.py's GateStatusSnapshot and docs/decisions/008-gate-status-
+    snapshot.md. Read-only, viewer-level (same as every other data-only
+    route above) -- this is a transparency view, not a control."""
+    client, config = _client()
+    try:
+        repository = TursoGateStatusRepository(client)
+        await repository.ensure_schema()
+        snapshots = await repository.get_all_snapshots(config.candle_interval)
+        return JSONResponse(
+            [
+                {
+                    "symbol": s.symbol,
+                    "signal": s.signal,
+                    "adx": s.adx,
+                    "regime_normalized": s.regime_normalized,
+                    "volatility_margin": s.volatility_margin,
+                    "track_record_passed": s.track_record_passed,
+                    "quality_passed": s.quality_passed,
+                    "conviction_passed": s.conviction_passed,
+                    "evaluated_at": s.evaluated_at.isoformat(),
+                    "updated_at": s.updated_at.isoformat(),
+                }
+                for s in snapshots
+            ]
+        )
     finally:
         await client.close()
 
