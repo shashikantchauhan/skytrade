@@ -127,20 +127,26 @@ async def find_hidden_positions(
     (unlike the entry preflight, which reconciles what it finds because
     it's already mid-decision for that one symbol); this only surfaces the
     symbol list for a caller (``live_pipeline.py``) to alert a human about.
-    Best-effort per symbol: a ``holding_quantity`` failure for one symbol
-    is logged and skipped, never allowed to abort the sweep for the rest
-    of the allowlist."""
+
+    2026-09-02: fetches every symbol's real quantity with one bulk
+    ``holding_quantities()`` call, not one ``holding_quantity()`` call per
+    allowlist symbol -- the per-symbol version made 2N Kite API calls for
+    N symbols and tripped Kite's rate limit in production scanning a
+    ~20-symbol allowlist. See docs/decisions/007-hidden-position-sweep-
+    batching.md. Best-effort for the sweep as a whole: if the bulk
+    fetch itself fails, this cycle's sweep is skipped (logged) rather than
+    partially applied against a stale/incomplete quantity map -- there's
+    nothing to partially retry per-symbol anymore since it's one call, and
+    the next cycle tries again."""
+    try:
+        quantities = await asyncio.to_thread(order_executor.holding_quantities)
+    except Exception:
+        logger.warning("Hidden-position sweep failed -- skipping this cycle.", exc_info=True)
+        return []
     hidden: list[str] = []
     for symbol in sorted(cash_state.symbols):
         tradingsymbol = to_kite_tradingsymbol(symbol)
-        try:
-            real_quantity = await asyncio.to_thread(order_executor.holding_quantity, tradingsymbol)
-        except Exception:
-            logger.warning(
-                "Hidden-position check failed for %s -- skipping this cycle.",
-                symbol, exc_info=True,
-            )
-            continue
+        real_quantity = quantities.get(tradingsymbol, 0)
         if real_quantity <= 0:
             continue
         unclosed = await live_order_repository.get_unclosed_cash_legs(symbol)

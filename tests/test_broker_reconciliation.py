@@ -153,17 +153,17 @@ async def test_get_reconciliation_required_symbols_is_empty_when_nothing_needs_i
 
 
 class _FakeOrderExecutor:
-    """Scripts holding_quantity per tradingsymbol -- for
+    """Scripts the bulk holding_quantities() call -- for
     find_hidden_positions's own tests, no real Kite connection."""
 
     def __init__(self, holdings: dict[str, int]) -> None:
         self._holdings = holdings
-        self.raises_for: set[str] = set()
+        self.raises = False
 
-    def holding_quantity(self, tradingsymbol: str) -> int:
-        if tradingsymbol in self.raises_for:
+    def holding_quantities(self) -> dict[str, int]:
+        if self.raises:
             raise RuntimeError("Kite API error")
-        return self._holdings.get(tradingsymbol, 0)
+        return dict(self._holdings)
 
 
 def _cash_state(symbols: frozenset[str]) -> LiveCashToggleState:
@@ -215,23 +215,27 @@ async def test_find_hidden_positions_is_empty_when_the_local_ledger_already_acco
 
 
 @pytest.mark.asyncio
-async def test_find_hidden_positions_skips_a_symbol_whose_broker_check_fails(
+async def test_find_hidden_positions_skips_the_whole_sweep_when_the_bulk_fetch_fails(
     tmp_path: Path,
 ) -> None:
-    # One symbol's holding_quantity failing (a transient Kite API error)
-    # must not abort the sweep for the rest of the allowlist.
+    # 2026-09-02: holding_quantities() is one bulk call for the whole
+    # allowlist now (see infrastructure/kite.py's docstring for why --
+    # the old per-symbol holding_quantity() loop tripped Kite's rate
+    # limit in production). A transient Kite API error on that one call
+    # must not raise out of the sweep -- just skip this cycle entirely
+    # and let the next cycle retry.
     client = create_turso_client(_local_url(tmp_path), None)
     try:
         repository = TursoLiveOrderRepository(client)
         await repository.ensure_schema()
         executor = _FakeOrderExecutor({"TCS": 3})
-        executor.raises_for.add("RELIANCE")
+        executor.raises = True
 
         hidden = await broker_reconciliation.find_hidden_positions(
             _cash_state(frozenset({"RELIANCE.NS", "TCS.NS"})), executor, repository
         )
 
-        assert hidden == ["TCS.NS"]
+        assert hidden == []
     finally:
         await client.close()
 

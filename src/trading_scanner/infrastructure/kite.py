@@ -475,6 +475,42 @@ class KiteOrderExecutor:
                 prior_day += int(holding.get("quantity", 0)) + int(holding.get("t1_quantity", 0))
         return same_day + prior_day
 
+    def holding_quantities(self) -> dict[str, int]:
+        """Same computation as ``holding_quantity``, for every CNC
+        tradingsymbol at once -- one ``positions()`` call and one
+        ``holdings()`` call *total*, not two per symbol.
+
+        2026-09-02: added after ``broker_reconciliation.find_hidden_
+        positions``'s allowlist-wide sweep called ``holding_quantity`` in a
+        per-symbol loop -- for N allowlist symbols that's 2N Kite API
+        calls, all re-fetching the exact same two account-wide lists and
+        just filtering client-side each time. Against a ~20-symbol
+        allowlist that burst tripped Kite's rate limit in production
+        (``NetworkException: Too many requests``, 2026-09-02, ~19 symbols
+        skipped in one sweep) -- and worse than the wasted calls
+        themselves, a burst like that can starve a *real* order-placement
+        or GTT-status call happening in the same cycle of API quota. See
+        docs/decisions/007-hidden-position-sweep-batching.md.
+        ``holding_quantity`` itself is untouched -- its callers
+        (``gtt_bracket.reconcile_before_exit``, ``live_cash_execution``'s
+        entry preflight) each check exactly one symbol at one moment, so
+        there's nothing to batch there; only the allowlist-wide sweep
+        needed this."""
+        quantities: dict[str, int] = {}
+        for position in self._kite.positions().get("net", []):
+            if position.get("product") == "CNC":
+                symbol = position.get("tradingsymbol")
+                quantities[symbol] = quantities.get(symbol, 0) + max(
+                    0, int(position.get("quantity", 0))
+                )
+        for holding in self._kite.holdings():
+            if holding.get("product") == "CNC":
+                symbol = holding.get("tradingsymbol")
+                quantities[symbol] = quantities.get(symbol, 0) + int(
+                    holding.get("quantity", 0)
+                ) + int(holding.get("t1_quantity", 0))
+        return quantities
+
     def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
         """Places a real NFO market order, product NRML (carries positions
         overnight -- appropriate for a swing strategy, not an intraday
