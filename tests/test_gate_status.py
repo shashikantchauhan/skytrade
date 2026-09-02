@@ -81,6 +81,64 @@ async def test_get_all_snapshots_only_returns_the_requested_interval(tmp_path: P
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_record_event_and_get_events_since(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoGateStatusRepository(client)
+        await repository.ensure_schema()
+        await repository.record_event(_snapshot(
+            evaluated_at=datetime(2026, 9, 2, 4, 45, tzinfo=UTC),
+        ))
+        await repository.record_event(_snapshot(
+            symbol="AXISBANK.NS", signal="SELL",
+            evaluated_at=datetime(2026, 9, 2, 8, 45, tzinfo=UTC),
+        ))
+
+        events = await repository.get_events_since("1h", datetime(2026, 9, 2, tzinfo=UTC))
+
+        assert len(events) == 2
+        assert events[0].symbol == "AXISBANK.NS"  # most recent first
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_get_events_since_excludes_events_before_the_cutoff(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoGateStatusRepository(client)
+        await repository.ensure_schema()
+        await repository.record_event(_snapshot(
+            evaluated_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC),  # yesterday
+        ))
+
+        events = await repository.get_events_since("1h", datetime(2026, 9, 2, tzinfo=UTC))
+
+        assert events == []
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_replaying_the_same_bar_does_not_duplicate_the_event(tmp_path: Path) -> None:
+    # Catch-up replay (or any re-processing) hitting an already-recorded
+    # bar must not duplicate or clobber the original event.
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoGateStatusRepository(client)
+        await repository.ensure_schema()
+        snapshot = _snapshot(evaluated_at=datetime(2026, 9, 2, 4, 45, tzinfo=UTC))
+        await repository.record_event(snapshot)
+        await repository.record_event(snapshot)
+
+        events = await repository.get_events_since("1h", datetime(2026, 9, 2, tzinfo=UTC))
+
+        assert len(events) == 1
+    finally:
+        await client.close()
+
+
 class _FakeTradeRepository:
     """Scripts is_eligible's outcome directly via enough closed trades."""
 
@@ -105,9 +163,13 @@ class _FakeTradeRepository:
 class _FakeGateStatusRepository:
     def __init__(self) -> None:
         self.recorded: list[GateStatusSnapshot] = []
+        self.events: list[GateStatusSnapshot] = []
 
     async def set_snapshot(self, snapshot: GateStatusSnapshot) -> None:
         self.recorded.append(snapshot)
+
+    async def record_event(self, snapshot: GateStatusSnapshot) -> None:
+        self.events.append(snapshot)
 
 
 def _config() -> AppConfig:
@@ -153,7 +215,35 @@ async def test_record_gate_status_writes_a_snapshot_for_a_neutral_symbol() -> No
     assert len(gate_status_repository.recorded) == 1
     snapshot = gate_status_repository.recorded[0]
     assert snapshot.signal == "NEUTRAL"
-    assert snapshot.symbol == "RELIANCE.NS"
+    assert gate_status_repository.events == []  # NEUTRAL never becomes an event
+
+
+@pytest.mark.asyncio
+async def test_record_gate_status_logs_a_permanent_event_for_a_buy_signal() -> None:
+    gate_status_repository = _FakeGateStatusRepository()
+
+    await _record_gate_status(
+        "RELIANCE.NS", _config(), _result(signal="BUY"), _candle(),
+        _FakeTradeRepository(eligible=True), gate_status_repository,
+    )
+
+    assert len(gate_status_repository.events) == 1
+    assert gate_status_repository.events[0].signal == "BUY"
+
+
+@pytest.mark.asyncio
+async def test_record_gate_status_logs_a_permanent_event_for_a_sell_signal() -> None:
+    # SELL never reaches entry_decisions (BUY-only, see capital_allocation.
+    # py) -- this is the only permanent record a SELL signal gets at all.
+    gate_status_repository = _FakeGateStatusRepository()
+
+    await _record_gate_status(
+        "AXISBANK.NS", _config(), _result(signal="SELL"), _candle(),
+        _FakeTradeRepository(eligible=True), gate_status_repository,
+    )
+
+    assert len(gate_status_repository.events) == 1
+    assert gate_status_repository.events[0].signal == "SELL"
 
 
 @pytest.mark.asyncio

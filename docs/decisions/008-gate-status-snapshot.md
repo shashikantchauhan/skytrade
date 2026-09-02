@@ -60,3 +60,29 @@ real trade processing.
 See `domain/models.py`'s `GateStatusSnapshot`, `infrastructure/db/
 gate_status.py`, and `application/pipeline/orchestrator.py`'s
 `_record_gate_status` for the full reasoning.
+
+## Addendum, 2026-09-02 (same day): the snapshot alone was misleading
+
+`gate_status` (above) is a single always-overwritten row per symbol -- it
+can only ever answer "what does the system see on the very latest candle."
+`result.signal` is TRUE only on the one bar where a signal actually
+changes; every bar after that reads back NEUTRAL again even though a real
+BUY/SELL already fired earlier. Asked "did any signal fire today," the
+snapshot-only view answered "1" when the real number (cross-checked
+against `entry_decisions` and a manual review) was 15 -- a live,
+confirmed-wrong answer given to the user the same day this shipped.
+
+Added `gate_status_events`: a second, append-only table, one permanent
+row per actual BUY/SELL (never for NEUTRAL, so it stays small), for both
+sides -- unlike `entry_decisions`, which is BUY-only (SELL never reaches
+ranking/paper-account code at all in this cash-only, long-only system).
+`_record_gate_status` writes to it whenever `result.signal in ("BUY",
+"SELL")`, using `ON CONFLICT (symbol, interval, evaluated_at) DO NOTHING`
+so re-processing an already-recorded bar (e.g. catch-up replay) can't
+duplicate it. New `/api/gate-status/events` (IST-midnight-scoped "today")
+and a "Today's signals" section on the dashboard, above the existing
+current-state table.
+
+New tests: `tests/test_gate_status.py` (event round-trip, since-cutoff
+filtering, replay-safe no-duplicate, `_record_gate_status` logs an event
+for BUY/SELL but not NEUTRAL).

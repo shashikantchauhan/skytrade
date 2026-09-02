@@ -357,21 +357,27 @@ async def _record_gate_status(
         quality_passed = quality_decision.gates[0].passed
         conviction_passed = quality_decision.gates[1].passed
         now = datetime.now(UTC)
-        await gate_status_repository.set_snapshot(
-            GateStatusSnapshot(
-                symbol=symbol,
-                interval=config.candle_interval,
-                signal=result.signal,
-                adx=result.adx,
-                regime_normalized=result.regime_normalized,
-                volatility_margin=result.volatility_margin,
-                track_record_passed=track_record_gate.passed,
-                quality_passed=quality_passed,
-                conviction_passed=conviction_passed,
-                evaluated_at=newest_candle.timestamp,
-                updated_at=now,
-            )
+        snapshot = GateStatusSnapshot(
+            symbol=symbol,
+            interval=config.candle_interval,
+            signal=result.signal,
+            adx=result.adx,
+            regime_normalized=result.regime_normalized,
+            volatility_margin=result.volatility_margin,
+            track_record_passed=track_record_gate.passed,
+            quality_passed=quality_passed,
+            conviction_passed=conviction_passed,
+            evaluated_at=newest_candle.timestamp,
+            updated_at=now,
         )
+        await gate_status_repository.set_snapshot(snapshot)
+        if result.signal in ("BUY", "SELL"):
+            # 2026-09-02: the snapshot above gets overwritten on the very
+            # next bar even if nothing changed (NEUTRAL again) -- this is
+            # the permanent record of "a real signal fired," queryable by
+            # day, that the snapshot alone can't answer. See gate_status.
+            # py's own comment on gate_status_events for why.
+            await gate_status_repository.record_event(snapshot)
     except Exception:
         logging.getLogger(__name__).exception("Failed to record gate status for %s", symbol)
 

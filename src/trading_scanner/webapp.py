@@ -62,6 +62,7 @@ from trading_scanner.infrastructure.kite import (
 from trading_scanner.infrastructure.kite import (
     get_last_prices as kite_get_last_prices,
 )
+from trading_scanner.infrastructure.kite_ticker import IST
 from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 from trading_scanner.infrastructure.yahoo import YahooProvider
 from trading_scanner.web.services.auth import (
@@ -542,23 +543,44 @@ async def gate_status(_: None = Depends(_require_session)) -> JSONResponse:
         repository = TursoGateStatusRepository(client)
         await repository.ensure_schema()
         snapshots = await repository.get_all_snapshots(config.candle_interval)
-        return JSONResponse(
-            [
-                {
-                    "symbol": s.symbol,
-                    "signal": s.signal,
-                    "adx": s.adx,
-                    "regime_normalized": s.regime_normalized,
-                    "volatility_margin": s.volatility_margin,
-                    "track_record_passed": s.track_record_passed,
-                    "quality_passed": s.quality_passed,
-                    "conviction_passed": s.conviction_passed,
-                    "evaluated_at": s.evaluated_at.isoformat(),
-                    "updated_at": s.updated_at.isoformat(),
-                }
-                for s in snapshots
-            ]
+        return JSONResponse([_gate_status_json(s) for s in snapshots])
+    finally:
+        await client.close()
+
+
+def _gate_status_json(s) -> dict:
+    return {
+        "symbol": s.symbol,
+        "signal": s.signal,
+        "adx": s.adx,
+        "regime_normalized": s.regime_normalized,
+        "volatility_margin": s.volatility_margin,
+        "track_record_passed": s.track_record_passed,
+        "quality_passed": s.quality_passed,
+        "conviction_passed": s.conviction_passed,
+        "evaluated_at": s.evaluated_at.isoformat(),
+        "updated_at": s.updated_at.isoformat(),
+    }
+
+
+@app.get("/api/gate-status/events")
+async def gate_status_events(_: None = Depends(_require_session)) -> JSONResponse:
+    """Every real BUY/SELL that fired today (IST) -- the permanent record
+    a point-in-time snapshot can't give, since a symbol only shows BUY/
+    SELL on the one bar it changed on (see gate_status.py's own comment on
+    gate_status_events). Covers both sides, unlike /api/trades or
+    entry_decisions (BUY-only)."""
+    client, config = _client()
+    try:
+        repository = TursoGateStatusRepository(client)
+        await repository.ensure_schema()
+        today_ist_midnight = datetime.now(IST).replace(
+            hour=0, minute=0, second=0, microsecond=0
         )
+        events = await repository.get_events_since(
+            config.candle_interval, today_ist_midnight.astimezone(UTC)
+        )
+        return JSONResponse([_gate_status_json(e) for e in events])
     finally:
         await client.close()
 

@@ -261,8 +261,19 @@
 </section>
 
 <section class="tab-panel" data-tab="gates" hidden>
-  <div class="row between">
-    <h2>Gate status <span class="hint">every tracked symbol, refreshed each cycle -- what AlphaEngine sees right now</span></h2>
+  <h2>Today's signals <span class="hint">every real BUY/SELL that fired today, permanent record -- not just the last one</span></h2>
+  <div class="panel table-wrap">
+    <table id="gate-events-table">
+      <thead><tr>
+        <th>Symbol</th><th>Signal</th><th>Track record</th><th>Quality filter</th>
+        <th>Conviction</th><th>Fired at</th>
+      </tr></thead>
+      <tbody><tr class="empty-row"><td colspan="6">Loading...</td></tr></tbody>
+    </table>
+  </div>
+
+  <div class="row between" style="margin-top: 1.5rem;">
+    <h2>Current gate status <span class="hint">every tracked symbol, refreshed each cycle -- what AlphaEngine sees right now</span></h2>
     <label class="field">Filter by signal
       <select id="gates-signal-filter" onchange="renderGates()">
         <option value="">All symbols</option>
@@ -552,6 +563,22 @@ function renderGates() {
   `).join("") || `<tr class="empty-row"><td colspan="9">No gate data yet -- refreshes once the live pipeline has run a cycle.</td></tr>`;
 }
 
+async function loadGateEvents() {
+  const events = await api("/api/gate-status/events");
+  const pass = (ok) => `<span class="pill ${ok ? "green" : "red"}">${ok ? "PASS" : "fail"}</span>`;
+  const signalCls = (s) => s === "BUY" ? "green" : "red";
+  document.querySelector("#gate-events-table tbody").innerHTML = events.map(g => `
+    <tr>
+      <td><strong>${g.symbol}</strong></td>
+      <td><span class="pill ${signalCls(g.signal)}">${g.signal}</span></td>
+      <td>${pass(g.track_record_passed)}</td>
+      <td>${pass(g.quality_passed)}</td>
+      <td>${pass(g.conviction_passed)}</td>
+      <td>${fmtTime(g.evaluated_at)}</td>
+    </tr>
+  `).join("") || `<tr class="empty-row"><td colspan="6">No signal has fired yet today.</td></tr>`;
+}
+
 async function loadConfig() {
   const c = await api("/api/config");
   document.getElementById("cfg-capital").value = c.capital;
@@ -669,7 +696,7 @@ async function applyRole() {
 async function refreshAll() {
   if (myRole === null) await applyRole();
   if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadGates(), loadLogs(), loadPipelineHealth()];
+  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadGates(), loadGateEvents(), loadLogs(), loadPipelineHealth()];
   if (myRole === "admin") {
     loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
   }
