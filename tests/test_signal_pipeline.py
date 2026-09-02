@@ -25,6 +25,7 @@ from trading_scanner.application.signal_pipeline import (
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import (
     Candle,
+    EntryDecisionRecord,
     FuturesPaperPosition,
     LiveOrderLeg,
     PaperPosition,
@@ -1471,13 +1472,17 @@ def _cash_config(*, max_positions: int = 8, symbols: frozenset[str] = frozenset(
 
 
 def _cash_state(
-    *, max_positions: int = 8, symbols: frozenset[str] = frozenset()
+    *,
+    max_positions: int = 8,
+    symbols: frozenset[str] = frozenset(),
+    delayed_retry_enabled: bool = False,
 ) -> LiveCashToggleState:
     """Mirrors ``_cash_config``'s kwargs -- the functions below take this
     explicitly instead of reading enabled/symbols/notional/max_positions
     off ``AppConfig`` (see live_cash_execution.py's module docstring)."""
     return LiveCashToggleState(
-        enabled=True, symbols=symbols, notional=Decimal("5000"), max_positions=max_positions
+        enabled=True, symbols=symbols, notional=Decimal("5000"), max_positions=max_positions,
+        delayed_retry_enabled=delayed_retry_enabled,
     )
 
 
@@ -1605,14 +1610,21 @@ async def test_collect_and_open_ranked_positions_opens_cash_on_strong_conviction
 
 
 class _FakeEntryDecisionRepository:
-    """In-memory stand-in for TursoEntryDecisionRepository -- records
-    every EntryDecisionRecord passed to it, nothing else."""
+    """In-memory stand-in for TursoEntryDecisionRepository -- records every
+    EntryDecisionRecord passed to it, and serves whatever ``pending`` list
+    it was given for the delayed-retry read path (empty by default, so
+    every pre-existing test here -- none of which enable
+    delayed_retry_enabled -- never even calls this)."""
 
-    def __init__(self) -> None:
+    def __init__(self, pending: list[EntryDecisionRecord] | None = None) -> None:
         self.recorded: list = []
+        self._pending = pending or []
 
     async def record(self, decision) -> None:
         self.recorded.append(decision)
+
+    async def get_pending_cash_retries(self, since) -> list[EntryDecisionRecord]:
+        return self._pending
 
 
 @pytest.mark.asyncio
@@ -1677,6 +1689,94 @@ async def test_collect_and_open_ranked_positions_persists_an_opened_decision_wit
     assert decision.blocked_reason is None
     assert decision.ranking_passed is True
     assert decision.ranking_score is not None
+
+
+@pytest.mark.asyncio
+async def test_a_delayed_retry_candidate_flows_end_to_end_into_a_real_cash_entry():
+    # 2026-09-02 (delayed re-entry window, docs/decisions/
+    # 011-delayed-reentry-window.md): a pending skip from an earlier cycle
+    # -- no fresh BUY this cycle (NEUTRAL), price back in range, strategy
+    # not exited -- must flow all the way through
+    # _collect_and_open_ranked_positions into a real (fake-executor) fill,
+    # exactly like an ordinary fresh signal does.
+    trade_repository = _eligible_trade_repo()  # RELIANCE.NS
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    pending = EntryDecisionRecord(
+        symbol="RELIANCE.NS", strategy="alpha_engine",
+        signal_timestamp=datetime(2026, 9, 1, 8, 45, tzinfo=UTC),
+        signal_side=SignalSide.BUY, signal_price=Decimal("992.5"),  # matches the candle below
+        track_record_passed=True, quality_passed=True, conviction_passed=True,
+        ranking_score=Decimal("70"), ranking_passed=True,
+        capital_passed=None, position_limit_passed=None, cutoff_passed=None,
+        final_decision="skipped",
+        blocked_reason="cash: SKIPPED (no free slot, past cutoff, or execution failed -- "
+        "see logs)",
+        created_at=datetime(2026, 9, 1, 8, 46, tzinfo=UTC),
+    )
+    entry_decision_repository = _FakeEntryDecisionRepository(pending=[pending])
+    evaluated_by_symbol = {
+        "RELIANCE.NS": [(
+            _fast_predict_result("NEUTRAL", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _strong_conviction_candle("RELIANCE.NS"),  # market_price = 992.5, 0% drift
+        )],
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(
+        max_positions=8, symbols=frozenset({"RELIANCE.NS"}), delayed_retry_enabled=True
+    )
+    notifier = FakeNotifier()
+
+    _, _, cash_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        notifier, _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
+        entry_decision_repository,
+    )
+
+    assert "opened" in cash_notes["RELIANCE.NS"]
+    assert live_order_repository.recorded[0].symbol == "RELIANCE.NS"
+    assert any("DELAYED ENTRY FILLED" in text for text in notifier.texts)
+
+
+@pytest.mark.asyncio
+async def test_delayed_retry_produces_nothing_when_the_toggle_is_off():
+    # Same setup as above, but delayed_retry_enabled defaults False --
+    # merging the feature must not change any live behavior on its own.
+    trade_repository = _eligible_trade_repo()
+    paper_account_repository = FakePaperAccountRepository()
+    futures_account_repository = _FakeFuturesPaperAccountRepository()
+    live_order_repository = _StatefulFakeLiveOrderRepository()
+    pending = EntryDecisionRecord(
+        symbol="RELIANCE.NS", strategy="alpha_engine",
+        signal_timestamp=datetime(2026, 9, 1, 8, 45, tzinfo=UTC),
+        signal_side=SignalSide.BUY, signal_price=Decimal("992.5"),
+        track_record_passed=True, quality_passed=True, conviction_passed=True,
+        ranking_score=Decimal("70"), ranking_passed=True,
+        capital_passed=None, position_limit_passed=None, cutoff_passed=None,
+        final_decision="skipped", blocked_reason="cash: SKIPPED (...)",
+        created_at=datetime(2026, 9, 1, 8, 46, tzinfo=UTC),
+    )
+    entry_decision_repository = _FakeEntryDecisionRepository(pending=[pending])
+    evaluated_by_symbol = {
+        "RELIANCE.NS": [(
+            _fast_predict_result("NEUTRAL", 5, volatility_margin=10.0, regime_normalized=2.0),
+            _strong_conviction_candle("RELIANCE.NS"),
+        )],
+    }
+    config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
+    cash_state = _cash_state(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))  # off by default
+
+    _, _, cash_notes = await _collect_and_open_ranked_positions(
+        evaluated_by_symbol, config, trade_repository, paper_account_repository,
+        asyncio.Lock(), _FakeFuturesDerivativesChain(), futures_account_repository, frozenset(),
+        FakeNotifier(), _FakeCashOrderExecutor(), live_order_repository, None, None, cash_state,
+        entry_decision_repository,
+    )
+
+    assert live_order_repository.recorded == []
+    assert cash_notes == {}  # no fresh BUY, and the retry candidate never entered the pool
 
 
 class _FakeLiveOrderRepositoryForMissedNotify:

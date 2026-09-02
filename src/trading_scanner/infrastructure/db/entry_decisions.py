@@ -116,6 +116,42 @@ class TursoEntryDecisionRepository:
         )
         return [_row_to_decision(row) for row in result.rows]
 
+    async def get_pending_cash_retries(self, since: datetime) -> list[EntryDecisionRecord]:
+        """Real BUY candidates that cleared every gate (track record,
+        quality, conviction, ranking -- the only combination
+        ``final_decision='skipped'`` is ever written under, see
+        ``_rank_and_open_cash_positions``) but didn't get a real order,
+        from ``since`` onward -- the candidate set
+        ``capital_allocation._collect_delayed_retry_candidates`` retries.
+        2026-09-02, see docs/decisions/011-delayed-reentry-window.md.
+
+        One row per symbol (the most recent skip), newest first --
+        a symbol skipped more than once in the window is only worth
+        retrying against its freshest signal price/time."""
+        result = await self._client.execute(
+            """
+            SELECT symbol, strategy, signal_timestamp, signal_side, signal_price,
+                   track_record_passed, quality_passed, conviction_passed,
+                   ranking_score, ranking_passed, capital_passed,
+                   position_limit_passed, cutoff_passed, final_decision,
+                   blocked_reason, created_at, intent_id
+            FROM entry_decisions
+            WHERE signal_side = 'buy' AND final_decision = 'skipped' AND ranking_passed = 1
+                AND signal_timestamp >= ?
+            ORDER BY created_at DESC
+            """,
+            [since.isoformat()],
+        )
+        seen_symbols: set[str] = set()
+        pending: list[EntryDecisionRecord] = []
+        for row in result.rows:
+            decision = _row_to_decision(row)
+            if decision.symbol in seen_symbols:
+                continue
+            seen_symbols.add(decision.symbol)
+            pending.append(decision)
+        return pending
+
 
 def _row_to_decision(row) -> EntryDecisionRecord:
     return EntryDecisionRecord(

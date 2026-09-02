@@ -155,6 +155,92 @@ async def test_an_unknown_final_decision_is_rejected(tmp_path: Path) -> None:
         await client.close()
 
 
+
+# --- 2026-09-02 (delayed re-entry window) -- get_pending_cash_retries -----
+# see docs/decisions/011-delayed-reentry-window.md
+
+
+async def test_get_pending_cash_retries_returns_a_gate_cleared_skip(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record(_decision(
+            final_decision="skipped", ranking_passed=True,
+            blocked_reason="cash: SKIPPED (no free slot, past cutoff, or execution failed -- "
+            "see logs)",
+        ))
+
+        pending = await repository.get_pending_cash_retries(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert len(pending) == 1
+        assert pending[0].symbol == "RELIANCE.NS"
+    finally:
+        await client.close()
+
+
+async def test_get_pending_cash_retries_excludes_rejected_rows(tmp_path: Path) -> None:
+    # A gate REJECTED the candidate outright -- nothing to retry, unlike a
+    # SKIPPED row (which cleared every gate and only missed on capacity/
+    # cutoff/execution).
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record(_decision(final_decision="rejected", ranking_passed=None))
+
+        pending = await repository.get_pending_cash_retries(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert pending == []
+    finally:
+        await client.close()
+
+
+async def test_get_pending_cash_retries_excludes_rows_before_the_window(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record(_decision(
+            final_decision="skipped", ranking_passed=True,
+            signal_timestamp=datetime(2026, 8, 28, 10, 15, tzinfo=UTC),
+        ))
+
+        pending = await repository.get_pending_cash_retries(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert pending == []
+    finally:
+        await client.close()
+
+
+async def test_get_pending_cash_retries_dedupes_to_the_most_recent_skip_per_symbol(
+    tmp_path: Path,
+) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoEntryDecisionRepository(client)
+        await repository.ensure_schema()
+
+        await repository.record(_decision(
+            final_decision="skipped", ranking_passed=True, signal_price=Decimal("100"),
+            created_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
+        ))
+        await repository.record(_decision(
+            final_decision="skipped", ranking_passed=True, signal_price=Decimal("105"),
+            created_at=datetime(2026, 9, 1, 14, 0, tzinfo=UTC),
+        ))
+
+        pending = await repository.get_pending_cash_retries(datetime(2026, 9, 1, tzinfo=UTC))
+
+        assert len(pending) == 1
+        assert pending[0].signal_price == Decimal("105")  # the later skip, not the earlier one
+    finally:
+        await client.close()
+
+
 async def test_an_unknown_signal_side_string_is_rejected(tmp_path: Path) -> None:
     # record() always writes a real SignalSide's .value ("buy"/"sell") --
     # this proves the constraint is real by writing raw SQL directly,

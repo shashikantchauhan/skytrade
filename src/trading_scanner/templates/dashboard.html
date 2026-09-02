@@ -321,12 +321,18 @@
       <button onclick="useFullUniverse()">Use full symbol universe</button>
       <span class="msg" id="live-cash-universe-count"></span>
     </div>
+    <div class="row" style="margin-top: 0.6rem;">
+      <label class="field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
+        <input type="checkbox" id="live-cash-delayed-retry" style="width: auto;" />
+        Retry a missed signal for 2 trading days
+      </label>
+    </div>
     <div class="row" style="margin-top: 0.85rem;">
       <button class="primary" onclick="setLiveCashTrading(true)">Go Live</button>
       <button class="danger" onclick="setLiveCashTrading(false)">Stop -- go flat gate</button>
       <span class="msg" id="live-cash-msg"></span>
     </div>
-    <div class="note">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded.</div>
+    <div class="note">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded. "Retry a missed signal" applies only to a candidate that already cleared every real gate and still didn't get a real order (capacity/cutoff/execution, not a rejected signal) -- retried if price comes back within ~0.5% within 2 trading days and the strategy's own exit hasn't fired since, re-checking quality/conviction against the day it actually retries.</div>
   </div>
 
   <h2 style="margin-top: 1.5rem;">Recent logs</h2>
@@ -613,9 +619,11 @@ async function loadLiveCashTrading() {
   const symbolsEl = document.getElementById("live-cash-symbols");
   const notionalEl = document.getElementById("live-cash-notional");
   const maxPosEl = document.getElementById("live-cash-max-positions");
+  const delayedRetryEl = document.getElementById("live-cash-delayed-retry");
   if (document.activeElement !== symbolsEl) symbolsEl.value = s.symbols.join(",");
   if (document.activeElement !== notionalEl) notionalEl.value = s.notional;
   if (document.activeElement !== maxPosEl) maxPosEl.value = s.max_positions;
+  if (document.activeElement !== delayedRetryEl) delayedRetryEl.checked = !!s.delayed_retry_enabled;
   const errCls = s.todays_error_count > 0 ? "red" : "muted";
   document.getElementById("live-cash-error-count").innerHTML =
     `<span class="${errCls}">Today's errors: ${s.todays_error_count}</span>`;
@@ -632,6 +640,7 @@ async function setLiveCashTrading(enable) {
     .split(",").map(s => s.trim()).filter(Boolean);
   const notional = document.getElementById("live-cash-notional").value;
   const maxPositions = parseInt(document.getElementById("live-cash-max-positions").value, 10) || 8;
+  const delayedRetryEnabled = document.getElementById("live-cash-delayed-retry").checked;
   if (enable) {
     const ok = window.confirm(
       `This places REAL Kite orders with real money. Eligible symbols: ${symbols.length}, ` +
@@ -645,7 +654,10 @@ async function setLiveCashTrading(enable) {
     await api("/api/live-cash-trading", {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({enabled: enable, symbols, notional, max_positions: maxPositions}),
+      body: JSON.stringify({
+        enabled: enable, symbols, notional, max_positions: maxPositions,
+        delayed_retry_enabled: delayedRetryEnabled,
+      }),
     });
     document.getElementById("live-cash-msg").textContent =
       "Saved -- takes effect next scan cycle.";

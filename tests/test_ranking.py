@@ -71,6 +71,22 @@ def _closed_trade(side: SignalSide, pnl_percent: str) -> Trade:
     )
 
 
+def test_retry_of_signal_timestamp_defaults_none_and_does_not_affect_scoring():
+    # 2026-09-02 (delayed re-entry window, docs/decisions/
+    # 011-delayed-reentry-window.md) -- purely a traceability field, must
+    # not change score_candidate's output.
+    fresh = _candidate("FRESH", prediction=4, adx=0.3, vol_margin=1.0)
+    retry = RankedCandidate(
+        symbol="RETRY", entry_timestamp=fresh.entry_timestamp, entry_price=fresh.entry_price,
+        prediction_at_entry=4, adx=0.3, regime_normalized=0.0, volatility_margin=1.0,
+        retry_of_signal_timestamp=datetime(2026, 8, 31, 10, 15, tzinfo=UTC),
+    )
+
+    assert fresh.retry_of_signal_timestamp is None
+    assert retry.retry_of_signal_timestamp == datetime(2026, 8, 31, 10, 15, tzinfo=UTC)
+    assert score_candidate(fresh) == score_candidate(retry)
+
+
 def test_rank_candidates_sorts_strongest_prediction_first():
     weak = _candidate("WEAK", prediction=1)
     strong = _candidate("STRONG", prediction=6)

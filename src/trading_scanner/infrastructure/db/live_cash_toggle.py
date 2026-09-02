@@ -37,6 +37,15 @@ class LiveCashToggleState:
     # capital at risk to max_positions * notional. Enforced in
     # application/live_cash_execution.py's execute_cash_entry.
     max_positions: int = 8
+    # 2026-09-02: a gate-cleared-but-skipped BUY candidate (cleared track
+    # record + quality + conviction, just didn't get a real order --
+    # capacity/cutoff/execution) can be retried for up to 2 trading days if
+    # price comes back within ~0.5% and the strategy's own exit hasn't
+    # fired since -- see application/pipeline/capital_allocation.py's
+    # _collect_delayed_retry_candidates. False by default: shipping the
+    # code is not the same event as it ever placing a real order: flip
+    # this on from the dashboard only when ready.
+    delayed_retry_enabled: bool = False
     updated_at: datetime | None = None
 
 
@@ -53,21 +62,30 @@ class TursoLiveCashToggleRepository:
         await add_column_if_missing(
             self._client, "live_cash_toggle", "max_positions", "INTEGER NOT NULL DEFAULT 8"
         )
+        await add_column_if_missing(
+            self._client,
+            "live_cash_toggle",
+            "delayed_retry_enabled",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
 
     async def get_state(self, defaults: LiveCashToggleState) -> LiveCashToggleState:
         result = await self._client.execute(
-            "SELECT enabled, symbols, notional, max_positions, updated_at "
+            "SELECT enabled, symbols, notional, max_positions, delayed_retry_enabled, updated_at "
             "FROM live_cash_toggle WHERE id = 1"
         )
         if not result.rows:
             await self.set_state(defaults)
             return defaults
-        enabled, symbols_csv, notional, max_positions, updated_at = result.rows[0]
+        enabled, symbols_csv, notional, max_positions, delayed_retry_enabled, updated_at = (
+            result.rows[0]
+        )
         return LiveCashToggleState(
             enabled=bool(enabled),
             symbols=frozenset(s for s in symbols_csv.split(",") if s),
             notional=Decimal(str(notional)),
             max_positions=int(max_positions),
+            delayed_retry_enabled=bool(delayed_retry_enabled),
             updated_at=datetime.fromisoformat(updated_at) if updated_at else None,
         )
 
@@ -75,13 +93,15 @@ class TursoLiveCashToggleRepository:
         now = datetime.now().isoformat()
         await self._client.execute(
             """
-            INSERT INTO live_cash_toggle (id, enabled, symbols, notional, max_positions, updated_at)
-            VALUES (1, ?, ?, ?, ?, ?)
+            INSERT INTO live_cash_toggle
+                (id, enabled, symbols, notional, max_positions, delayed_retry_enabled, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 enabled = excluded.enabled,
                 symbols = excluded.symbols,
                 notional = excluded.notional,
                 max_positions = excluded.max_positions,
+                delayed_retry_enabled = excluded.delayed_retry_enabled,
                 updated_at = excluded.updated_at
             """,
             [
@@ -89,6 +109,7 @@ class TursoLiveCashToggleRepository:
                 ",".join(sorted(state.symbols)),
                 float(state.notional),
                 state.max_positions,
+                int(state.delayed_retry_enabled),
                 now,
             ],
         )

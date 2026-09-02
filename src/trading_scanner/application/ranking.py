@@ -89,6 +89,15 @@ class RankedCandidate:
     # from the current bar), this is a property of the (symbol, side) pair
     # itself, fetched once per candidate at ranking time.
     expectancy: float | None = None
+    # 2026-09-02: set only for a delayed-retry candidate (see
+    # application/pipeline/capital_allocation.py's
+    # _collect_delayed_retry_candidates) -- the ORIGINAL signal_timestamp
+    # from the entry_decisions row this candidate is retrying, so a filled
+    # retry is traceable back to the signal it was a second chance for.
+    # None for every ordinary fresh candidate. Purely for traceability --
+    # deliberately not read by score_candidate, so a retry ranks on today's
+    # own feature values exactly like a fresh signal would.
+    retry_of_signal_timestamp: datetime | None = None
 
 
 # 2026-08-14: which features actually deserve weight, decided by checking

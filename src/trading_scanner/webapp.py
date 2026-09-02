@@ -1354,6 +1354,7 @@ class LiveCashTradingUpdate(BaseModel):
     symbols: list[str]
     notional: str
     max_positions: int = 8
+    delayed_retry_enabled: bool = False
 
 
 @app.get("/api/live-cash-trading")
@@ -1394,6 +1395,7 @@ async def get_live_cash_trading(_: None = Depends(_require_admin)) -> JSONRespon
                 "symbols": sorted(state.symbols),
                 "notional": str(state.notional),
                 "max_positions": state.max_positions,
+                "delayed_retry_enabled": state.delayed_retry_enabled,
                 "updated_at": state.updated_at.isoformat() if state.updated_at else None,
                 "todays_error_count": _todays_error_count(),
                 "universe_symbols": universe_symbols,
@@ -1434,6 +1436,7 @@ async def update_live_cash_trading(
             symbols=symbols,
             notional=notional,
             max_positions=update.max_positions,
+            delayed_retry_enabled=update.delayed_retry_enabled,
         )
         await repository.set_state(new_state)
         return JSONResponse(
@@ -1442,6 +1445,7 @@ async def update_live_cash_trading(
                 "symbols": sorted(new_state.symbols),
                 "notional": str(new_state.notional),
                 "max_positions": new_state.max_positions,
+                "delayed_retry_enabled": new_state.delayed_retry_enabled,
                 "note": "Takes effect on the next scan cycle -- no restart needed.",
             }
         )

@@ -6,6 +6,7 @@ function's body moved as-is.
 
 import asyncio
 import logging
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from trading_scanner.application import (
@@ -232,6 +233,156 @@ async def _rank_and_open_cash_positions(
     return notes
 
 
+_RETRY_WINDOW_TRADING_DAYS = 2
+_RETRY_PRICE_TOLERANCE = Decimal("0.005")
+
+
+def _trading_days_ago(now: datetime, days: int) -> datetime:
+    """``now`` minus ``days`` real trading days (Mon-Fri only). No
+    exchange-holiday calendar exists anywhere in this codebase today (see
+    ``infrastructure/kite_ticker.py``'s ``is_market_hours``, explicitly
+    Mon-Fri-only) and building one is out of scope here -- a holiday
+    inside the window makes this slightly more permissive than exactly
+    ``days`` real sessions, at most a couple of times a year, not worth a
+    new calendar dependency for this feature."""
+    cursor = now
+    remaining = days
+    while remaining > 0:
+        cursor -= timedelta(days=1)
+        if cursor.weekday() < 5:  # Monday=0 ... Friday=4
+            remaining -= 1
+    return cursor
+
+
+async def _collect_delayed_retry_candidates(
+    evaluated_by_symbol: dict[str, list[tuple[FastPredictResult, Candle]]],
+    config: AppConfig,
+    cash_state: LiveCashToggleState | None,
+    trade_repository: TradeRepository,
+    live_order_repository: TursoLiveOrderRepository | None,
+    entry_decision_repository: TursoEntryDecisionRepository | None,
+) -> list[tuple[str, RankedCandidate]]:
+    """Real BUY candidates that cleared every gate on an earlier cycle (up
+    to ``_RETRY_WINDOW_TRADING_DAYS`` ago) but didn't get a real order --
+    retried now if price has come back within ``_RETRY_PRICE_TOLERANCE`` of
+    the original signal price and the strategy's own exit hasn't fired for
+    that symbol since. 2026-09-02, see
+    docs/decisions/011-delayed-reentry-window.md.
+
+    Returned candidates are meant to be appended into the same
+    ``cash_candidates`` list ordinary fresh signals build (by the caller,
+    ``_collect_and_open_ranked_positions``) -- they compete for the same 8
+    slots via the exact same ranking + sequential-execution path, no new
+    concurrency/locking needed (see ``_rank_and_open_cash_positions``'s own
+    docstring for why that path is already safe with no lock).
+
+    Off unless ``cash_state.delayed_retry_enabled`` -- real capital risk,
+    so shipping this code is not the same event as it ever placing a real
+    order; the user turns it on from the dashboard when ready.
+    """
+    if (
+        cash_state is None
+        or not cash_state.delayed_retry_enabled
+        or live_order_repository is None
+        or entry_decision_repository is None
+    ):
+        return []
+
+    since = _trading_days_ago(datetime.now(UTC), _RETRY_WINDOW_TRADING_DAYS)
+    pending = await entry_decision_repository.get_pending_cash_retries(since)
+
+    candidates: list[tuple[str, RankedCandidate]] = []
+    for decision in pending:
+        symbol = decision.symbol
+        evaluations = evaluated_by_symbol.get(symbol)
+        if not evaluations:
+            continue  # no fresh candle for this symbol this cycle
+        result, newest_candle = evaluations[-1]
+
+        if result.signal == "BUY":
+            continue  # a fresh signal already covers this symbol this cycle
+
+        # Invalidation: the strategy's own exit fired since the original
+        # signal -- NOT just "signal is no longer BUY" (transition-only,
+        # reads NEUTRAL on every later bar even while the thesis is still
+        # live -- see docs/decisions/008-gate-status-snapshot.md's
+        # addendum for the exact bug this would otherwise repeat).
+        if result.end_long or result.signal == "SELL":
+            continue
+
+        if await live_order_repository.get_unclosed_cash_legs(symbol):
+            continue  # already has a real position -- nothing to retry
+
+        current_price = _market_price(newest_candle)
+        price_diff = abs(current_price - decision.signal_price) / decision.signal_price
+        if price_diff > _RETRY_PRICE_TOLERANCE:
+            continue
+
+        # Re-check quality/conviction against TODAY's candle -- an
+        # approval from up to 2 trading days ago may no longer reflect
+        # current volatility/regime (explicit user decision, 2026-09-02).
+        track_record_gate = await entry_gates.evaluate_track_record_gate(
+            symbol, config.candle_interval, trade_repository
+        )
+        if not track_record_gate.passed:
+            continue
+        quality_decision = entry_gates.evaluate_cash_quality_gates(
+            result.volatility_margin, result.regime_normalized,
+            newest_candle.high, newest_candle.low, newest_candle.close,
+        )
+        if not quality_decision.allowed:
+            continue
+
+        expectancy = await symbol_expectancy(
+            symbol, SignalSide.BUY, config.candle_interval, trade_repository
+        )
+        candidates.append((
+            symbol,
+            RankedCandidate(
+                symbol=symbol,
+                entry_timestamp=newest_candle.timestamp,
+                entry_price=current_price,
+                prediction_at_entry=result.prediction,
+                adx=result.adx,
+                regime_normalized=result.regime_normalized,
+                volatility_margin=result.volatility_margin,
+                expectancy=expectancy,
+                retry_of_signal_timestamp=decision.signal_timestamp,
+            ),
+        ))
+    return candidates
+
+
+async def _notify_filled_delayed_retries(
+    retry_candidates: list[tuple[str, RankedCandidate]],
+    cash_notes: dict[str, str],
+    notifier: Notifier,
+) -> None:
+    """One extra Telegram message per delayed-retry candidate that actually
+    filled this cycle -- original missed price/time plus today's fill --
+    so a retry succeeding is visible distinctly from an ordinary fresh
+    entry. Best-effort, same pattern as every other notification in this
+    module: a failure here must never affect the entry that already
+    happened."""
+    for symbol, candidate in retry_candidates:
+        note = cash_notes.get(symbol, "")
+        if not note.startswith("cash: opened") or candidate.retry_of_signal_timestamp is None:
+            continue
+        try:
+            await notifier.send_text(
+                f"⏰ <b>DELAYED ENTRY FILLED</b>\n{symbol}: {note}\n"
+                f"Originally cleared every gate but missed on "
+                f"{candidate.retry_of_signal_timestamp.isoformat()} -- price came back in "
+                f"range, retried and filled at ₹{candidate.entry_price} "
+                f"({candidate.entry_timestamp.isoformat()})."
+            )
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "Failed to notify delayed-retry fill for %s -- the entry itself still stands.",
+                symbol,
+            )
+
+
 async def _rank_and_open_futures_positions(
     candidates: list[tuple[str, RankedCandidate]],
     interval: str,
@@ -450,10 +601,16 @@ async def _collect_and_open_ranked_positions(
             )
         )
     if cash_enabled:
+        retry_candidates = await _collect_delayed_retry_candidates(
+            evaluated_by_symbol, config, cash_state, trade_repository,
+            live_order_repository, entry_decision_repository,
+        )
+        cash_candidates.extend(retry_candidates)
         cash_notes.update(
             await _rank_and_open_cash_positions(
                 cash_candidates, config, cash_state, order_executor, live_order_repository,
                 notifier, gtt_repository, paper_benchmark_repository, entry_decision_repository,
             )
         )
+        await _notify_filled_delayed_retries(retry_candidates, cash_notes, notifier)
     return paper_notes, futures_notes, cash_notes

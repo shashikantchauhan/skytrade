@@ -112,6 +112,30 @@ async def test_max_positions_round_trips(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_delayed_retry_enabled_defaults_false_and_round_trips(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()
+
+        defaults = LiveCashToggleState(enabled=False, symbols=frozenset(), notional=Decimal("0"))
+        seeded = await repository.get_state(defaults)
+        assert seeded.delayed_retry_enabled is False  # off by default -- real capital risk
+
+        await repository.set_state(
+            LiveCashToggleState(
+                enabled=True, symbols=frozenset({"A.NS"}), notional=Decimal("5000"),
+                delayed_retry_enabled=True,
+            )
+        )
+        stored = await repository.get_state(defaults)
+
+        assert stored.delayed_retry_enabled is True
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
 async def test_ensure_schema_migrates_a_table_created_before_max_positions_existed(
     tmp_path: Path,
 ) -> None:
@@ -143,5 +167,42 @@ async def test_ensure_schema_migrates_a_table_created_before_max_positions_exist
         stored = await repository.get_state(defaults)
         assert stored.symbols == frozenset({"RELIANCE.NS"})
         assert stored.max_positions == 8  # column default for pre-existing rows
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_ensure_schema_migrates_a_table_created_before_delayed_retry_existed(
+    tmp_path: Path,
+) -> None:
+    """Same migration guarantee as max_positions above, for the newer
+    delayed_retry_enabled column -- a production row from before this
+    existed must read back as False (off), not break."""
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        await client.execute(
+            """
+            CREATE TABLE live_cash_toggle (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                enabled INTEGER NOT NULL,
+                symbols TEXT NOT NULL,
+                notional REAL NOT NULL,
+                max_positions INTEGER NOT NULL DEFAULT 8,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        await client.execute(
+            "INSERT INTO live_cash_toggle (id, enabled, symbols, notional, max_positions, "
+            "updated_at) VALUES (1, 1, 'RELIANCE.NS', 5000, 8, '2026-08-21T00:00:00')"
+        )
+
+        repository = TursoLiveCashToggleRepository(client)
+        await repository.ensure_schema()  # must not raise
+
+        defaults = LiveCashToggleState(enabled=False, symbols=frozenset(), notional=Decimal("0"))
+        stored = await repository.get_state(defaults)
+        assert stored.symbols == frozenset({"RELIANCE.NS"})
+        assert stored.delayed_retry_enabled is False  # column default for pre-existing rows
     finally:
         await client.close()
