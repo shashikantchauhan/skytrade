@@ -425,17 +425,18 @@ async def execute_cash_entry(
     if already_open:
         logger.info("Live cash entry skipped for %s -- a real position is already open.", symbol)
         return None
-    # broker_reconciliation.get_all_unclosed_positions, not get_all_open_
-    # cash_legs directly -- an UNKNOWN-status position is real capital at
-    # risk too and must count toward the cap (see that module's own
-    # docstring); the old COMPLETE-only count could under-report how many
-    # real positions were actually open.
-    all_open = await broker_reconciliation.get_all_unclosed_positions(live_order_repository)
+    # Check broker exits before allocation: strategy-exit reconciliation
+    # runs later in the cycle. Keep pending/uncertain entries reserved and
+    # count each instrument once, including holdings missing from our ledger.
+    all_open = await broker_reconciliation.occupied_cash_symbols(
+        live_order_repository, order_executor
+    )
     if len(all_open) >= cash_state.max_positions:
         logger.info(
-            "Live cash entry skipped for %s -- max_positions (%d) already open.",
+            "Live cash entry skipped for %s -- max_positions (%d) already open: %s.",
             symbol,
             cash_state.max_positions,
+            ", ".join(sorted(all_open)),
         )
         return None
 

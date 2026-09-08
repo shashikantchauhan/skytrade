@@ -588,6 +588,10 @@ class KiteOrderExecutor:
             tag=tag,
         )
 
+    def cash_orders(self) -> list[dict]:
+        """Today's CNC order states, including pending and externally placed exits."""
+        return [order for order in self._kite.orders() if order.get("product") == "CNC"]
+
     def find_todays_order_by_tag(self, tag: str) -> dict | None:
         """The most recent entry in *today's* order book (``kite.orders()``)
         carrying ``tag``, or None if nothing does -- broker ground truth for

@@ -877,3 +877,65 @@ async def test_entry_cutoff_disabled_when_none():
 
     assert result is not None
     assert executor.calls == [("RELIANCE", "BUY", 5)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    'stale_status,broker_quantity,sell_quantity,pending_buy,broker_failure,allowed',
+    [
+        ('COMPLETE', 0, 24, False, False, True),
+        ('COMPLETE', 1, 24, False, False, False),
+        ('COMPLETE', 0, 12, False, False, False),
+        ('UNKNOWN', 0, 24, False, False, False),
+        ('OPEN', 0, 24, False, False, False),
+        ('COMPLETE', 0, 24, True, False, False),
+        ('COMPLETE', 0, 24, False, True, False),
+    ],
+)
+async def test_hul_capacity_checks_broker_exit_before_allocating(
+    stale_status, broker_quantity, sell_quantity, pending_buy, broker_failure, allowed,
+):
+    """APLAPOLLO sold at 10:02 IST; its stale ledger slot blocked HUL at 11:20."""
+    symbols = frozenset({'HINDUNILVR.NS'})
+    config = _config(enabled=True, symbols=symbols)
+    state = _cash_state(enabled=True, symbols=symbols)
+    legs = [
+        LiveOrderLeg(
+            basket_id=f'held-{i}', symbol=f'HELD{i}.NS', purpose='cash',
+            tradingsymbol=f'HELD{i}', transaction_type='BUY', quantity=1,
+            order_id=f'buy-{i}', status='COMPLETE',
+            placed_at=datetime(2026, 9, 4, tzinfo=UTC),
+        ) for i in range(7)
+    ]
+    legs.append(LiveOrderLeg(
+        basket_id='apollo', symbol='APLAPOLLO.NS', purpose='cash',
+        tradingsymbol='APLAPOLLO', transaction_type='BUY', quantity=24,
+        order_id='apollo-buy', status=stale_status,
+        placed_at=datetime(2026, 9, 4, 8, 50, tzinfo=UTC),
+    ))
+
+    class SnapshotExecutor(FakeOrderExecutor):
+        def cash_orders(self):
+            if broker_failure:
+                raise RuntimeError('Broker unavailable')
+            orders = [{
+                'tradingsymbol': 'APLAPOLLO', 'transaction_type': 'SELL',
+                'status': 'COMPLETE', 'filled_quantity': sell_quantity,
+                'exchange_timestamp': datetime(2026, 9, 8, 10, 2, 8),
+            }]
+            if pending_buy:
+                orders.append({
+                    'tradingsymbol': 'APLAPOLLO', 'transaction_type': 'BUY', 'status': 'OPEN',
+                })
+            return orders
+
+        def holding_quantities(self):
+            return {**{f'HELD{i}': 1 for i in range(7)}, 'APLAPOLLO': broker_quantity}
+
+    executor = SnapshotExecutor({('HINDUNILVR', 'BUY'): ['COMPLETE']}, holding_quantity=0)
+    repo = FakeLiveOrderRepository(all_open_cash=legs)
+    result = await live_cash_execution.execute_cash_entry(
+        'HINDUNILVR.NS', _PRICE, config, state, executor, repo, FakeNotifier(),
+    )
+    assert (result is not None) is allowed
+    assert executor.calls == ([('HINDUNILVR', 'BUY', 5)] if allowed else [])

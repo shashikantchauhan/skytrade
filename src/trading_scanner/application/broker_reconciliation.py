@@ -29,6 +29,8 @@ directly.
 import asyncio
 import logging
 from collections.abc import Sequence
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from trading_scanner.domain.models import LiveOrderLeg
 from trading_scanner.domain.order_lifecycle import PositionLifecycle, derive_position_lifecycle
@@ -66,6 +68,66 @@ async def get_all_unclosed_positions(
     (allowing more real positions than ``max_positions`` was ever meant to
     permit)."""
     return await live_order_repository.get_all_unclosed_cash_legs()
+
+
+async def occupied_cash_symbols(
+    live_order_repository: TursoLiveOrderRepository,
+    order_executor: KiteOrderExecutor,
+) -> set[str]:
+    """Count instruments, releasing stale slots only on confirmed broker exits.
+
+    Entry allocation runs before strategy-exit processing. A completed external
+    SELL must therefore free capacity here, without waiting for that later pass
+    to update the ledger. Keep unresolved entries and recent fills reserved;
+    an empty holdings response alone is not proof that an order cannot fill.
+    This check does not write synthetic trades or change historical fill prices.
+    """
+    legs = await get_all_unclosed_positions(live_order_repository)
+    occupied = {leg.tradingsymbol for leg in legs}
+    try:
+        orders = await asyncio.to_thread(order_executor.cash_orders)
+        quantities = await asyncio.to_thread(order_executor.holding_quantities)
+        pending = {
+            order["tradingsymbol"] for order in orders
+            if order.get("transaction_type") == "BUY"
+            and order.get("status") not in {"COMPLETE", "REJECTED", "CANCELLED"}
+        }
+        released: set[str] = set()
+        for symbol in occupied:
+            symbol_legs = [leg for leg in legs if leg.tradingsymbol == symbol]
+            if quantities.get(symbol, 0) > 0 or symbol in pending:
+                continue
+            if any(leg.status != "COMPLETE" for leg in symbol_legs):
+                continue
+            latest_entry = max(leg.placed_at for leg in symbol_legs)
+            sold = 0
+            for order in orders:
+                if (
+                    order.get("tradingsymbol") != symbol
+                    or order.get("transaction_type") != "SELL"
+                    or order.get("status") != "COMPLETE"
+                ):
+                    continue
+                timestamp = order.get("exchange_timestamp")
+                if timestamp is None:
+                    continue
+                if isinstance(timestamp, str):
+                    timestamp = datetime.fromisoformat(timestamp)
+                if timestamp.tzinfo is None:
+                    timestamp = timestamp.replace(tzinfo=ZoneInfo("Asia/Kolkata"))
+                if timestamp > latest_entry:
+                    sold += int(order.get("filled_quantity", 0))
+            if sold >= sum(leg.quantity for leg in symbol_legs):
+                released.add(symbol)
+        if released:
+            logger.info("Cash capacity excludes broker-confirmed closed positions: %s",
+                        ", ".join(sorted(released)))
+        return (occupied - released) | pending | {
+            symbol for symbol, quantity in quantities.items() if quantity > 0
+        }
+    except Exception:
+        logger.warning("Cash capacity broker check failed; retaining ledger slots.", exc_info=True)
+        return occupied
 
 
 async def position_lifecycle(

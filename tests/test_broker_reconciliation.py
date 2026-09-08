@@ -257,3 +257,40 @@ async def test_find_hidden_positions_is_empty_when_no_real_shares_are_held(
         assert hidden == []
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_capacity_counts_unique_instruments_and_untracked_broker_exposure():
+    class Repository:
+        async def get_all_unclosed_cash_legs(self):
+            return [_leg(), _leg(order_id='second-buy')]
+
+    class Executor:
+        def cash_orders(self):
+            return [{'tradingsymbol': 'TCS', 'transaction_type': 'BUY', 'status': 'OPEN'}]
+
+        def holding_quantities(self):
+            return {'RELIANCE': 10, 'INFY': 4}
+
+    occupied = await broker_reconciliation.occupied_cash_symbols(Repository(), Executor())
+    assert occupied == {'RELIANCE', 'TCS', 'INFY'}
+
+
+@pytest.mark.asyncio
+async def test_capacity_old_sell_cannot_release_a_later_buy():
+    class Repository:
+        async def get_all_unclosed_cash_legs(self):
+            return [_leg(status='COMPLETE', placed_at=datetime(2026, 9, 8, 6, tzinfo=UTC))]
+
+    class Executor:
+        def cash_orders(self):
+            return [{
+                'tradingsymbol': 'RELIANCE', 'transaction_type': 'SELL', 'status': 'COMPLETE',
+                'filled_quantity': 5, 'exchange_timestamp': '2026-09-08 10:02:08',
+            }]
+
+        def holding_quantities(self):
+            return {}
+
+    occupied = await broker_reconciliation.occupied_cash_symbols(Repository(), Executor())
+    assert occupied == {'RELIANCE'}
