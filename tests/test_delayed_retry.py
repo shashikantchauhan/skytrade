@@ -47,7 +47,7 @@ def _decision(**overrides) -> EntryDecisionRecord:
     defaults = dict(
         symbol="UPL.NS", strategy="alpha_engine",
         signal_timestamp=datetime(2026, 9, 1, 8, 45, tzinfo=UTC),
-        signal_side=SignalSide.BUY, signal_price=Decimal("100"),
+        signal_side=SignalSide.BUY, signal_price=Decimal("100.8"),
         track_record_passed=True, quality_passed=True, conviction_passed=True,
         ranking_score=Decimal("72.5"), ranking_passed=True,
         capital_passed=None, position_limit_passed=None, cutoff_passed=None,
@@ -74,9 +74,8 @@ def _result(**overrides) -> FastPredictResult:
 
 
 def _candle(**overrides) -> Candle:
-    # market_price = (H+L+O+O)/4 = (101+99+100+100)/4 = 100 -- exactly the
-    # default _decision()'s signal_price, 0% drift. close=100.8 clears
-    # conviction's CLV>=0.7 floor: (100.8-99)/(101-99) = 0.9.
+    # The close exactly matches the default decision's signal price and
+    # clears conviction's CLV>=0.7 floor: (100.8-99)/(101-99) = 0.9.
     defaults = dict(
         symbol="UPL.NS", timestamp=datetime(2026, 9, 2, 10, 0, tzinfo=UTC),
         open=Decimal("100"), high=Decimal("101"), low=Decimal("99"), close=Decimal("100.8"),
@@ -211,7 +210,7 @@ async def test_a_qualifying_pending_skip_becomes_a_candidate():
     assert isinstance(candidate, RankedCandidate)
     assert candidate.retry_of_signal_timestamp == datetime(2026, 9, 1, 8, 45, tzinfo=UTC)
     # Priced off TODAY's candle, not the stale original signal_price.
-    assert candidate.entry_price == Decimal("100")
+    assert candidate.entry_price == Decimal("100.8")
     assert candidate.entry_timestamp == datetime(2026, 9, 2, 10, 0, tzinfo=UTC)
 
 
@@ -305,9 +304,11 @@ async def test_excludes_a_symbol_already_holding_an_open_position():
 
 @pytest.mark.asyncio
 async def test_excludes_a_symbol_whose_price_moved_outside_tolerance():
-    # market_price = (102+100+101+101)/4 = 101 -- 1% above the Rs100
-    # original signal price, well past the 0.5% floor.
-    far_candle = _candle(open=Decimal("101"), high=Decimal("102"), low=Decimal("100"))
+    # Close is 1% above the original signal price, past the 0.5% floor.
+    far_candle = _candle(
+        open=Decimal("100.8"), high=Decimal("102"), low=Decimal("100"),
+        close=Decimal("101.808"),
+    )
     candidates = await _collect_delayed_retry_candidates(
         {"UPL.NS": [(_result(), far_candle)]}, _config(), _cash_state(), _FakeTradeRepository(),
         _FakeLiveOrderRepository(), _FakeEntryDecisionRepository([_decision()]),
@@ -317,16 +318,15 @@ async def test_excludes_a_symbol_whose_price_moved_outside_tolerance():
 
 @pytest.mark.asyncio
 async def test_includes_a_symbol_exactly_at_the_tolerance_boundary():
-    # market_price = (101+100+100.5+100.5)/4 = 100.5 -- exactly 0.5% above
-    # Rs100, the inclusive edge (`> tolerance` excludes, `== tolerance`
-    # doesn't).
+    # Close is exactly 0.5% above the original Rs100.8 signal price, the
+    # inclusive edge (`> tolerance` excludes, `== tolerance` doesn't).
     boundary_candle = _candle(
-        open=Decimal("100.5"), high=Decimal("101"), low=Decimal("100"), close=Decimal("100.9")
+        open=Decimal("100.8"), high=Decimal("101.4"), low=Decimal("100.8"),
+        close=Decimal("101.304"),
     )
     assert abs(
-        (Decimal("101") + Decimal("100") + Decimal("100.5") + Decimal("100.5")) / 4
-        - Decimal("100")
-    ) / Decimal("100") == _RETRY_PRICE_TOLERANCE
+        boundary_candle.close - Decimal("100.8")
+    ) / Decimal("100.8") == _RETRY_PRICE_TOLERANCE
 
     candidates = await _collect_delayed_retry_candidates(
         {"UPL.NS": [(_result(), boundary_candle)]}, _config(), _cash_state(),

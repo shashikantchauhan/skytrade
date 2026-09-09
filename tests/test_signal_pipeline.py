@@ -460,7 +460,7 @@ async def test_buy_entry_opens_a_trade(monkeypatch) -> None:
     assert trade.side == SignalSide.BUY
     assert trade.prediction_at_entry == 6
     assert trade.is_early_signal_flip is True
-    assert trade.entry_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
+    assert trade.entry_price == Decimal("100.5")
     # 2026-08-21: entry-signal Telegram notifications are off entirely --
     # follow only real cash-market order events now.
     assert len(signal_repository.recorded) == 1  # still fingerprint-recorded
@@ -513,7 +513,7 @@ async def test_end_long_closes_the_open_buy_trade(monkeypatch) -> None:
     symbol, interval, side, exit_timestamp, exit_price = trade_repository.closed[0]
     assert symbol == "AARTIIND.NS"
     assert side == SignalSide.BUY
-    assert exit_price == Decimal("100")  # (high+low+2*open)/4 = (101+99+200)/4
+    assert exit_price == Decimal("100.5")
 
 
 @pytest.mark.asyncio
@@ -724,8 +724,8 @@ async def test_buy_entry_opens_a_paper_position_when_eligible(monkeypatch) -> No
     position = paper_account_repository.opened[0]
     assert position.symbol == "AARTIIND.NS"
     # total_equity(500000, no open positions)/TARGET_SLOTS(32) = 15625, floored
-    # to MIN_POSITION_SIZE(25000) -> quantity = 25000/entry_price(100) = 250.
-    assert position.quantity == 250
+    # to MIN_POSITION_SIZE(25000) -> quantity = 25000/entry_price(100.5) = 248.
+    assert position.quantity == 248
     # 2026-08-21: entry-signal Telegram notifications are off entirely --
     # follow only real cash-market order events now; the quantity/capital
     # assertions above already confirm the position opened correctly.
@@ -951,7 +951,7 @@ async def test_end_long_closes_the_paper_position_with_realized_pnl(monkeypatch)
 
     assert len(paper_account_repository.closed) == 1
     closed_position = paper_account_repository.closed[0]
-    assert closed_position.pnl_amount == Decimal("2000")  # (100-80)*100 qty
+    assert closed_position.pnl_amount == Decimal("2050")  # (100.5-80)*100 qty
 
 
 @pytest.mark.asyncio
@@ -1706,7 +1706,7 @@ async def test_a_delayed_retry_candidate_flows_end_to_end_into_a_real_cash_entry
     pending = EntryDecisionRecord(
         symbol="RELIANCE.NS", strategy="alpha_engine",
         signal_timestamp=datetime(2026, 9, 1, 8, 45, tzinfo=UTC),
-        signal_side=SignalSide.BUY, signal_price=Decimal("992.5"),  # matches the candle below
+        signal_side=SignalSide.BUY, signal_price=Decimal("1000"),  # matches the candle below
         track_record_passed=True, quality_passed=True, conviction_passed=True,
         ranking_score=Decimal("70"), ranking_passed=True,
         capital_passed=None, position_limit_passed=None, cutoff_passed=None,
@@ -1719,7 +1719,7 @@ async def test_a_delayed_retry_candidate_flows_end_to_end_into_a_real_cash_entry
     evaluated_by_symbol = {
         "RELIANCE.NS": [(
             _fast_predict_result("NEUTRAL", 5, volatility_margin=10.0, regime_normalized=2.0),
-            _strong_conviction_candle("RELIANCE.NS"),  # market_price = 992.5, 0% drift
+            _strong_conviction_candle("RELIANCE.NS"),  # close = 1000, 0% drift
         )],
     }
     config = _cash_config(max_positions=8, symbols=frozenset({"RELIANCE.NS"}))
@@ -1751,7 +1751,7 @@ async def test_delayed_retry_produces_nothing_when_the_toggle_is_off():
     pending = EntryDecisionRecord(
         symbol="RELIANCE.NS", strategy="alpha_engine",
         signal_timestamp=datetime(2026, 9, 1, 8, 45, tzinfo=UTC),
-        signal_side=SignalSide.BUY, signal_price=Decimal("992.5"),
+        signal_side=SignalSide.BUY, signal_price=Decimal("1000"),
         track_record_passed=True, quality_passed=True, conviction_passed=True,
         ranking_score=Decimal("70"), ranking_passed=True,
         capital_passed=None, position_limit_passed=None, cutoff_passed=None,
