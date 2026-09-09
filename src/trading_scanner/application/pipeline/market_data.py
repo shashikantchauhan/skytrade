@@ -151,14 +151,12 @@ async def _notify_kite_expired_periodically(
 
 
 def _market_price(candle: Candle) -> Decimal:
-    """Return the completed signal candle's closing price.
+    """Pine's ``ml.backtest`` scoring price: (high + low + open + open) / 4.
 
-    Candle timestamps identify the start of the interval: a 09:15 hourly
-    candle closes at 10:15. The signal is evaluated from that completed
-    candle, so its own close is the matching reference price; looking up
-    the 10:15 candle would move forward by another full interval.
+    Not the close -- matches ``application/backtest.py``'s historical
+    replay so live and backtested trades use the same price convention.
     """
-    return candle.close
+    return (candle.high + candle.low + candle.open + candle.open) / 4
 
 
 def _dataframe_to_candles(symbol: str, data: pd.DataFrame) -> list[Candle]:

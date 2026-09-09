@@ -12,18 +12,21 @@ private methods, plus the same ``_signal_state``/``_changed`` helpers
 ``validation/runner.py`` already uses to expose the raw signal-state array
 Pine hides (``events`` from ``_predict`` never returns it directly).
 
-Trade state transitions replicate Pine's own ``ml.backtest`` helper
-(``strategy/MLExtensions_v2.pine``), while prices use the completed signal
-candle's close so historical trade rows match the live pipeline. One detail
-of Pine's position bookkeeping still matters:
+Trade scoring faithfully replicates Pine's own ``ml.backtest`` helper
+(``strategy/MLExtensions_v2.pine``), which TradingView's on-chart Winrate/WL
+Ratio table is built from -- not an independent approximation. Two details
+matter for matching TradingView's numbers exactly:
 
-1. **Single active position per symbol**: Pine tracks entries with one
+1. **Price convention**: Pine scores using ``(high + low + open + open) / 4``
+   (its default, ``useWorstCase=false``), not the close.
+2. **Single active position per symbol**: Pine tracks entries with one
    overwritable variable per side, not independent open positions. If a new
    opposite-side entry fires before the current position's own exit
    condition triggers, that position is silently abandoned -- never scored
    as a win or a loss. Replicating this (rather than letting a position
    dangle open until its own exit eventually fires, possibly much later at a
-   worse price) preserves the engine's intended signal lifecycle.
+   worse price) is what actually explains a large win-rate mismatch, not the
+   price convention above.
 """
 
 from collections.abc import Sequence
@@ -113,9 +116,9 @@ def compute_historical_events(
     signal_state = _signal_state(events["prediction"], filter_all)
     changed = _changed(signal_state)
 
-    # The timestamp identifies this interval's start. Its close is the price
-    # observed when the completed candle fires the entry or exit signal.
-    market_price = close.copy()
+    # Pine's own `ml.backtest` scoring price -- (high + low + open + open) / 4,
+    # not the close (its default, useWorstCase=false).
+    market_price = (high + low + open_ + open_) / 4.0
 
     # Individual filter states and the continuous values behind two of them
     # -- `_calculate_filters` above already ANDs these into one bool per bar
