@@ -418,9 +418,10 @@ async def _process_symbol(
     scoring exactly (see ``application/backtest.py``'s module docstring): a
     new entry first abandons -- without scoring -- whatever opposite-side
     position was still open, then that side's own exit (if it fires the same
-    bar) is applied. Entry/exit price uses Pine's ``(high+low+open+open)/4``
-    scoring convention, not the close, so live trades stay consistent with
-    the historical backtest.
+    bar) is applied. Entry/exit price uses the completed signal candle's
+    close, so live trades stay consistent with the historical backtest. The
+    candle timestamp identifies the interval start (for example, a 09:15
+    hourly candle supplies its closing price at 10:15).
 
     BUY entries additionally attempt to open a real paper-trading position
     (see ``application/paper_trading.py``) -- gated on the symbol's own
