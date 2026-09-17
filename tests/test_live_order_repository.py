@@ -545,3 +545,36 @@ async def test_global_primary_slot_counts_long_and_short_until_closed(tmp_path: 
         assert await repository.get_all_unclosed_primary_legs() == []
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_symbol_primary_query_keeps_partially_closed_future_open(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(
+                purpose="primary",
+                tradingsymbol="RELIANCE26SEPFUT",
+                transaction_type="BUY",
+                quantity=500,
+            )
+        )
+        await repository.record_leg(
+            _leg(
+                basket_id="exit-1",
+                purpose="primary",
+                tradingsymbol="RELIANCE26SEPFUT",
+                transaction_type="SELL",
+                quantity=250,
+                order_id="o2",
+            )
+        )
+
+        remaining = await repository.get_open_primary_legs("RELIANCE.NS")
+
+        assert len(remaining) == 1
+        assert remaining[0].quantity == 250
+    finally:
+        await client.close()

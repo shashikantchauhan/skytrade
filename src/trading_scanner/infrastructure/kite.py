@@ -260,13 +260,11 @@ class KiteProvider:
 
 
 class KiteDerivativesChain:
-    """Looks up the nearest at-the-money option contract or nearest-expiry
-    futures contract for a symbol, and fetches live premiums/prices --
-    backs the derivatives shadow-tracking feature (``application/
-    options_shadow.py``, ``application/futures_shadow.py``), never the live
-    pipeline's actual equity signal generation. Yahoo has no Indian
-    derivatives data, so this is only ever available when Kite is the
-    active data source.
+    """Looks up option and futures contracts and fetches live prices.
+
+    Used by both derivatives research and the independent daily-swing live
+    runner. Yahoo has no Indian derivatives chain, so contract resolution is
+    available only through Kite.
     """
 
     def __init__(self, kite: KiteConnect) -> None:

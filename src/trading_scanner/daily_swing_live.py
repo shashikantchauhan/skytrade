@@ -61,6 +61,7 @@ _API_DELAY_SECONDS = 0.36
 # guard below remains the final protection.
 _MINIMUM_ENTRY_EXPIRY_SESSIONS = 17
 _EXPIRY_EXIT_DAYS = 10
+_EXIT_RETRY_SECONDS = 30
 
 
 def _notifier(config: AppConfig):
@@ -116,7 +117,8 @@ class DailySwingLive:
         self.session_open_date = None
         self.active: DailySwingPosition | None = None
         self.exit_lock = asyncio.Lock()
-        self.exit_failed = False
+        self.exit_retry_after: datetime | None = None
+        self.pending_exit_reason: str | None = None
         self.bucket_lock = asyncio.Lock()
         self.last_tick_at = datetime.now(UTC)
 
@@ -277,10 +279,13 @@ class DailySwingLive:
         position = self.active
         if position is None or position.status != "open" or position.symbol != symbol:
             return
-        if self.exit_failed:
+        now = datetime.now(UTC)
+        if self.exit_retry_after is not None and now < self.exit_retry_after:
             return
-        today = datetime.now(UTC).astimezone(IST).date()
-        if expiry_exit_required(position.contract_expiry, today):
+        today = now.astimezone(IST).date()
+        if self.pending_exit_reason is not None:
+            reason = self.pending_exit_reason
+        elif expiry_exit_required(position.contract_expiry, today):
             reason = "expiry_guard"
         elif position.side == 1:
             reason = (
@@ -306,6 +311,7 @@ class DailySwingLive:
             position = self.active
             if position is None or position.status != "open":
                 return
+            self.pending_exit_reason = reason
             basket = await execute_basket_exit(
                 position.symbol,
                 self.config,
@@ -316,13 +322,15 @@ class DailySwingLive:
             remaining = await self.orders.get_open_primary_legs(position.symbol)
             if basket is None or remaining:
                 logger.error("Exit incomplete for %s; position remains active.", position.symbol)
-                self.exit_failed = True
+                self.exit_retry_after = datetime.now(UTC) + timedelta(seconds=_EXIT_RETRY_SECONDS)
                 return
             await self.positions.close(position.symbol, datetime.now(UTC), price, reason)
             await self.notifier.send_text(
                 f"Daily swing {position.symbol} closed: {reason} at {price}"
             )
             self.active = None
+            self.exit_retry_after = None
+            self.pending_exit_reason = None
 
     async def boundary(self, kite: KiteConnect) -> None:
         while True:

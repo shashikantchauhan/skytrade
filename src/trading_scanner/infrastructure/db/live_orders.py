@@ -1,6 +1,7 @@
 """Ledger of every real order leg placed on Zerodha -- see application/live_execution.py."""
 
 from collections.abc import Sequence
+from dataclasses import replace
 from datetime import datetime
 from decimal import Decimal
 
@@ -242,35 +243,28 @@ class TursoLiveOrderRepository:
         return _net_unclosed_legs(legs, opener_statuses=_UNCLOSED_STATUSES)
 
     async def get_open_primary_legs(self, symbol: str) -> Sequence[LiveOrderLeg]:
-        """Every currently-open ``purpose='primary'`` leg for ``symbol`` --
-        the futures-basket analogue of ``get_open_cash_legs``, scoped to
-        the ``'primary'`` purpose instead of ``'cash'``; the two never see
-        each other's rows. Still uses the older any-closer-exists check
-        (not the quantity-netting fix from 2026-08-31) -- this path is the
-        shadow/paper futures simulation, not real capital, so the
-        partial-exit failure mode that hit PERSISTENT.NS's real cash
-        position doesn't carry the same stakes here. Revisit if this ever
-        starts placing real futures orders."""
+        """Every primary leg with quantity still open for ``symbol``.
+
+        These rows represent real daily-swing futures exposure, so partial
+        closing fills must be quantity-netted rather than treated as if any
+        opposite fill closed the entire original leg.
+        """
         result = await self._client.execute(
             """
             SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
                    quantity, order_id, status, placed_at, average_price, rejection_reason,
                    intent_id
             FROM live_order_legs
-            WHERE symbol = ? AND purpose = 'primary' AND status = 'COMPLETE'
-              AND tradingsymbol NOT IN (
-                  SELECT tradingsymbol FROM live_order_legs AS closer
-                  WHERE closer.symbol = live_order_legs.symbol
-                    AND closer.tradingsymbol = live_order_legs.tradingsymbol
-                    AND closer.purpose = 'primary'
-                    AND closer.transaction_type != live_order_legs.transaction_type
-                    AND closer.status = 'COMPLETE'
-              )
+            WHERE symbol = ? AND purpose = 'primary'
             ORDER BY placed_at ASC
             """,
             [symbol],
         )
-        return [_row_to_leg(row) for row in result.rows]
+        return _net_unclosed_legs(
+            [_row_to_leg(row) for row in result.rows],
+            opener_statuses=_UNCLOSED_STATUSES,
+            adjust_partial_quantity=True,
+        )
 
     async def get_all_unclosed_primary_legs(self) -> Sequence[LiveOrderLeg]:
         """Every futures primary leg that may still represent real exposure.
@@ -312,7 +306,10 @@ def _row_to_leg(row: Sequence) -> LiveOrderLeg:
 
 
 def _net_unclosed_legs(
-    legs: Sequence[LiveOrderLeg], opener_statuses: frozenset[str]
+    legs: Sequence[LiveOrderLeg],
+    opener_statuses: frozenset[str],
+    *,
+    adjust_partial_quantity: bool = False,
 ) -> list[LiveOrderLeg]:
     """Groups ``legs`` by ``tradingsymbol`` and returns whichever opening
     legs (status in ``opener_statuses``, earliest-first) haven't yet been
@@ -355,6 +352,9 @@ def _net_unclosed_legs(
             if remaining_to_close >= leg.quantity:
                 remaining_to_close -= leg.quantity
                 continue
-            unclosed.append(leg)
+            open_quantity = leg.quantity - remaining_to_close
+            unclosed.append(
+                replace(leg, quantity=open_quantity) if adjust_partial_quantity else leg
+            )
             remaining_to_close = 0
     return unclosed
