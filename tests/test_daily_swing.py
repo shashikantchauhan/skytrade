@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from trading_scanner.application.daily_swing import SwingSetup, confirm_entry, trailed_stop
-from trading_scanner.daily_swing_live import expiry_exit_required
+from trading_scanner.daily_swing_live import expiry_exit_required, minimum_contract_expiry
 
 
 def _setup(side: int = 1) -> SwingSetup:
@@ -92,3 +92,8 @@ def test_expiry_guard_exits_with_ten_calendar_days_remaining() -> None:
     assert expiry_exit_required("2026-09-24", date(2026, 9, 14))
     assert not expiry_exit_required("2026-09-24", date(2026, 9, 13))
     assert not expiry_exit_required(None, date(2026, 9, 20))
+
+
+def test_minimum_contract_expiry_covers_hold_and_expiry_runway() -> None:
+    assert minimum_contract_expiry(date(2026, 9, 1)) == date(2026, 9, 24)
+    assert minimum_contract_expiry(date(2026, 9, 18)) == date(2026, 10, 13)

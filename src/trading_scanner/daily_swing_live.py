@@ -55,7 +55,11 @@ _BUCKET_MINUTES = 30
 _HISTORY_DAYS = 120
 _BACKFILL_DAYS = 10
 _API_DELAY_SECONDS = 0.36
-_MINIMUM_ENTRY_EXPIRY_DAYS = 30
+# Ten possible holding sessions plus a conservative seven-session runway before
+# the physical-settlement window.  NSE holidays are not available through Kite,
+# so this deliberately counts weekdays and the independent calendar-day exit
+# guard below remains the final protection.
+_MINIMUM_ENTRY_EXPIRY_SESSIONS = 17
 _EXPIRY_EXIT_DAYS = 10
 
 
@@ -74,6 +78,17 @@ def expiry_exit_required(contract_expiry: str | None, trading_date: date) -> boo
     if not contract_expiry:
         return False
     return (date.fromisoformat(contract_expiry) - trading_date).days <= _EXPIRY_EXIT_DAYS
+
+
+def minimum_contract_expiry(trading_date: date) -> date:
+    """Earliest expiry that covers the strategy hold and expiry runway."""
+    cursor = trading_date
+    sessions = _MINIMUM_ENTRY_EXPIRY_SESSIONS
+    while sessions:
+        cursor += timedelta(days=1)
+        if cursor.weekday() < 5:
+            sessions -= 1
+    return cursor
 
 
 class DailySwingLive:
@@ -429,7 +444,7 @@ class DailySwingLive:
         chain = KiteDerivativesChain(kite)
         option_type = "PE" if setup.side == 1 else "CE"
         today = datetime.now(UTC).astimezone(IST).date()
-        minimum_expiry = today + timedelta(days=_MINIMUM_ENTRY_EXPIRY_DAYS)
+        minimum_expiry = minimum_contract_expiry(today)
         future = await asyncio.to_thread(chain.future_for_horizon, setup.symbol, minimum_expiry)
         option = (
             await asyncio.to_thread(
