@@ -206,7 +206,10 @@ class DailySwingLive:
     def on_connect(self, ws, response) -> None:  # noqa: ANN001
         tokens = list(self.token_to_symbol)
         ws.subscribe(tokens)
-        ws.set_mode(ws.MODE_FULL, tokens)
+        # Quote packets include LTP and cumulative volume, which are all the
+        # candle builder needs. Full mode also streams five-level market depth
+        # for every symbol and needlessly increases queue/memory pressure.
+        ws.set_mode(ws.MODE_QUOTE, tokens)
         self.last_tick_at = datetime.now(UTC)
         logger.info("Daily-swing ticker connected to %d instruments.", len(tokens))
 
