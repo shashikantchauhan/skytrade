@@ -1,7 +1,7 @@
-"""Position/derivatives-shadow close bookkeeping and exit notifications --
-split out of ``signal_pipeline.py`` (Phase 8, see
-``application/pipeline/__init__.py``). No behavior changed; every
-function's body moved as-is.
+"""Position and derivatives-shadow bookkeeping.
+
+The legacy AlphaEngine can still populate analysis-only shadow books, but its
+lifecycle is deliberately disconnected from real derivatives orders.
 """
 
 import asyncio
@@ -12,7 +12,6 @@ from decimal import Decimal
 from trading_scanner.application import (
     futures_shadow,
     futures_trading,
-    live_execution,
     options_shadow,
 )
 from trading_scanner.application.pipeline.market_data import _STRATEGY_NAME
@@ -31,7 +30,6 @@ from trading_scanner.infrastructure.db import (
     TursoOptionsTradeRepository,
 )
 from trading_scanner.infrastructure.kite import KiteDerivativesChain, KiteOrderExecutor
-from trading_scanner.infrastructure.telegram import LoggingNotifier
 
 # The hedge option leg (Structure B, see _open_derivatives_shadow) targets a
 # strike this far OTM instead of ATM -- confirmed against Kite's own
@@ -159,13 +157,10 @@ async def _open_derivatives_shadow(
     directional option bet tracked again, that's a separate decision, not
     implied by this one.
 
-    When ``config.live_trading_enabled`` is set (see ``config/
-    settings.py``'s kill switch) and ``symbol`` is on the allowlist, this
-    *additionally* places a real basket via ``live_execution.
-    execute_basket_entry`` -- see that module's docstring for the
-    option-first-then-futures sequencing and rollback behavior. The shadow
-    trade above always runs regardless, so the dashboard's analysis view
-    stays consistent whether or not real money followed it.
+    This AlphaEngine lifecycle is deprecated for real derivatives execution.
+    It records analysis-only shadow legs, but cannot place a broker order.
+    Real baskets must be opened by a strategy-specific live runner after its
+    own signal, position-state, and risk gates pass.
 
     Any failure here is a side observation, not a dependency of the main
     signal/paper-trading flow, so this never raises into the caller.
@@ -203,18 +198,6 @@ async def _open_derivatives_shadow(
             "Derivatives shadow open failed for %s (%s) -- continuing without it.",
             symbol, side, exc_info=True,
         )
-    if config is not None and order_executor is not None and live_order_repository is not None:
-        try:
-            await live_execution.execute_basket_entry(
-                symbol, side, hedge_option_type, hedge_strike_target,
-                config, derivatives_chain, order_executor, live_order_repository,
-                notifier if notifier is not None else LoggingNotifier(),
-            )
-        except Exception:
-            logging.getLogger(__name__).exception(
-                "Live order execution raised for %s (%s) -- shadow tracking above still stands.",
-                symbol, side,
-            )
     return "; ".join(notes) if notes else None
 
 
@@ -231,11 +214,11 @@ async def _close_derivatives_shadow(
     live_order_repository: TursoLiveOrderRepository | None = None,
     notifier: Notifier | None = None,
 ) -> None:
-    """Best-effort close of whatever ``_open_derivatives_shadow`` opened --
-    see that function's docstring, including the real-order gate. Shadow
-    close is logged, not notified via Telegram (analysis-only, see the
-    module docstring); a real close always notifies regardless, since it's
-    real money moving."""
+    """Best-effort close of whatever ``_open_derivatives_shadow`` opened.
+
+    The deprecated AlphaEngine path owns shadow state only. A new live
+    strategy must close its real basket through its own lifecycle runner.
+    """
     if derivatives_chain is None:
         return
     hedge_option_type = "PE" if side == SignalSide.BUY else "CE"
@@ -260,17 +243,6 @@ async def _close_derivatives_shadow(
             "Derivatives shadow close failed for %s (%s) -- continuing without it.",
             symbol, side, exc_info=True,
         )
-    if config is not None and order_executor is not None and live_order_repository is not None:
-        try:
-            await live_execution.execute_basket_exit(
-                symbol, config, order_executor, live_order_repository,
-                notifier if notifier is not None else LoggingNotifier(),
-            )
-        except Exception:
-            logger.exception(
-                "Live order exit execution raised for %s (%s) -- shadow close above still stands.",
-                symbol, side,
-            )
 
 
 async def _open_futures_paper(

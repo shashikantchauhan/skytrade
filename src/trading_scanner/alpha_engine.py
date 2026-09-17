@@ -1,4 +1,9 @@
-"""Faithful Python translation of ``strategy/lorentzian.pine``.
+"""Deprecated AlphaEngine retained for research compatibility.
+
+This is a faithful Python translation of ``strategy/lorentzian.pine``.
+The legacy signal and shadow-analysis pipeline may still use it, but that
+pipeline is disconnected from real derivatives execution. New live strategies
+must not import this module as their order-entry source.
 
 The implementation follows the Pine script's default input values and evaluates
 each bar in chronological order.  This is deliberate: the source uses Pine

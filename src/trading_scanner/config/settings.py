@@ -49,11 +49,11 @@ class AppConfig:
     index_symbol: str | None
     kite_api_key: str | None
     kite_api_secret: str | None
-    # The kill switch for real order execution -- see application/
-    # live_execution.py. Defaults fully OFF; every one of these must be
-    # explicitly set to place a single real order. live_trading_symbols
-    # empty means nothing is allowed regardless of live_trading_enabled --
-    # there is no "all symbols" wildcard, on purpose.
+    # Legacy derivatives-order settings. The AlphaEngine pipeline no longer
+    # consumes these: it is deprecated for real execution and remains active
+    # only for historical/shadow comparison. A strategy-specific live runner
+    # may reuse live_execution.py, but must supply its own signal and risk
+    # gates. Empty live_trading_symbols always means nothing is allowed.
     live_trading_enabled: bool
     live_trading_symbols: frozenset[str]
     live_trading_max_lots: int

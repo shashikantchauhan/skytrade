@@ -12,6 +12,7 @@ from decimal import Decimal
 import pytest
 
 from trading_scanner.application import live_execution
+from trading_scanner.application.pipeline.lifecycle import _open_derivatives_shadow
 from trading_scanner.config.settings import AppConfig
 from trading_scanner.domain.models import LiveOrderLeg, SignalSide
 
@@ -103,6 +104,30 @@ class FakeNotifier:
 
 _OPTION_CONTRACT = {"tradingsymbol": "RELIANCE25AUG1400PE", "strike": 1400, "lot_size": 250}
 _FUTURE_CONTRACT = {"tradingsymbol": "RELIANCE25AUGFUT", "lot_size": 250}
+
+
+@pytest.mark.asyncio
+async def test_deprecated_alpha_shadow_cannot_place_real_basket():
+    """The legacy pipeline may keep shadow analysis but must never reach Kite orders."""
+    config = _config(enabled=True)
+    executor = FakeOrderExecutor({})
+
+    result = await _open_derivatives_shadow(
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        datetime.now(UTC),
+        Decimal("1400"),
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        options_trade_repository=None,
+        futures_trade_repository=None,
+        config=config,
+        order_executor=executor,
+        live_order_repository=FakeLiveOrderRepository(),
+        notifier=FakeNotifier(),
+    )
+
+    assert result is None
+    assert executor.calls == []
 
 
 @pytest.mark.asyncio
