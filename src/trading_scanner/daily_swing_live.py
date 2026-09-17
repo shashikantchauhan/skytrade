@@ -16,7 +16,7 @@ from kiteconnect.exceptions import TokenException as KiteTokenException
 from trading_scanner.application.daily_swing import (
     EntryCandidate,
     SwingSetup,
-    build_live_context,
+    build_live_context_from_aggregates,
     confirm_entry,
     trailed_stop,
 )
@@ -144,16 +144,20 @@ class DailySwingLive:
     async def rebuild_context(self, now: datetime) -> None:
         today_ist = now.astimezone(IST).date()
         since = now - timedelta(days=_HISTORY_DAYS)
-        rows = await self.candles.get_interval_rows_since(_INTERVAL, since)
-        frame = pd.DataFrame(
-            rows, columns=["symbol", "timestamp", "open", "high", "low", "close", "volume"]
+        before = datetime.combine(today_ist, datetime.min.time(), tzinfo=IST).astimezone(UTC)
+        daily_rows = await self.candles.get_daily_aggregates(_INTERVAL, since, before)
+        volume_rows = await self.candles.get_volume_rows_since(
+            _INTERVAL, now - timedelta(days=45), before
         )
-        if frame.empty:
+        daily = pd.DataFrame(
+            daily_rows,
+            columns=["symbol", "date", "open", "high", "low", "close", "volume", "bars"],
+        )
+        volume = pd.DataFrame(volume_rows, columns=["symbol", "timestamp", "volume"])
+        if daily.empty or volume.empty:
             raise RuntimeError("No 30-minute history available for daily-swing context.")
-        timestamps = pd.to_datetime(frame.timestamp, utc=True)
-        frame = frame[timestamps.dt.tz_convert(IST).dt.date < today_ist].copy()
         self.setups, self.slot_volume, self.context_session = await asyncio.to_thread(
-            build_live_context, frame, self.signal_symbols
+            build_live_context_from_aggregates, daily, volume, self.signal_symbols
         )
         self.context_for_date = today_ist
         logger.info(

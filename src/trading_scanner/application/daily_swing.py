@@ -70,13 +70,6 @@ def build_live_context(
     if frame.empty:
         raise ValueError("No valid completed 30-minute candles.")
 
-    frame["slot"] = frame.groupby(["symbol", "date"]).cumcount()
-    slot_base = (
-        frame.groupby(["symbol", "slot"], sort=False)
-        .volume.apply(lambda values: values.tail(20).median() if len(values) >= 12 else np.nan)
-        .to_dict()
-    )
-
     daily = (
         frame.groupby(["symbol", "date"], sort=True)
         .agg(
@@ -90,6 +83,29 @@ def build_live_context(
         .reset_index()
     )
     daily = daily[daily.bars >= 10].copy()
+    return build_live_context_from_aggregates(daily, frame, signal_symbols)
+
+
+def build_live_context_from_aggregates(
+    daily: pd.DataFrame,
+    volume_bars: pd.DataFrame,
+    signal_symbols: frozenset[str],
+) -> tuple[dict[str, SwingSetup], dict[tuple[str, int], float], date]:
+    """Build context from SQLite-preaggregated daily rows and recent volumes."""
+    daily = daily.copy().sort_values(["symbol", "date"]).reset_index(drop=True)
+    daily["date"] = pd.to_datetime(daily.date).dt.date
+    recent = volume_bars.copy()
+    recent["timestamp"] = pd.to_datetime(recent.timestamp, utc=True)
+    ist = recent.timestamp.dt.tz_convert("Asia/Kolkata")
+    recent["date"] = ist.dt.date
+    recent["slot"] = ((ist.dt.hour * 60 + ist.dt.minute - (9 * 60 + 15)) // 30).astype(int)
+    recent = recent[recent.slot.between(0, 12)].sort_values(["symbol", "timestamp"])
+    slot_base = (
+        recent.groupby(["symbol", "slot"], sort=False)
+        .volume.apply(lambda values: values.tail(20).median() if len(values) >= 12 else np.nan)
+        .to_dict()
+    )
+
     last_session = daily.date.max()
     group = daily.groupby("symbol", group_keys=False)
     daily["prev"] = group.close.shift()

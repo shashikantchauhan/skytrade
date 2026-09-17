@@ -110,6 +110,60 @@ class TursoCandleRepository:
         )
         return list(result.rows)
 
+    async def get_daily_aggregates(
+        self, interval: str, since: datetime, before: datetime
+    ) -> list[tuple]:
+        """Aggregate intraday history inside SQLite to keep live-runner RAM bounded."""
+        result = await self._client.execute(
+            """
+            WITH base AS (
+                SELECT symbol, substr(timestamp, 1, 10) AS session_date,
+                       timestamp, open, high, low, close, volume
+                FROM candles
+                WHERE interval = ? AND timestamp >= ? AND timestamp < ?
+            ), ranked AS (
+                SELECT *,
+                       row_number() OVER (
+                           PARTITION BY symbol, session_date ORDER BY timestamp
+                       ) AS first_row,
+                       row_number() OVER (
+                           PARTITION BY symbol, session_date ORDER BY timestamp DESC
+                       ) AS last_row
+                FROM base
+            )
+            SELECT symbol, session_date,
+                   max(CASE WHEN first_row = 1 THEN open END) AS open,
+                   max(high), min(low),
+                   max(CASE WHEN last_row = 1 THEN close END) AS close,
+                   sum(volume), count(*)
+            FROM ranked
+            GROUP BY symbol, session_date
+            HAVING count(*) >= 10
+            ORDER BY symbol, session_date
+            """,
+            [
+                interval,
+                since.astimezone(UTC).isoformat(),
+                before.astimezone(UTC).isoformat(),
+            ],
+        )
+        return list(result.rows)
+
+    async def get_volume_rows_since(
+        self, interval: str, since: datetime, before: datetime
+    ) -> list[tuple]:
+        result = await self._client.execute(
+            """SELECT symbol, timestamp, volume FROM candles
+               WHERE interval = ? AND timestamp >= ? AND timestamp < ?
+               ORDER BY symbol, timestamp""",
+            [
+                interval,
+                since.astimezone(UTC).isoformat(),
+                before.astimezone(UTC).isoformat(),
+            ],
+        )
+        return list(result.rows)
+
     async def count_sessions(
         self, symbol: str, interval: str, start: datetime, end: datetime
     ) -> int:
