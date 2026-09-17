@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 import pytest
 
 from trading_scanner.application.daily_swing import SwingSetup, confirm_entry, trailed_stop
+from trading_scanner.daily_swing_live import expiry_exit_required
 
 
 def _setup(side: int = 1) -> SwingSetup:
@@ -85,3 +86,9 @@ def test_long_trailing_stop_matches_frozen_rules(best: float, expected: float) -
 
 def test_short_trailing_stop_moves_in_mirrored_direction() -> None:
     assert trailed_stop(-1, 95, 104, 9, 4, 75) == 80
+
+
+def test_expiry_guard_exits_with_ten_calendar_days_remaining() -> None:
+    assert expiry_exit_required("2026-09-24", date(2026, 9, 14))
+    assert not expiry_exit_required("2026-09-24", date(2026, 9, 13))
+    assert not expiry_exit_required(None, date(2026, 9, 20))

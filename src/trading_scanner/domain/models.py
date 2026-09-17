@@ -275,6 +275,7 @@ class DailySwingPosition:
     risk: Decimal
     best_close: Decimal
     basket_id: str | None
+    contract_expiry: str | None = None
     status: str = "entering"  # entering | open | closed | rejected
     exit_timestamp: datetime | None = None
     exit_price: Decimal | None = None

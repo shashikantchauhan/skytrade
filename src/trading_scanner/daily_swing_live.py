@@ -55,6 +55,8 @@ _BUCKET_MINUTES = 30
 _HISTORY_DAYS = 120
 _BACKFILL_DAYS = 10
 _API_DELAY_SECONDS = 0.36
+_MINIMUM_ENTRY_EXPIRY_DAYS = 30
+_EXPIRY_EXIT_DAYS = 10
 
 
 def _notifier(config: AppConfig):
@@ -65,6 +67,13 @@ def _notifier(config: AppConfig):
 
 def _side(value: int) -> SignalSide:
     return SignalSide.BUY if value == 1 else SignalSide.SELL
+
+
+def expiry_exit_required(contract_expiry: str | None, trading_date: date) -> bool:
+    """Keep stock derivatives clear of the physical-settlement margin window."""
+    if not contract_expiry:
+        return False
+    return (date.fromisoformat(contract_expiry) - trading_date).days <= _EXPIRY_EXIT_DAYS
 
 
 class DailySwingLive:
@@ -255,7 +264,10 @@ class DailySwingLive:
             return
         if self.exit_failed:
             return
-        if position.side == 1:
+        today = datetime.now(UTC).astimezone(IST).date()
+        if expiry_exit_required(position.contract_expiry, today):
+            reason = "expiry_guard"
+        elif position.side == 1:
             reason = (
                 "stop"
                 if price <= position.active_stop
@@ -416,7 +428,8 @@ class DailySwingLive:
             return
         chain = KiteDerivativesChain(kite)
         option_type = "PE" if setup.side == 1 else "CE"
-        minimum_expiry = date.today() + timedelta(days=16)
+        today = datetime.now(UTC).astimezone(IST).date()
+        minimum_expiry = today + timedelta(days=_MINIMUM_ENTRY_EXPIRY_DAYS)
         future = await asyncio.to_thread(chain.future_for_horizon, setup.symbol, minimum_expiry)
         option = (
             await asyncio.to_thread(
@@ -464,6 +477,7 @@ class DailySwingLive:
             risk=Decimal(str(candidate.risk)),
             best_close=Decimal(str(candidate.entry)),
             basket_id=None,
+            contract_expiry=future["expiry"].isoformat(),
         )
         await self.positions.create_entering(position)
         basket = await execute_basket_entry(

@@ -26,6 +26,7 @@ async def test_position_state_survives_entry_trail_and_exit(tmp_path: Path) -> N
         risk=Decimal("10"),
         best_close=Decimal("270"),
         basket_id=None,
+        contract_expiry="2026-10-29",
     )
     try:
         await repository.create_entering(position)
@@ -36,6 +37,7 @@ async def test_position_state_survives_entry_trail_and_exit(tmp_path: Path) -> N
         assert len(active) == 1
         assert active[0].basket_id == "basket-1"
         assert active[0].active_stop == Decimal("270.0")
+        assert active[0].contract_expiry == "2026-10-29"
 
         await repository.close(
             position.symbol,

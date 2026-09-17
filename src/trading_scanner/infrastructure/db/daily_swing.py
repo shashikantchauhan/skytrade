@@ -5,7 +5,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from trading_scanner.domain.models import DailySwingPosition
-from trading_scanner.infrastructure.db._shared import DbClient
+from trading_scanner.infrastructure.db._shared import DbClient, add_column_if_missing
 
 _CREATE_POSITIONS = """
 CREATE TABLE IF NOT EXISTS daily_swing_positions (
@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS daily_swing_positions (
     risk REAL NOT NULL,
     best_close REAL NOT NULL,
     basket_id TEXT,
+    contract_expiry TEXT,
     status TEXT NOT NULL CHECK (status IN ('entering', 'open', 'closed', 'rejected')),
     exit_timestamp TEXT,
     exit_price REAL,
@@ -48,6 +49,9 @@ class DailySwingRepository:
 
     async def ensure_schema(self) -> None:
         await self._client.execute(_CREATE_POSITIONS)
+        await add_column_if_missing(
+            self._client, "daily_swing_positions", "contract_expiry", "TEXT"
+        )
         await self._client.execute(_CREATE_ATTEMPTS)
         await self._client.execute(
             "CREATE INDEX IF NOT EXISTS idx_daily_swing_status ON daily_swing_positions(status)"
@@ -79,8 +83,8 @@ class DailySwingRepository:
             INSERT INTO daily_swing_positions
                 (symbol, side, setup_date, entry_timestamp, entry_price,
                  initial_stop, active_stop, target, atr, risk, best_close,
-                 basket_id, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'entering')
+                 basket_id, contract_expiry, status)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'entering')
             """,
             [
                 position.symbol,
@@ -95,6 +99,7 @@ class DailySwingRepository:
                 float(position.risk),
                 float(position.best_close),
                 position.basket_id,
+                position.contract_expiry,
             ],
         )
 
@@ -136,7 +141,7 @@ class DailySwingRepository:
 
 _SELECT = """
 SELECT symbol, side, setup_date, entry_timestamp, entry_price, initial_stop,
-       active_stop, target, atr, risk, best_close, basket_id, status,
+       active_stop, target, atr, risk, best_close, basket_id, contract_expiry, status,
        exit_timestamp, exit_price, exit_reason
 FROM daily_swing_positions
 """
@@ -156,8 +161,9 @@ def _row(row: Sequence) -> DailySwingPosition:
         risk=Decimal(str(row[9])),
         best_close=Decimal(str(row[10])),
         basket_id=row[11],
-        status=row[12],
-        exit_timestamp=datetime.fromisoformat(row[13]) if row[13] else None,
-        exit_price=Decimal(str(row[14])) if row[14] is not None else None,
-        exit_reason=row[15],
+        contract_expiry=row[12],
+        status=row[13],
+        exit_timestamp=datetime.fromisoformat(row[14]) if row[14] else None,
+        exit_price=Decimal(str(row[15])) if row[15] is not None else None,
+        exit_reason=row[16],
     )
