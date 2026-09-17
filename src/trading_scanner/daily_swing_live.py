@@ -52,7 +52,7 @@ from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNot
 logger = logging.getLogger(__name__)
 _INTERVAL = "30m"
 _BUCKET_MINUTES = 30
-_HISTORY_DAYS = 180
+_HISTORY_DAYS = 120
 _BACKFILL_DAYS = 10
 _API_DELAY_SECONDS = 0.36
 
@@ -111,7 +111,18 @@ class DailySwingLive:
     async def backfill(self, kite: KiteConnect) -> None:
         latest = await self.candles.get_latest_interval_timestamp(_INTERVAL)
         today = datetime.now(UTC).astimezone(IST).date()
-        if latest is not None and latest.astimezone(IST).date() >= today - timedelta(days=3):
+        latest_date = latest.astimezone(IST).date() if latest is not None else None
+        complete_symbols = (
+            await self.candles.get_complete_symbol_count(_INTERVAL, latest_date.isoformat())
+            if latest_date is not None
+            else 0
+        )
+        current_enough = latest_date == today or (
+            latest_date is not None
+            and latest_date >= today - timedelta(days=3)
+            and complete_symbols >= 450
+        )
+        if latest is not None and current_enough:
             logger.info("30m history is current through %s; full backfill skipped.", latest)
             return
         provider = KiteProvider(kite, KiteInstrumentMap(kite))
@@ -152,7 +163,7 @@ class DailySwingLive:
         before = datetime.combine(today_ist, datetime.min.time(), tzinfo=IST).astimezone(UTC)
         daily_rows = await self.candles.get_daily_aggregates(_INTERVAL, since, before)
         volume_rows = await self.candles.get_volume_rows_since(
-            _INTERVAL, now - timedelta(days=45), before
+            _INTERVAL, now - timedelta(days=35), before
         )
         daily = pd.DataFrame(
             daily_rows,

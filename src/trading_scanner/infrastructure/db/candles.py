@@ -171,6 +171,17 @@ class TursoCandleRepository:
         value = result.rows[0][0] if result.rows else None
         return datetime.fromisoformat(value) if value else None
 
+    async def get_complete_symbol_count(self, interval: str, session_date: str) -> int:
+        result = await self._client.execute(
+            """SELECT count(*) FROM (
+                   SELECT symbol FROM candles
+                   WHERE interval = ? AND substr(timestamp, 1, 10) = ?
+                   GROUP BY symbol HAVING count(*) >= 10
+               )""",
+            [interval, session_date],
+        )
+        return int(result.rows[0][0]) if result.rows else 0
+
     async def count_sessions(
         self, symbol: str, interval: str, start: datetime, end: datetime
     ) -> int:
