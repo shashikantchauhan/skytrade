@@ -164,6 +164,13 @@ class TursoCandleRepository:
         )
         return list(result.rows)
 
+    async def get_latest_interval_timestamp(self, interval: str) -> datetime | None:
+        result = await self._client.execute(
+            "SELECT max(timestamp) FROM candles WHERE interval = ?", [interval]
+        )
+        value = result.rows[0][0] if result.rows else None
+        return datetime.fromisoformat(value) if value else None
+
     async def count_sessions(
         self, symbol: str, interval: str, start: datetime, end: datetime
     ) -> int:

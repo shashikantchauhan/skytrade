@@ -109,6 +109,11 @@ class DailySwingLive:
         return row[0] if row else None
 
     async def backfill(self, kite: KiteConnect) -> None:
+        latest = await self.candles.get_latest_interval_timestamp(_INTERVAL)
+        today = datetime.now(UTC).astimezone(IST).date()
+        if latest is not None and latest.astimezone(IST).date() >= today - timedelta(days=3):
+            logger.info("30m history is current through %s; full backfill skipped.", latest)
+            return
         provider = KiteProvider(kite, KiteInstrumentMap(kite))
         logger.info("Backfilling %d symbols (%d days).", len(self.universe), _BACKFILL_DAYS)
         completed_before = bucket_start(datetime.now(UTC), _BUCKET_MINUTES)
