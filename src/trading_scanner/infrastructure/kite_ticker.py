@@ -40,15 +40,19 @@ def is_market_hours(when: datetime) -> bool:
     return MARKET_OPEN <= when_ist.time() < MARKET_CLOSE
 
 
-def bucket_start(when: datetime) -> datetime:
-    """The start (IST, tz-aware) of the hourly bucket ``when`` falls into,
-    aligned to market open rather than the clock hour -- e.g. 10:47 IST
-    falls in the 10:15-11:15 bucket, whose start is 10:15."""
+def bucket_start(when: datetime, minutes: int = _BUCKET_MINUTES) -> datetime:
+    """Start of an NSE-aligned candle bucket containing ``when``.
+
+    ``minutes`` defaults to the legacy hourly pipeline's 60, while the daily
+    swing service passes 30. Both align from the 09:15 market open.
+    """
+    if minutes <= 0:
+        raise ValueError("minutes must be positive")
     when_ist = when.astimezone(IST)
     open_dt = datetime.combine(when_ist.date(), MARKET_OPEN, tzinfo=IST)
     elapsed_minutes = (when_ist - open_dt).total_seconds() / 60
-    bucket_index = int(elapsed_minutes // _BUCKET_MINUTES)
-    return open_dt + timedelta(minutes=bucket_index * _BUCKET_MINUTES)
+    bucket_index = int(elapsed_minutes // minutes)
+    return open_dt + timedelta(minutes=bucket_index * minutes)
 
 
 class CandleAggregator:
@@ -62,8 +66,13 @@ class CandleAggregator:
     """
 
     __slots__ = (
-        "current_bucket", "open", "high", "low", "close",
-        "_volume_at_bucket_start", "_last_volume",
+        "current_bucket",
+        "open",
+        "high",
+        "low",
+        "close",
+        "_volume_at_bucket_start",
+        "_last_volume",
     )
 
     def __init__(self) -> None:

@@ -108,6 +108,13 @@ class AppConfig:
     # off an already-open real position must always be allowed regardless
     # of time. None disables the cutoff entirely.
     live_cash_entry_cutoff_ist: time | None = time(15, 15)
+    # Independent daily liquidity-sweep runner. ``daily_swing_enabled``
+    # starts its market-data and shadow decision path; real NFO orders still
+    # require the separate live_trading_enabled + per-symbol allowlist above.
+    daily_swing_enabled: bool = False
+    daily_swing_universe_file: Path = Path("config/nifty500_symbols.txt")
+    daily_swing_signal_symbols_file: Path = Path("config/symbols.txt")
+    daily_swing_max_defined_risk: Decimal = Decimal("20000")
 
 
 def load_config() -> AppConfig:
@@ -155,10 +162,18 @@ def load_config() -> AppConfig:
         live_cash_entry_cutoff_ist=_time_hhmm(
             "TRADING_SCANNER_LIVE_CASH_ENTRY_CUTOFF_IST", time(15, 15)
         ),
+        daily_swing_enabled=_bool_flag("TRADING_SCANNER_DAILY_SWING_ENABLED", default=False),
+        daily_swing_universe_file=Path(
+            os.getenv("TRADING_SCANNER_DAILY_SWING_UNIVERSE_FILE", "config/nifty500_symbols.txt")
+        ),
+        daily_swing_signal_symbols_file=Path(
+            os.getenv("TRADING_SCANNER_DAILY_SWING_SIGNAL_SYMBOLS_FILE", "config/symbols.txt")
+        ),
+        daily_swing_max_defined_risk=Decimal(
+            os.getenv("TRADING_SCANNER_DAILY_SWING_MAX_DEFINED_RISK", "20000")
+        ),
         futures_paper_symbols_file=Path(
-            os.getenv(
-                "TRADING_SCANNER_FUTURES_PAPER_SYMBOLS_FILE", "config/nifty50_symbols.txt"
-            )
+            os.getenv("TRADING_SCANNER_FUTURES_PAPER_SYMBOLS_FILE", "config/nifty50_symbols.txt")
         ),
     )
 

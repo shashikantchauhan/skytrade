@@ -49,9 +49,7 @@ class TursoCandleRepository:
         """Create the candles table if it does not already exist."""
         await self._client.execute(_CREATE_CANDLES_TABLE)
 
-    async def upsert_candles(
-        self, symbol: str, interval: str, candles: Sequence[Candle]
-    ) -> None:
+    async def upsert_candles(self, symbol: str, interval: str, candles: Sequence[Candle]) -> None:
         """Insert new candles or refresh existing ones for the same bar.
 
         Timestamps are normalized to UTC here as a second line of defense
@@ -80,6 +78,54 @@ class TursoCandleRepository:
             for candle in candles
         ]
         await self._client.batch(statements)
+
+    async def upsert_many(self, interval: str, candles: Sequence[Candle]) -> None:
+        """Store one cross-symbol completed-bucket batch in one transaction."""
+        if not candles:
+            return
+        statements = [
+            Statement(
+                _UPSERT_CANDLE,
+                [
+                    candle.symbol,
+                    interval,
+                    candle.timestamp.astimezone(UTC).isoformat(),
+                    float(candle.open),
+                    float(candle.high),
+                    float(candle.low),
+                    float(candle.close),
+                    candle.volume,
+                ],
+            )
+            for candle in candles
+        ]
+        await self._client.batch(statements)
+
+    async def get_interval_rows_since(self, interval: str, since: datetime) -> list[tuple]:
+        result = await self._client.execute(
+            """SELECT symbol, timestamp, open, high, low, close, volume
+               FROM candles WHERE interval = ? AND timestamp >= ?
+               ORDER BY symbol, timestamp""",
+            [interval, since.astimezone(UTC).isoformat()],
+        )
+        return list(result.rows)
+
+    async def count_sessions(
+        self, symbol: str, interval: str, start: datetime, end: datetime
+    ) -> int:
+        result = await self._client.execute(
+            """SELECT COUNT(DISTINCT substr(timestamp, 1, 10)) FROM candles
+               WHERE symbol = ? AND interval = ? AND timestamp >= ? AND timestamp <= ?""",
+            [symbol, interval, start.astimezone(UTC).isoformat(), end.astimezone(UTC).isoformat()],
+        )
+        return int(result.rows[0][0]) if result.rows else 0
+
+    async def get_bucket_opens(self, interval: str, timestamp: datetime) -> dict[str, Decimal]:
+        result = await self._client.execute(
+            "SELECT symbol, open FROM candles WHERE interval = ? AND timestamp = ?",
+            [interval, timestamp.astimezone(UTC).isoformat()],
+        )
+        return {row[0]: Decimal(str(row[1])) for row in result.rows}
 
     async def get_candles(
         self, symbol: str, interval: str, limit: int | None = None

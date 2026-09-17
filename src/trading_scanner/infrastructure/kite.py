@@ -169,9 +169,7 @@ class KiteInstrumentMap:
         assert self._tick_size_by_key is not None
         value = self._tick_size_by_key.get((exchange, tradingsymbol))
         if value is None:
-            raise InstrumentLookupError(
-                f"No tick size found for {exchange}:{tradingsymbol}."
-            )
+            raise InstrumentLookupError(f"No tick size found for {exchange}:{tradingsymbol}.")
         return value
 
     def validate_index_mapping(self) -> None:
@@ -280,7 +278,11 @@ class KiteDerivativesChain:
             self._nfo = self._kite.instruments("NFO")
 
     def nearest_atm_option(
-        self, symbol: str, option_type: str, underlying_price: float
+        self,
+        symbol: str,
+        option_type: str,
+        underlying_price: float,
+        expiry: date | None = None,
     ) -> dict | None:
         """The nearest-expiry, nearest-strike contract of ``option_type``
         ("CE" or "PE") for ``symbol`` (Yahoo-style, e.g. RELIANCE.NS), or
@@ -299,7 +301,11 @@ class KiteDerivativesChain:
         ]
         if not candidates:
             return None
-        nearest_expiry = min(row["expiry"] for row in candidates)
+        if expiry is not None:
+            candidates = [row for row in candidates if row["expiry"] == expiry]
+            if not candidates:
+                return None
+        nearest_expiry = expiry or min(row["expiry"] for row in candidates)
         same_expiry = [row for row in candidates if row["expiry"] == nearest_expiry]
         return min(same_expiry, key=lambda row: abs(row["strike"] - underlying_price))
 
@@ -319,6 +325,20 @@ class KiteDerivativesChain:
             return None
         return min(candidates, key=lambda row: row["expiry"])
 
+    def future_for_horizon(self, symbol: str, minimum_expiry: date) -> dict | None:
+        """Nearest future whose expiry safely covers a strategy hold horizon."""
+        self._ensure_loaded()
+        name = symbol.removesuffix(".NS")
+        assert self._nfo is not None
+        candidates = [
+            row
+            for row in self._nfo
+            if row["name"] == name
+            and row["instrument_type"] == "FUT"
+            and row["expiry"] >= minimum_expiry
+        ]
+        return min(candidates, key=lambda row: row["expiry"]) if candidates else None
+
     def ltp(self, exchange_tradingsymbol: str) -> float | None:
         """Live last-traded price for one contract, e.g.
         'NFO:RELIANCE25AUG1400PE' or 'NFO:RELIANCE25AUGFUT'. None if Kite
@@ -327,9 +347,7 @@ class KiteDerivativesChain:
         row = quote.get(exchange_tradingsymbol)
         return row["last_price"] if row else None
 
-    def margin_benefit(
-        self, hedged_tradingsymbols: list[tuple[str, str, int]]
-    ) -> dict | None:
+    def margin_benefit(self, hedged_tradingsymbols: list[tuple[str, str, int]]) -> dict | None:
         """Live margin required for a combo of legs vs. holding the first
         leg alone, using Kite's own basket-margin API (the same SPAN/hedge
         netting the actual Kite app's basket screen shows) -- not a guessed
@@ -506,9 +524,11 @@ class KiteOrderExecutor:
         for holding in self._kite.holdings():
             if holding.get("product") == "CNC":
                 symbol = holding.get("tradingsymbol")
-                quantities[symbol] = quantities.get(symbol, 0) + int(
-                    holding.get("quantity", 0)
-                ) + int(holding.get("t1_quantity", 0))
+                quantities[symbol] = (
+                    quantities.get(symbol, 0)
+                    + int(holding.get("quantity", 0))
+                    + int(holding.get("t1_quantity", 0))
+                )
         return quantities
 
     def place_market_order(self, tradingsymbol: str, transaction_type: str, quantity: int) -> str:
@@ -525,6 +545,22 @@ class KiteOrderExecutor:
             order_type=self._kite.ORDER_TYPE_MARKET,
             product=self._kite.PRODUCT_NRML,
         )
+
+    def open_nfo_positions(self) -> list[dict]:
+        """Broker-side nonzero overnight derivative positions.
+
+        Used as a conservative reconciliation gate by the daily-swing runner:
+        an unknown manual or crash-window NFO position blocks a new basket.
+        """
+        return [
+            position
+            for position in self._kite.positions().get("net", [])
+            if position.get("exchange") == "NFO" and int(position.get("quantity", 0)) != 0
+        ]
+
+    def cancel_order(self, order_id: str) -> None:
+        """Cancel a timed-out regular NFO order before basket rollback."""
+        self._kite.cancel_order(variety=self._kite.VARIETY_REGULAR, order_id=order_id)
 
     def place_cash_market_order(
         self,

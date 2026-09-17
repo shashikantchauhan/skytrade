@@ -15,6 +15,7 @@ without needing to know which submodule it actually lives in.
 
 from trading_scanner.infrastructure.db._shared import add_column_if_missing, create_turso_client
 from trading_scanner.infrastructure.db.candles import TursoCandleRepository
+from trading_scanner.infrastructure.db.daily_swing import DailySwingRepository
 from trading_scanner.infrastructure.db.engine_state import TursoEngineStateRepository
 from trading_scanner.infrastructure.db.entry_decisions import TursoEntryDecisionRepository
 from trading_scanner.infrastructure.db.futures_paper_account import (
@@ -39,6 +40,7 @@ __all__ = [
     "add_column_if_missing",
     "create_turso_client",
     "TursoCandleRepository",
+    "DailySwingRepository",
     "TursoEngineStateRepository",
     "TursoEntryDecisionRepository",
     "TursoFuturesPaperAccountRepository",

@@ -1,0 +1,18 @@
+[Unit]
+Description=SkyTrade daily liquidity-sweep live pipeline
+After=network.target p-trade-live.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/p-trade
+EnvironmentFile=/opt/p-trade/.env
+Environment=PYTHONPATH=/opt/p-trade/src
+ExecStart=/opt/p-trade/.venv/bin/python -m trading_scanner.daily_swing_live
+Restart=on-failure
+RestartSec=30
+User=root
+StandardOutput=append:/var/log/p-trade/daily-swing.log
+StandardError=append:/var/log/p-trade/daily-swing.log
+
+[Install]
+WantedBy=multi-user.target

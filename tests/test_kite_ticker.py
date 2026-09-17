@@ -40,6 +40,10 @@ def test_bucket_start_handles_non_ist_input():
     assert bucket_start(when_utc) == _ist(2026, 8, 11, 10, 15)
 
 
+def test_thirty_minute_bucket_is_aligned_to_market_open():
+    assert bucket_start(_ist(2026, 8, 11, 10, 47), 30) == _ist(2026, 8, 11, 10, 45)
+
+
 def test_is_market_hours_true_during_session():
     assert is_market_hours(_ist(2026, 8, 11, 11, 0)) is True
 

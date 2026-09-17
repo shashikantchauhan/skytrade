@@ -260,6 +260,28 @@ class LiveOrderLeg:
 
 
 @dataclass(frozen=True, slots=True)
+class DailySwingPosition:
+    """Persistent state for one live liquidity-sweep futures basket."""
+
+    symbol: str
+    side: int
+    setup_date: str
+    entry_timestamp: datetime
+    entry_price: Decimal
+    initial_stop: Decimal
+    active_stop: Decimal
+    target: Decimal
+    atr: Decimal
+    risk: Decimal
+    best_close: Decimal
+    basket_id: str | None
+    status: str = "entering"  # entering | open | closed | rejected
+    exit_timestamp: datetime | None = None
+    exit_price: Decimal | None = None
+    exit_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PaperBenchmarkPosition:
     """A paper-simulated position run 1:1 alongside a real live-cash trade,
     purely to measure execution quality/slippage -- see

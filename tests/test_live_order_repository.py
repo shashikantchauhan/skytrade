@@ -25,9 +25,16 @@ def _local_url(tmp_path: Path) -> str:
 
 def _leg(**overrides) -> LiveOrderLeg:
     defaults = dict(
-        basket_id="RELIANCE.NS-cash-entry-1", symbol="RELIANCE.NS", purpose="cash",
-        tradingsymbol="RELIANCE", transaction_type="BUY", quantity=5, order_id="o1",
-        status="COMPLETE", placed_at=datetime.now(UTC), average_price=Decimal("1500"),
+        basket_id="RELIANCE.NS-cash-entry-1",
+        symbol="RELIANCE.NS",
+        purpose="cash",
+        tradingsymbol="RELIANCE",
+        transaction_type="BUY",
+        quantity=5,
+        order_id="o1",
+        status="COMPLETE",
+        placed_at=datetime.now(UTC),
+        average_price=Decimal("1500"),
     )
     defaults.update(overrides)
     return LiveOrderLeg(**defaults)
@@ -108,7 +115,9 @@ async def test_get_unclosed_cash_legs_is_closed_by_a_matching_complete_sell(
         await repository.record_leg(_leg())
         await repository.record_leg(
             _leg(
-                basket_id="RELIANCE.NS-cash-exit-1", transaction_type="SELL", order_id="o2",
+                basket_id="RELIANCE.NS-cash-exit-1",
+                transaction_type="SELL",
+                order_id="o2",
             )
         )
 
@@ -134,24 +143,34 @@ async def test_a_partial_exit_only_closes_the_quantity_actually_sold(tmp_path: P
         await repository.ensure_schema()
         await repository.record_leg(
             _leg(
-                basket_id="PERSISTENT.NS-cash-entry-1", symbol="PERSISTENT.NS",
-                tradingsymbol="PERSISTENT", quantity=8, order_id="o1",
+                basket_id="PERSISTENT.NS-cash-entry-1",
+                symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT",
+                quantity=8,
+                order_id="o1",
                 placed_at=datetime(2026, 8, 28, 7, 57, 22, tzinfo=UTC),
                 average_price=Decimal("5896.5"),
             )
         )
         await repository.record_leg(
             _leg(
-                basket_id="PERSISTENT.NS-cash-entry-2", symbol="PERSISTENT.NS",
-                tradingsymbol="PERSISTENT", quantity=9, order_id="o2",
+                basket_id="PERSISTENT.NS-cash-entry-2",
+                symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT",
+                quantity=9,
+                order_id="o2",
                 placed_at=datetime(2026, 8, 28, 8, 18, 50, tzinfo=UTC),
                 average_price=Decimal("5898"),
             )
         )
         await repository.record_leg(
             _leg(
-                basket_id="PERSISTENT.NS-cash-exit-1", symbol="PERSISTENT.NS",
-                tradingsymbol="PERSISTENT", transaction_type="SELL", quantity=8, order_id="o3",
+                basket_id="PERSISTENT.NS-cash-exit-1",
+                symbol="PERSISTENT.NS",
+                tradingsymbol="PERSISTENT",
+                transaction_type="SELL",
+                quantity=8,
+                order_id="o3",
                 placed_at=datetime(2026, 8, 31, 12, 20, 3, tzinfo=UTC),
                 average_price=Decimal("5615.5"),
             )
@@ -180,7 +199,9 @@ async def test_a_fully_covered_multi_leg_position_shows_as_closed(tmp_path: Path
         )
         await repository.record_leg(
             _leg(
-                basket_id="RELIANCE.NS-cash-exit-1", transaction_type="SELL", quantity=17,
+                basket_id="RELIANCE.NS-cash-exit-1",
+                transaction_type="SELL",
+                quantity=17,
                 order_id="o3",
             )
         )
@@ -206,16 +227,29 @@ async def test_two_buys_partly_closed_by_a_larger_sell_leaves_the_remainder(
         repository = TursoLiveOrderRepository(client)
         await repository.ensure_schema()
         await repository.record_leg(
-            _leg(basket_id="x1", quantity=8, order_id="o1",
-                 placed_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC))
+            _leg(
+                basket_id="x1",
+                quantity=8,
+                order_id="o1",
+                placed_at=datetime(2026, 9, 1, 9, 0, tzinfo=UTC),
+            )
         )
         await repository.record_leg(
-            _leg(basket_id="x2", quantity=9, order_id="o2",
-                 placed_at=datetime(2026, 9, 1, 9, 5, tzinfo=UTC))
+            _leg(
+                basket_id="x2",
+                quantity=9,
+                order_id="o2",
+                placed_at=datetime(2026, 9, 1, 9, 5, tzinfo=UTC),
+            )
         )
         await repository.record_leg(
-            _leg(basket_id="x3", transaction_type="SELL", quantity=12, order_id="o3",
-                 placed_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC))
+            _leg(
+                basket_id="x3",
+                transaction_type="SELL",
+                quantity=12,
+                order_id="o3",
+                placed_at=datetime(2026, 9, 1, 10, 0, tzinfo=UTC),
+            )
         )
 
         open_legs = await repository.get_open_cash_legs("RELIANCE.NS")
@@ -339,9 +373,7 @@ async def test_get_legs_by_intent_gathers_every_retry_attempt(tmp_path: Path) ->
         await repository.record_leg(
             _leg(basket_id="b1", order_id="o2", status="COMPLETE", intent_id="intent-a")
         )
-        await repository.record_leg(
-            _leg(basket_id="b2", order_id="o3", intent_id="intent-b")
-        )
+        await repository.record_leg(_leg(basket_id="b2", order_id="o3", intent_id="intent-b"))
 
         legs = await repository.get_legs_by_intent("intent-a")
 
@@ -469,12 +501,47 @@ async def test_get_cash_symbols_returns_distinct_symbols_only(tmp_path: Path) ->
         await repository.record_leg(_leg(order_id="o1", status="REJECTED"))
         await repository.record_leg(_leg(order_id="o2", status="COMPLETE"))  # same symbol again
         await repository.record_leg(
-            _leg(symbol="TCS.NS", tradingsymbol="TCS", basket_id="TCS.NS-cash-entry-1",
-                 order_id="o3", status="COMPLETE")
+            _leg(
+                symbol="TCS.NS",
+                tradingsymbol="TCS",
+                basket_id="TCS.NS-cash-entry-1",
+                order_id="o3",
+                status="COMPLETE",
+            )
         )
 
         symbols = await repository.get_cash_symbols()
 
         assert set(symbols) == {"RELIANCE.NS", "TCS.NS"}
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_global_primary_slot_counts_long_and_short_until_closed(tmp_path: Path) -> None:
+    client = create_turso_client(_local_url(tmp_path), None)
+    try:
+        repository = TursoLiveOrderRepository(client)
+        await repository.ensure_schema()
+        await repository.record_leg(
+            _leg(
+                purpose="primary",
+                tradingsymbol="RELIANCE26SEPFUT",
+                transaction_type="SELL",
+                quantity=250,
+            )
+        )
+        assert len(await repository.get_all_unclosed_primary_legs()) == 1
+        await repository.record_leg(
+            _leg(
+                basket_id="exit-1",
+                purpose="primary",
+                tradingsymbol="RELIANCE26SEPFUT",
+                transaction_type="BUY",
+                quantity=250,
+                order_id="o2",
+            )
+        )
+        assert await repository.get_all_unclosed_primary_legs() == []
     finally:
         await client.close()

@@ -77,8 +77,7 @@ class TursoLiveOrderRepository:
             "ON live_order_legs (intent_id)"
         )
         await self._client.execute(
-            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_order_id "
-            "ON live_order_legs (order_id)"
+            "CREATE INDEX IF NOT EXISTS idx_live_order_legs_order_id ON live_order_legs (order_id)"
         )
         await self._client.execute(
             "CREATE INDEX IF NOT EXISTS idx_live_order_legs_symbol_purpose "
@@ -273,6 +272,27 @@ class TursoLiveOrderRepository:
         )
         return [_row_to_leg(row) for row in result.rows]
 
+    async def get_all_unclosed_primary_legs(self) -> Sequence[LiveOrderLeg]:
+        """Every futures primary leg that may still represent real exposure.
+
+        COMPLETE, OPEN, and UNKNOWN entries all consume the global live-swing
+        slot. Opposite COMPLETE fills are netted FIFO by tradingsymbol, which
+        works for both long (BUY first) and short (SELL first) futures.
+        """
+        result = await self._client.execute(
+            """
+            SELECT basket_id, symbol, purpose, tradingsymbol, transaction_type,
+                   quantity, order_id, status, placed_at, average_price, rejection_reason,
+                   intent_id
+            FROM live_order_legs
+            WHERE purpose = 'primary'
+            ORDER BY placed_at ASC
+            """
+        )
+        return _net_unclosed_legs(
+            [_row_to_leg(row) for row in result.rows], opener_statuses=_UNCLOSED_STATUSES
+        )
+
 
 def _row_to_leg(row: Sequence) -> LiveOrderLeg:
     return LiveOrderLeg(
@@ -321,11 +341,13 @@ def _net_unclosed_legs(
         symbol_legs = sorted(symbol_legs, key=lambda leg: leg.placed_at)
         opening_type = symbol_legs[0].transaction_type
         openers = [
-            leg for leg in symbol_legs
+            leg
+            for leg in symbol_legs
             if leg.transaction_type == opening_type and leg.status in opener_statuses
         ]
         closed_quantity = sum(
-            leg.quantity for leg in symbol_legs
+            leg.quantity
+            for leg in symbol_legs
             if leg.transaction_type != opening_type and leg.status == "COMPLETE"
         )
         remaining_to_close = closed_quantity

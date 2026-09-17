@@ -61,6 +61,7 @@ class FakeOrderExecutor:
         self._scripted = {key: list(values) for key, values in scripted.items()}
         self.calls: list[tuple[str, str, int]] = []
         self._order_counter = 0
+        self.cancelled: list[str] = []
 
     def place_market_order(self, tradingsymbol, transaction_type, quantity):
         self.calls.append((tradingsymbol, transaction_type, quantity))
@@ -68,7 +69,15 @@ class FakeOrderExecutor:
         return f"order-{self._order_counter}"
 
     def order_status(self, order_id):
-        raise NotImplementedError
+        return {
+            "status": "CANCELLED",
+            "average_price": 100.0,
+            "status_message": None,
+            "filled_quantity": 0,
+        }
+
+    def cancel_order(self, order_id):
+        self.cancelled.append(order_id)
 
     def wait_for_fill(self, order_id, timeout_seconds, poll_interval=1.0):
         index = self._order_counter - 1
@@ -76,7 +85,12 @@ class FakeOrderExecutor:
         tradingsymbol, transaction_type, _ = self.calls[index]
         key = (tradingsymbol, transaction_type)
         status = self._scripted[key].pop(0)
-        return {"status": status, "average_price": 100.0, "status_message": None}
+        return {
+            "status": status,
+            "average_price": 100.0,
+            "status_message": None,
+            "filled_quantity": self.calls[index][2] if status == "COMPLETE" else 0,
+        }
 
 
 class FakeLiveOrderRepository:
@@ -88,6 +102,9 @@ class FakeLiveOrderRepository:
         self.recorded.append(leg)
 
     async def get_open_primary_legs(self, symbol: str):
+        return self._open_primary
+
+    async def get_all_unclosed_primary_legs(self):
         return self._open_primary
 
     async def get_legs(self, basket_id: str):
@@ -138,14 +155,49 @@ async def test_entry_noop_when_live_trading_disabled():
     notifier = FakeNotifier()
 
     result = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, notifier,
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        notifier,
     )
 
     assert result is None
     assert executor.calls == []
     assert notifier.texts == []
+
+
+@pytest.mark.asyncio
+async def test_timed_out_hedge_is_cancelled_before_futures_order():
+    executor = FakeOrderExecutor({("RELIANCE25AUG1400PE", "BUY"): ["OPEN"]})
+    result = await live_execution.execute_basket_entry(
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        _config(enabled=True),
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        FakeLiveOrderRepository(),
+        FakeNotifier(),
+    )
+
+    assert result is not None
+    assert executor.cancelled == ["order-1"]
+    assert executor.calls == [("RELIANCE25AUG1400PE", "BUY", 250)]
+
+
+def test_defined_max_loss_uses_protective_strike_and_premium():
+    assert live_execution.defined_max_loss(
+        SignalSide.BUY, Decimal("266"), Decimal("260"), Decimal("2"), 1900
+    ) == Decimal("15200")
+    assert live_execution.defined_max_loss(
+        SignalSide.SELL, Decimal("5000"), Decimal("5100"), Decimal("20"), 50
+    ) == Decimal("6000")
 
 
 @pytest.mark.asyncio
@@ -155,9 +207,15 @@ async def test_entry_noop_when_symbol_not_allowlisted():
     repo = FakeLiveOrderRepository()
 
     result = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, FakeNotifier(),
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        FakeNotifier(),
     )
 
     assert result is None
@@ -177,9 +235,15 @@ async def test_entry_places_option_before_futures_when_both_fill():
     notifier = FakeNotifier()
 
     basket_id = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, notifier,
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        notifier,
     )
 
     assert basket_id is not None
@@ -200,9 +264,15 @@ async def test_entry_aborts_without_futures_leg_if_option_fails():
     notifier = FakeNotifier()
 
     basket_id = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, notifier,
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        notifier,
     )
 
     assert basket_id is not None
@@ -224,9 +294,15 @@ async def test_entry_rolls_back_option_leg_if_futures_leg_fails():
     notifier = FakeNotifier()
 
     basket_id = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, notifier,
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        notifier,
     )
 
     assert basket_id is not None
@@ -256,9 +332,15 @@ async def test_entry_skips_if_already_holding_a_real_position():
     repo = FakeLiveOrderRepository(open_primary=[existing_leg])
 
     result = await live_execution.execute_basket_entry(
-        "RELIANCE.NS", SignalSide.BUY, "PE", Decimal("1400"),
-        config, FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
-        executor, repo, FakeNotifier(),
+        "RELIANCE.NS",
+        SignalSide.BUY,
+        "PE",
+        Decimal("1400"),
+        config,
+        FakeDerivativesChain(_OPTION_CONTRACT, _FUTURE_CONTRACT),
+        executor,
+        repo,
+        FakeNotifier(),
     )
 
     assert result is None
@@ -321,3 +403,27 @@ async def test_exit_noop_when_nothing_open():
     )
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_exit_remains_available_after_entry_kill_switch_is_disabled():
+    open_future = LiveOrderLeg(
+        basket_id="RELIANCE.NS-entry-1",
+        symbol="RELIANCE.NS",
+        purpose="primary",
+        tradingsymbol="RELIANCE25AUGFUT",
+        transaction_type="BUY",
+        quantity=250,
+        order_id="order-1",
+        status="COMPLETE",
+        placed_at=datetime.now(UTC),
+    )
+    executor = FakeOrderExecutor({("RELIANCE25AUGFUT", "SELL"): ["COMPLETE"]})
+    repo = FakeLiveOrderRepository(open_primary=[open_future])
+
+    result = await live_execution.execute_basket_exit(
+        "RELIANCE.NS", _config(enabled=False), executor, repo, FakeNotifier()
+    )
+
+    assert result is not None
+    assert executor.calls == [("RELIANCE25AUGFUT", "SELL", 250)]

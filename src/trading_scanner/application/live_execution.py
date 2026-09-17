@@ -32,7 +32,7 @@ always try to notify."
 import asyncio
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from trading_scanner.config.settings import AppConfig
@@ -55,10 +55,24 @@ class BasketLegResult:
     status: str
     average_price: Decimal | None
     rejection_reason: str | None
+    filled_quantity: int = 0
 
 
 def _is_gated_in(symbol: str, config: AppConfig) -> bool:
     return config.live_trading_enabled and symbol in config.live_trading_symbols
+
+
+def defined_max_loss(
+    side: SignalSide,
+    futures_price: Decimal,
+    hedge_strike: Decimal,
+    hedge_premium: Decimal,
+    quantity: int,
+) -> Decimal:
+    """Expiry-defined loss for one future protected by one long option."""
+    gap = futures_price - hedge_strike if side == SignalSide.BUY else hedge_strike - futures_price
+    per_unit = max(Decimal("0"), gap) + hedge_premium
+    return per_unit * quantity
 
 
 async def _place_and_wait(
@@ -82,11 +96,17 @@ async def _place_and_wait(
             status="REJECTED",
             average_price=None,
             rejection_reason="place_order raised an exception -- see logs",
+            filled_quantity=0,
         )
-    status = await asyncio.to_thread(
-        order_executor.wait_for_fill, order_id, _FILL_TIMEOUT_SECONDS
-    )
+    status = await asyncio.to_thread(order_executor.wait_for_fill, order_id, _FILL_TIMEOUT_SECONDS)
+    if status["status"] not in ("COMPLETE", "REJECTED", "CANCELLED"):
+        try:
+            await asyncio.to_thread(order_executor.cancel_order, order_id)
+            status = await asyncio.to_thread(order_executor.order_status, order_id)
+        except Exception:
+            logger.exception("Could not cancel timed-out order %s", order_id)
     average_price = status.get("average_price")
+    filled_quantity = int(status.get("filled_quantity", 0) or 0)
     return BasketLegResult(
         tradingsymbol=tradingsymbol,
         transaction_type=transaction_type,
@@ -95,6 +115,7 @@ async def _place_and_wait(
         status=status["status"],
         average_price=Decimal(str(average_price)) if average_price else None,
         rejection_reason=status.get("status_message"),
+        filled_quantity=filled_quantity,
     )
 
 
@@ -132,6 +153,7 @@ async def execute_basket_entry(
     order_executor: KiteOrderExecutor,
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
+    contract_expiry: date | None = None,
 ) -> str | None:
     """Real hedged-futures basket entry: option leg first, futures leg
     second. Returns the basket_id if anything was placed, None if the gate
@@ -144,15 +166,28 @@ async def execute_basket_entry(
     """
     if not _is_gated_in(symbol, config):
         return None
-    already_open = await live_order_repository.get_open_primary_legs(symbol)
+    already_open = await live_order_repository.get_all_unclosed_primary_legs()
     if already_open:
-        logger.info("Live basket entry skipped for %s -- a real position is already open.", symbol)
+        logger.info(
+            "Live basket entry skipped for %s -- the single global real-position slot is full.",
+            symbol,
+        )
         return None
 
-    option_contract = derivatives_chain.nearest_atm_option(
-        symbol, hedge_option_type, float(hedge_strike_target)
+    option_contract = (
+        derivatives_chain.nearest_atm_option(
+            symbol, hedge_option_type, float(hedge_strike_target), expiry=contract_expiry
+        )
+        if contract_expiry is not None
+        else derivatives_chain.nearest_atm_option(
+            symbol, hedge_option_type, float(hedge_strike_target)
+        )
     )
-    futures_contract = derivatives_chain.nearest_future(symbol)
+    futures_contract = (
+        derivatives_chain.future_for_horizon(symbol, contract_expiry)
+        if contract_expiry is not None
+        else derivatives_chain.nearest_future(symbol)
+    )
     if option_contract is None or futures_contract is None:
         logger.warning("Live basket entry skipped for %s -- no option/futures contract.", symbol)
         return None
@@ -168,11 +203,21 @@ async def execute_basket_entry(
     await _record(live_order_repository, basket_id, symbol, "hedge", option_leg)
 
     if option_leg.status != "COMPLETE":
+        unwind_status = "not needed"
+        if option_leg.filled_quantity > 0:
+            unwind = await _place_and_wait(
+                order_executor,
+                option_contract["tradingsymbol"],
+                "SELL",
+                option_leg.filled_quantity,
+            )
+            await _record(live_order_repository, basket_id, symbol, "hedge", unwind)
+            unwind_status = unwind.status
         await notifier.send_text(
             "⚠️ <b>LIVE ORDER FAILED</b>\n"
             f"{symbol}: option leg ({option_contract['tradingsymbol']}) did not fill "
-            f"(status={option_leg.status}). Basket aborted -- no futures leg placed, "
-            "no real position opened."
+            f"(status={option_leg.status}, filled={option_leg.filled_quantity}). "
+            f"Partial hedge unwind={unwind_status}; no futures leg placed."
         )
         return basket_id
 
@@ -184,8 +229,16 @@ async def execute_basket_entry(
     await _record(live_order_repository, basket_id, symbol, "primary", futures_leg)
 
     if futures_leg.status != "COMPLETE":
-        # Rollback: the option leg is real and open -- square it off rather
-        # than leave a lone hedge with nothing to hedge.
+        # Roll back any partial futures fill first, then the option hedge.
+        futures_unwind = None
+        if futures_leg.filled_quantity > 0:
+            futures_unwind = await _place_and_wait(
+                order_executor,
+                futures_contract["tradingsymbol"],
+                "SELL" if futures_transaction_type == "BUY" else "BUY",
+                futures_leg.filled_quantity,
+            )
+            await _record(live_order_repository, basket_id, symbol, "primary", futures_unwind)
         unwind_leg = await _place_and_wait(
             order_executor, option_contract["tradingsymbol"], "SELL", quantity
         )
@@ -193,7 +246,13 @@ async def execute_basket_entry(
         await notifier.send_text(
             "⚠️ <b>LIVE ORDER FAILED</b>\n"
             f"{symbol}: futures leg ({futures_contract['tradingsymbol']}) did not fill "
-            f"(status={futures_leg.status}). Option leg squared off "
+            f"(status={futures_leg.status}, filled={futures_leg.filled_quantity}). "
+            + (
+                f"Partial future unwind={futures_unwind.status}. "
+                if futures_unwind is not None
+                else ""
+            )
+            + "Option leg squared off "
             f"(unwind status={unwind_leg.status}). Basket aborted."
         )
         return basket_id
@@ -213,12 +272,12 @@ async def execute_basket_exit(
     live_order_repository: TursoLiveOrderRepository,
     notifier: Notifier,
 ) -> str | None:
-    """Closes whatever real basket is open for ``symbol`` -- futures leg
-    first (the open-ended-risk side), then the paired option hedge.
-    Returns None if the gate is closed or nothing is actually open.
+    """Close an existing real basket, futures first and hedge second.
+
+    Entry kill switches and allowlists intentionally do not gate exits. Once
+    real exposure exists, disabling new entries must never disable its stop,
+    target, or emergency square-off path.
     """
-    if not _is_gated_in(symbol, config):
-        return None
     open_primary = await live_order_repository.get_open_primary_legs(symbol)
     if not open_primary:
         return None
