@@ -14,6 +14,8 @@ import time
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 from trading_scanner import webapp  # noqa: E402
 
@@ -215,3 +217,24 @@ def test_daily_swing_health_accepts_quiet_service_after_market(tmp_path, monkeyp
     assert health["healthy"] is True
     assert health["market_open"] is False
     assert health["reason"] == "running"
+
+
+def test_daily_swing_backtest_loader_keeps_research_rows_separate(tmp_path):
+    ledger = tmp_path / "trades.csv"
+    ledger.write_text(
+        "symbol,setup,side,setup_date,entry_timestamp,entry,stop,target,"
+        "exit_timestamp,exit,net_pct,r,exit_reason\n"
+        "WIN.NS,liquidity_sweep_long,1,2026-01-01,2026-01-02 04:45:00+00:00,"
+        "100,95,115,2026-01-05 04:45:00+00:00,110,9.8,2,target\n"
+        "LOSS.NS,liquidity_sweep_short,-1,2025-12-01,2025-12-02 04:45:00+00:00,"
+        "200,210,170,2025-12-03 04:45:00+00:00,205,-2.7,-0.5,stop\n"
+    )
+
+    result = webapp._load_daily_swing_backtest(ledger)
+
+    assert result["summary"]["trades"] == 2
+    assert result["summary"]["win_rate"] == 50
+    assert result["summary"]["average_net_pct"] == pytest.approx(3.55)
+    assert result["summary"]["profit_factor"] == pytest.approx(9.8 / 2.7)
+    assert result["trades"][0]["symbol"] == "WIN.NS"
+    assert result["trades"][1]["side"] == "short"

@@ -13,6 +13,7 @@ Run with: `trading-scanner-dashboard` (see pyproject.toml), or directly:
 """
 
 import asyncio
+import csv
 import logging
 import os
 import secrets
@@ -85,6 +86,12 @@ _LOG_PATH = Path(os.getenv("TRADING_SCANNER_LOG_PATH", "/var/log/p-trade/signals
 _BACKTEST_LOG_PATH = _LOG_PATH.with_name("derivatives-backtest.log")
 _DAILY_SWING_LOG_PATH = Path(
     os.getenv("TRADING_SCANNER_DAILY_SWING_LOG_PATH", "/var/log/p-trade/daily-swing.log")
+)
+_DAILY_SWING_BACKTEST_PATH = Path(
+    os.getenv(
+        "TRADING_SCANNER_DAILY_SWING_BACKTEST_PATH",
+        str(_REPO_ROOT / "analysis/reports/2026-09-11-nifty500-30m-frozen-trades.csv"),
+    )
 )
 
 # 2026-08-16: skytrade-smallcap (Nifty Smallcap 250, weekly signals) is a
@@ -1607,6 +1614,48 @@ def _daily_swing_position_json(position) -> dict:
     }
 
 
+def _load_daily_swing_backtest(path: Path = _DAILY_SWING_BACKTEST_PATH) -> dict:
+    """Load the frozen research ledger without mixing it into live records."""
+    if not path.exists():
+        raise FileNotFoundError(f"Backtest ledger does not exist: {path}")
+    trades = []
+    with path.open(newline="", encoding="utf-8") as handle:
+        for raw in csv.DictReader(handle):
+            net_pct = float(raw["net_pct"])
+            trades.append(
+                {
+                    "symbol": raw["symbol"],
+                    "setup": raw["setup"],
+                    "side": "long" if int(raw["side"]) == 1 else "short",
+                    "setup_date": raw["setup_date"],
+                    "entry_timestamp": raw["entry_timestamp"],
+                    "entry": float(raw["entry"]),
+                    "exit_timestamp": raw["exit_timestamp"],
+                    "exit": float(raw["exit"]),
+                    "net_pct": net_pct,
+                    "r": float(raw["r"]),
+                    "exit_reason": raw["exit_reason"],
+                }
+            )
+    trades.sort(key=lambda trade: trade["entry_timestamp"], reverse=True)
+    returns = [trade["net_pct"] for trade in trades]
+    gross_profit = sum(value for value in returns if value > 0)
+    gross_loss = abs(sum(value for value in returns if value < 0))
+    wins = sum(value > 0 for value in returns)
+    return {
+        "source": "Frozen Nifty 500 30-minute research backtest",
+        "trades": trades,
+        "summary": {
+            "trades": len(trades),
+            "wins": wins,
+            "win_rate": wins / len(trades) * 100 if trades else None,
+            "average_net_pct": sum(returns) / len(returns) if returns else None,
+            "profit_factor": gross_profit / gross_loss if gross_loss else None,
+            "sum_trade_returns_pct": sum(returns),
+        },
+    }
+
+
 @app.get("/api/daily-swing")
 async def daily_swing(_: None = Depends(_require_session)) -> JSONResponse:
     """Live Daily Swing state and its complete, separate trade ledger."""
@@ -1650,6 +1699,16 @@ async def daily_swing(_: None = Depends(_require_session)) -> JSONResponse:
         )
     finally:
         await client.close()
+
+
+@app.get("/api/daily-swing/backtest")
+async def daily_swing_backtest(_: None = Depends(_require_session)) -> JSONResponse:
+    """Frozen research results, kept separate from the live execution ledger."""
+    try:
+        return JSONResponse(_load_daily_swing_backtest())
+    except (OSError, KeyError, TypeError, ValueError) as error:
+        logger.exception("Unable to load Daily Swing backtest ledger.")
+        raise HTTPException(status_code=503, detail=str(error)) from error
 
 
 def _service_is_active(service: str) -> bool:

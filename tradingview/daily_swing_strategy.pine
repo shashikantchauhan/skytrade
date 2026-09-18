@@ -1,0 +1,187 @@
+//@version=6
+strategy("SkyTrade Daily Liquidity Sweep (30m approximation)", overlay = true,
+     pyramiding = 0, process_orders_on_close = true,
+     commission_type = strategy.commission.percent, commission_value = 0.10)
+
+// Run on a regular 30-minute NSE equity chart. This script uses only completed
+// daily candles. See README.md for the two differences from the Python engine.
+string benchmark = input.symbol("NSE:NIFTY", "Benchmark")
+int barsPerSession = input.int(13, "30m bars per NSE session", minval = 1)
+int volumeLookback = input.int(20, "Same-slot volume sessions", minval = 12, maxval = 30)
+bool enableLongs = input.bool(true, "Enable longs")
+bool enableShorts = input.bool(true, "Enable shorts")
+
+f_tr() =>
+    math.max(high - low, math.max(math.abs(high - close[1]), math.abs(low - close[1])))
+
+f_atr() =>
+    ta.median(f_tr()[1], 20)
+
+f_vol_ratio() =>
+    volume / ta.median(volume[1], 20)
+
+f_liquidity() =>
+    ta.median(close[1] * volume[1], 20)
+
+f_sup20() =>
+    ta.lowest(low[1], 20)
+
+f_res20() =>
+    ta.highest(high[1], 20)
+
+f_sup60() =>
+    ta.lowest(low[1], 60)
+
+f_res60() =>
+    ta.highest(high[1], 60)
+
+f_mom20() =>
+    close / close[20] - 1.0
+
+// Offset every higher-timeframe expression by one bar and use lookahead_on.
+// This makes the prior completed daily bar available from the next session's
+// first 30-minute bar without leaking that day's future values.
+[dOpen, dHigh, dLow, dClose, dVolume] = request.security(
+     syminfo.tickerid, "1D", [open[1], high[1], low[1], close[1], volume[1]],
+     lookahead = barmerge.lookahead_on)
+float dAtr = request.security(syminfo.tickerid, "1D", f_atr()[1], lookahead = barmerge.lookahead_on)
+float dVolRatio = request.security(syminfo.tickerid, "1D", f_vol_ratio()[1], lookahead = barmerge.lookahead_on)
+float dLiquidity = request.security(syminfo.tickerid, "1D", f_liquidity()[1], lookahead = barmerge.lookahead_on)
+float dSup20 = request.security(syminfo.tickerid, "1D", f_sup20()[1], lookahead = barmerge.lookahead_on)
+float dRes20 = request.security(syminfo.tickerid, "1D", f_res20()[1], lookahead = barmerge.lookahead_on)
+float dSup60 = request.security(syminfo.tickerid, "1D", f_sup60()[1], lookahead = barmerge.lookahead_on)
+float dRes60 = request.security(syminfo.tickerid, "1D", f_res60()[1], lookahead = barmerge.lookahead_on)
+float marketMom20 = request.security(benchmark, "1D", f_mom20()[1], lookahead = barmerge.lookahead_on)
+[marketOpen, marketClose] = request.security(benchmark, timeframe.period, [open, close])
+
+float spread = dHigh - dLow
+float lowerWick = spread > 0 ? (math.min(dOpen, dClose) - dLow) / spread : na
+float upperWick = spread > 0 ? (dHigh - math.max(dOpen, dClose)) / spread : na
+bool liquid = dLiquidity >= 20000000
+bool neutralMarket = math.abs(marketMom20) <= 0.04
+
+// TradingView cannot scan all Nifty 500 constituents from one chart, so the
+// historical cross-sectional breadth gate is omitted here. All other daily
+// setup gates are retained.
+bool longSetup = enableLongs and liquid and neutralMarket and
+     dLow < dSup20 - 0.05 * dAtr and dClose > dSup20 and
+     lowerWick >= 0.35 and dVolRatio >= 1.0
+bool shortSetup = enableShorts and liquid and neutralMarket and
+     dHigh > dRes20 + 0.05 * dAtr and dClose < dRes20 and
+     upperWick >= 0.45 and dVolRatio >= 1.5
+
+bool newSession = timeframe.change("1D")
+var int slot = 0
+var float sessionOpen = na
+var bool enteredToday = false
+if newSession
+    slot := 0
+    sessionOpen := open
+    enteredToday := false
+else
+    slot += 1
+
+f_same_slot_volume(int sessions, int sessionBars) =>
+    float total = 0.0
+    int count = 0
+    for index = 1 to sessions
+        float sample = volume[index * sessionBars]
+        if not na(sample)
+            total += sample
+            count += 1
+    count >= 12 ? total / count : na
+
+float slotVolumeBase = f_same_slot_volume(volumeLookback, barsPerSession)
+bool normalVolume = not na(slotVolumeBase) and volume >= slotVolumeBase
+float barSpread = high - low
+float location = barSpread > 0 ? (close - low) / barSpread : 0.5
+float relativeReturn = close / open - 1.0 - (marketClose / marketOpen - 1.0)
+bool gapOk = not na(sessionOpen) and math.abs(sessionOpen / dClose - 1.0) <= 0.75 * dAtr / dClose
+
+float longStop = dLow - 0.10 * dAtr
+float shortStop = dHigh + 0.10 * dAtr
+float longGateEntry = close * 1.0005
+float shortGateEntry = close * 0.9995
+float longGateRisk = longGateEntry - longStop
+float shortGateRisk = shortStop - shortGateEntry
+bool longRiskOk = longGateRisk > 0 and longGateRisk <= 2.2 * dAtr and longGateRisk / longGateEntry <= 0.035
+bool shortRiskOk = shortGateRisk > 0 and shortGateRisk <= 2.2 * dAtr and shortGateRisk / shortGateEntry <= 0.035
+float longRoom = dRes60 - longGateEntry
+float shortRoom = shortGateEntry - dSup60
+bool longRoomOk = na(dRes60) or longRoom <= 0 or longRoom >= 2.0 * longGateRisk
+bool shortRoomOk = na(dSup60) or shortRoom <= 0 or shortRoom >= 2.0 * shortGateRisk
+
+bool inEntryWindow = slot >= 0 and slot < 4 and not enteredToday and strategy.position_size == 0
+bool longConfirmed = inEntryWindow and longSetup and gapOk and normalVolume and
+     close > dHigh and close > open and location >= 0.65 and relativeReturn >= 0 and
+     longRiskOk and longRoomOk
+bool shortConfirmed = inEntryWindow and shortSetup and gapOk and normalVolume and
+     close < dLow and close < open and location <= 0.35 and relativeReturn <= 0 and
+     shortRiskOk and shortRoomOk
+
+var float activeStop = na
+var float profitTarget = na
+var float entryRisk = na
+var float entryAtr = na
+var float bestClose = na
+var int heldSessions = 0
+
+if longConfirmed
+    entryRisk := close - longStop
+    activeStop := longStop
+    profitTarget := close + 3.0 * entryRisk
+    entryAtr := dAtr
+    bestClose := close
+    heldSessions := 0
+    enteredToday := true
+    strategy.entry("Long", strategy.long)
+
+if shortConfirmed
+    entryRisk := shortStop - close
+    activeStop := shortStop
+    profitTarget := close - 3.0 * entryRisk
+    entryAtr := dAtr
+    bestClose := close
+    heldSessions := 0
+    enteredToday := true
+    strategy.entry("Short", strategy.short)
+
+if strategy.position_size != 0
+    if newSession
+        heldSessions += 1
+    if strategy.position_size > 0
+        bestClose := math.max(bestClose, close)
+        float progress = bestClose - strategy.position_avg_price
+        if progress >= 2.0 * entryRisk
+            activeStop := math.max(activeStop, math.max(strategy.position_avg_price + entryRisk, bestClose - 1.25 * entryAtr))
+        else if progress >= entryRisk
+            activeStop := math.max(activeStop, strategy.position_avg_price)
+        strategy.exit("Long exit", "Long", stop = activeStop, limit = profitTarget)
+    else
+        bestClose := math.min(bestClose, close)
+        float progress = strategy.position_avg_price - bestClose
+        if progress >= 2.0 * entryRisk
+            activeStop := math.min(activeStop, math.min(strategy.position_avg_price - entryRisk, bestClose + 1.25 * entryAtr))
+        else if progress >= entryRisk
+            activeStop := math.min(activeStop, strategy.position_avg_price)
+        strategy.exit("Short exit", "Short", stop = activeStop, limit = profitTarget)
+    if heldSessions >= 10
+        strategy.close_all(comment = "10-session time exit", immediately = true)
+
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    activeStop := na
+    profitTarget := na
+    entryRisk := na
+    entryAtr := na
+    bestClose := na
+    heldSessions := 0
+
+plot(longSetup ? dHigh : na, "Long trigger", color.new(color.green, 15), 2, plot.style_linebr)
+plot(shortSetup ? dLow : na, "Short trigger", color.new(color.red, 15), 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? activeStop : na, "Active stop", color.orange, 2, plot.style_linebr)
+plot(strategy.position_size != 0 ? profitTarget : na, "3R target", color.aqua, 2, plot.style_linebr)
+plotshape(longConfirmed, "Long confirmation", shape.triangleup, location.belowbar, color.green, size = size.tiny)
+plotshape(shortConfirmed, "Short confirmation", shape.triangledown, location.abovebar, color.red, size = size.tiny)
+
+if barstate.isfirst and timeframe.in_seconds() != timeframe.in_seconds("30")
+    runtime.error("Use this strategy on a 30-minute chart.")

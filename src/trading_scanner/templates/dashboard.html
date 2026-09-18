@@ -211,6 +211,7 @@
 <div class="tabnav">
   <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
   <button class="tab-btn" data-tab="history" onclick="switchTab('history')">Trade history</button>
+  <button class="tab-btn" data-tab="backtest" onclick="switchTab('backtest')">Backtest</button>
   <button class="tab-btn" data-tab="system" onclick="switchTab('system')">System</button>
 </div>
 
@@ -240,6 +241,18 @@
       <tbody><tr class="empty-row"><td colspan="9">Loading...</td></tr></tbody>
     </table>
   </div>
+</section>
+
+<section class="tab-panel" data-tab="backtest" hidden>
+  <h2>Frozen strategy backtest <span class="hint">research results only; these are not live executions or a portfolio return</span></h2>
+  <div class="cards" id="backtest-cards"><div class="card"><div class="value">Loading...</div></div></div>
+  <div class="panel table-wrap" style="margin-top:0.8rem;">
+    <table id="backtest-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Setup date</th><th>Entry</th><th class="num">Entry price</th><th>Exit</th><th class="num">Exit price</th><th>Reason</th><th class="num">Net return</th><th class="num">R</th></tr></thead>
+      <tbody><tr class="empty-row"><td colspan="10">Loading...</td></tr></tbody>
+    </table>
+  </div>
+  <div class="note">The 180 signals are independent and can overlap. The sum of trade returns is shown for audit only; it is not the return of a capital-constrained portfolio.</div>
 </section>
 
 <section class="tab-panel" data-tab="system" hidden>
@@ -339,6 +352,23 @@ async function loadHealth() {
     <div class="card"><div class="label">Market check</div><div class="value">${h.market_open ? "Live freshness enforced" : "Market closed"}</div></div>`;
 }
 
+async function loadBacktest() {
+  const data = await api("/api/daily-swing/backtest");
+  const s = data.summary;
+  document.getElementById("backtest-cards").innerHTML = `
+    <div class="card"><div class="label">Trades</div><div class="value">${s.trades}</div></div>
+    <div class="card"><div class="label">Win rate</div><div class="value">${fmt(s.win_rate)}%</div></div>
+    <div class="card"><div class="label">Average net return</div><div class="value ${s.average_net_pct >= 0 ? "green" : "red"}">${fmt(s.average_net_pct)}%</div></div>
+    <div class="card"><div class="label">Profit factor</div><div class="value">${fmt(s.profit_factor)}</div></div>
+    <div class="card"><div class="label">Sum of trade returns</div><div class="value ${s.sum_trade_returns_pct >= 0 ? "green" : "red"}">${fmt(s.sum_trade_returns_pct)} pp</div></div>`;
+  document.querySelector("#backtest-table tbody").innerHTML = data.trades.map(t => `<tr>
+    <td><strong>${t.symbol.replace(".NS", "")}</strong></td><td>${sidePill(t.side)}</td><td>${t.setup_date}</td>
+    <td>${fmtTime(t.entry_timestamp)}</td><td class="num">₹${fmt(t.entry)}</td>
+    <td>${fmtTime(t.exit_timestamp)}</td><td class="num">₹${fmt(t.exit)}</td><td>${t.exit_reason}</td>
+    <td class="num ${t.net_pct >= 0 ? "green" : "red"}">${fmt(t.net_pct)}%</td><td class="num">${fmt(t.r)}</td>
+  </tr>`).join("") || `<tr class="empty-row"><td colspan="10">No backtest trades found.</td></tr>`;
+}
+
 async function loadKiteStatus() {
   const k = await api("/api/kite-status");
   const el = document.getElementById("kite-status");
@@ -371,7 +401,7 @@ async function applyRole() {
 
 async function refreshAll() {
   if (myRole === null) await applyRole();
-  await Promise.all([loadDailySwing(), loadHealth(), loadKiteStatus(), loadLogs()]);
+  await Promise.all([loadDailySwing(), loadBacktest(), loadHealth(), loadKiteStatus(), loadLogs()]);
 }
 
 updateMarketStatus();

@@ -21,7 +21,7 @@ Status: **implemented, tested and deployed on 2026-09-18.**
 
 Changes in the working tree:
 
-- The dashboard now has only three useful tabs: Overview, Trade history, and System.
+- The dashboard has four focused tabs: Overview, Trade history, Backtest, and System.
 - Overview shows the active Daily Swing position and recent confirmed entry attempts.
 - Trade history shows the full `daily_swing_positions` ledger, including open, closed and rejected records.
 - Displayed return is explicitly the underlying spot move. It is not presented as the futures-plus-option basket's broker P&L.
@@ -29,16 +29,17 @@ Changes in the working tree:
 - During market hours, a log older than five minutes is unhealthy. Outside market hours, a quiet but active service is healthy.
 - Admins can restart `p-trade-daily-swing` from the System tab.
 - The visible Alpha Gates tab, Alpha cash configuration and old Alpha run button were removed from the dashboard.
+- The Backtest tab loads the frozen 180-trade Nifty 500 research ledger from its CSV. It is visibly separate from the live ledger and labels the arithmetic sum of trade returns as non-portfolio evidence.
 - Daily Swing Telegram messages now cover:
   - service start;
   - first live ticks of the trading session, including tracked symbol/setup counts;
   - missing Kite login or expired Kite session;
-  - no ticks for at least three minutes;
+  - no ticks for at least 30 minutes;
   - recovery after a tick stall;
   - runner crash before its automatic restart;
   - market-session completion.
 - Tick alerts are transition-based, so a persistent outage sends one alert rather than one message per minute.
-- A three-minute tick stall also ends the current WebSocket session so the runner reconnects automatically; recovery is announced after ticks resume.
+- A 30-minute tick stall also ends the current WebSocket session so the runner reconnects automatically; recovery is announced after ticks resume. The dashboard's five-minute process-log health check remains separate because it detects a fully hung service, not a Telegram feed notification condition.
 - HTTP transport INFO logs are suppressed for Telegram because its request URL contains the bot token; existing VPS log occurrences were sanitized during deployment verification.
 - The GitHub deployment workflow now restarts and verifies `p-trade-dashboard` and `p-trade-daily-swing`. It no longer restarts retired `p-trade-live`.
 - The Daily Swing systemd unit no longer declares the retired Alpha service as an `After=` dependency.
@@ -61,6 +62,16 @@ Files changed for Phase 1:
 - `tests/test_daily_swing_notifications.py`
 - `tests/test_daily_swing_repository.py`
 - `tests/test_webapp_status.py`
+
+## Phase 1B — Backtest visibility and TradingView port
+
+Status: **implemented locally on 2026-09-18; pending CI deployment verification.**
+
+- The frozen CSV is tracked so the production dashboard can serve the same 180 research trades used by the audit.
+- The Backtest tab shows 180 trades, 40.56% wins, +0.582% average net trade return, 1.47 profit factor, and +104.72 percentage points as the arithmetic sum of independent trade returns.
+- `tradingview/daily_swing_strategy.pine` is a Pine Script v6 strategy for regular 30-minute NSE equity charts. It uses confirmed prior-day data, confirmation-candle-close entries, structural stops, 3R targets, the profit trail, ten-session time exit, and 0.20% round-trip commission.
+- The Pine port omits Nifty 500 cross-sectional breadth and uses a same-slot mean instead of the Python median. TradingView therefore supports visual and symbol-level testing, but its trade list is not expected to match the Python universe backtest.
+- `tradingview/README.md` contains usage and interpretation instructions.
 
 Deployment verification completed:
 

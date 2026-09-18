@@ -20,7 +20,7 @@ async def test_tick_health_notifies_once_then_reports_recovery() -> None:
     runner.active = None
     runner.stale_tick_alerted = False
     now = datetime(2026, 9, 18, 5, 0, tzinfo=UTC)  # Friday 10:30 IST
-    runner.last_tick_at = now - timedelta(minutes=4)
+    runner.last_tick_at = now - timedelta(minutes=31)
 
     assert await runner.check_tick_health(now) is True
     assert await runner.check_tick_health(now + timedelta(minutes=1)) is True
