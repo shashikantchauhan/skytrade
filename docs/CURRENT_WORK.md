@@ -17,7 +17,7 @@ Before the changes in this working tree:
 
 ## Phase 1 — Daily Swing visibility and notifications
 
-Status: **implemented locally, tested, not yet deployed at the time this file was written.**
+Status: **implemented, tested and deployed on 2026-09-18.**
 
 Changes in the working tree:
 
@@ -62,15 +62,17 @@ Files changed for Phase 1:
 - `tests/test_daily_swing_repository.py`
 - `tests/test_webapp_status.py`
 
-Deployment verification required after pushing:
+Deployment verification completed:
 
-1. Confirm GitHub Actions tests and deploy succeed.
-2. Confirm `systemctl is-active p-trade-dashboard p-trade-daily-swing` returns active for both.
-3. Confirm `p-trade-live` remains inactive and disabled.
-4. Open the SkyTrade dashboard and verify Overview, Trade history and System load.
-5. Confirm the Telegram service-start message arrives after the deploy restart.
-6. During the next market session, confirm the first-ticks “Market feed live” message arrives.
-7. Do not manufacture a tick outage in live trading merely to test the alert. The unit test covers the transition; observe the real alert only if an outage occurs.
+1. GitHub Actions test and deploy jobs passed.
+2. VPS code reached commit `568346c`.
+3. `p-trade-dashboard` and `p-trade-daily-swing` were active and enabled.
+4. `p-trade-live` remained inactive and disabled.
+5. The Daily Swing API reported `enabled=true`, zero active positions, zero history rows and zero attempts. This means no live Daily Swing entry has occurred yet; historical backtest trades were deliberately not inserted into the live ledger.
+6. During market hours the service resolved 499 instruments, connected the ticker and reported fresh ticks.
+7. Telegram returned successful delivery responses for the service-start and market-feed messages.
+8. The health endpoint reported healthy with a fresh Daily Swing log.
+9. Do not manufacture a tick outage in live trading merely to test the alert. The unit test covers the transition; observe the real alert only if an outage occurs.
 
 ## Phase 2 — Chronos-2 zero-shot research
 
