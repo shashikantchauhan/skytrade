@@ -39,6 +39,7 @@ Changes in the working tree:
   - market-session completion.
 - Tick alerts are transition-based, so a persistent outage sends one alert rather than one message per minute.
 - A three-minute tick stall also ends the current WebSocket session so the runner reconnects automatically; recovery is announced after ticks resume.
+- HTTP transport INFO logs are suppressed for Telegram because its request URL contains the bot token; existing VPS log occurrences were sanitized during deployment verification.
 - The GitHub deployment workflow now restarts and verifies `p-trade-dashboard` and `p-trade-daily-swing`. It no longer restarts retired `p-trade-live`.
 - The Daily Swing systemd unit no longer declares the retired Alpha service as an `After=` dependency.
 

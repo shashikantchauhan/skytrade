@@ -3,6 +3,10 @@ import logging
 import httpx
 
 logger = logging.getLogger(__name__)
+# httpx logs the complete request URL at INFO. Telegram embeds the bot token
+# in that URL, so allowing its transport logger to inherit this app's INFO
+# level would write a live credential into the service log.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
 class TelegramNotifier:
