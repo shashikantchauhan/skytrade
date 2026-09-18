@@ -123,6 +123,35 @@ class DailySwingRepository:
         )
         return [_row(row) for row in result.rows]
 
+    async def get_positions(self, limit: int = 200) -> Sequence[DailySwingPosition]:
+        """Newest live-strategy positions, including closed/rejected history."""
+        result = await self._client.execute(
+            _SELECT + " ORDER BY id DESC LIMIT ?", [max(1, min(limit, 1000))]
+        )
+        return [_row(row) for row in result.rows]
+
+    async def get_attempts(self, limit: int = 100) -> Sequence[dict]:
+        """Newest confirmed candidates and the reason each did or did not enter."""
+        result = await self._client.execute(
+            """
+            SELECT symbol, setup_date, attempted_at, outcome, detail
+            FROM daily_swing_attempts
+            ORDER BY attempted_at DESC
+            LIMIT ?
+            """,
+            [max(1, min(limit, 1000))],
+        )
+        return [
+            {
+                "symbol": row[0],
+                "setup_date": row[1],
+                "attempted_at": row[2],
+                "outcome": row[3],
+                "detail": row[4],
+            }
+            for row in result.rows
+        ]
+
     async def update_trail(self, symbol: str, active_stop: Decimal, best_close: Decimal) -> None:
         await self._client.execute(
             """UPDATE daily_swing_positions SET active_stop = ?, best_close = ?

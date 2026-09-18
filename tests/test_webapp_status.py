@@ -178,3 +178,40 @@ def test_pipeline_health_reports_unhealthy_when_the_log_does_not_exist(tmp_path,
     monkeypatch.setattr(webapp, "_LOG_PATH", tmp_path / "does-not-exist.log")
     health = webapp._live_pipeline_health()
     assert health == {"healthy": False, "age_seconds": None, "last_log_at": None}
+
+
+def test_daily_swing_health_requires_fresh_market_hours_log(tmp_path, monkeypatch):
+    import os
+    from datetime import UTC, datetime
+
+    log_path = tmp_path / "daily-swing.log"
+    log_path.write_text("old heartbeat\n")
+    now = datetime(2026, 9, 18, 5, 0, tzinfo=UTC)  # Friday 10:30 IST
+    os.utime(log_path, (now.timestamp() - 600, now.timestamp() - 600))
+    monkeypatch.setattr(webapp, "_DAILY_SWING_LOG_PATH", log_path)
+    monkeypatch.setattr(webapp, "_service_is_active", lambda service: True)
+
+    health = webapp._daily_swing_health(now)
+
+    assert health["healthy"] is False
+    assert health["service_active"] is True
+    assert health["market_open"] is True
+    assert health["reason"] == "no recent activity during market hours"
+
+
+def test_daily_swing_health_accepts_quiet_service_after_market(tmp_path, monkeypatch):
+    import os
+    from datetime import UTC, datetime
+
+    log_path = tmp_path / "daily-swing.log"
+    log_path.write_text("market session finished\n")
+    now = datetime(2026, 9, 18, 12, 0, tzinfo=UTC)  # Friday 17:30 IST
+    os.utime(log_path, (now.timestamp() - 3600, now.timestamp() - 3600))
+    monkeypatch.setattr(webapp, "_DAILY_SWING_LOG_PATH", log_path)
+    monkeypatch.setattr(webapp, "_service_is_active", lambda service: True)
+
+    health = webapp._daily_swing_health(now)
+
+    assert health["healthy"] is True
+    assert health["market_open"] is False
+    assert health["reason"] == "running"

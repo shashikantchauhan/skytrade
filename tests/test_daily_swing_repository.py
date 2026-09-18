@@ -46,5 +46,27 @@ async def test_position_state_survives_entry_trail_and_exit(tmp_path: Path) -> N
             "target",
         )
         assert list(await repository.get_active()) == []
+        history = list(await repository.get_positions())
+        assert len(history) == 1
+        assert history[0].status == "closed"
+        assert history[0].exit_price == Decimal("285.0")
+
+        assert await repository.record_attempt(
+            "POWERGRID.NS",
+            "2026-09-16",
+            datetime(2026, 9, 17, 4, 15, tzinfo=UTC),
+            "evaluating",
+            "",
+        )
+        attempts = list(await repository.get_attempts())
+        assert attempts == [
+            {
+                "symbol": "POWERGRID.NS",
+                "setup_date": "2026-09-16",
+                "attempted_at": "2026-09-17T04:15:00+00:00",
+                "outcome": "evaluating",
+                "detail": "",
+            }
+        ]
     finally:
         await client.close()

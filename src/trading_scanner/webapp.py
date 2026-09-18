@@ -39,6 +39,7 @@ from trading_scanner.application.options_analytics import enrich_trade
 from trading_scanner.config.settings import load_config
 from trading_scanner.domain.models import PaperPosition
 from trading_scanner.infrastructure.db import (
+    DailySwingRepository,
     LiveCashToggleState,
     TursoFuturesPaperAccountRepository,
     TursoFuturesTradeRepository,
@@ -62,7 +63,7 @@ from trading_scanner.infrastructure.kite import (
 from trading_scanner.infrastructure.kite import (
     get_last_prices as kite_get_last_prices,
 )
-from trading_scanner.infrastructure.kite_ticker import IST
+from trading_scanner.infrastructure.kite_ticker import IST, is_market_hours
 from trading_scanner.infrastructure.telegram import LoggingNotifier, TelegramNotifier
 from trading_scanner.infrastructure.yahoo import YahooProvider
 from trading_scanner.web.services.auth import (
@@ -82,6 +83,9 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ENV_PATH = _REPO_ROOT / ".env"
 _LOG_PATH = Path(os.getenv("TRADING_SCANNER_LOG_PATH", "/var/log/p-trade/signals.log"))
 _BACKTEST_LOG_PATH = _LOG_PATH.with_name("derivatives-backtest.log")
+_DAILY_SWING_LOG_PATH = Path(
+    os.getenv("TRADING_SCANNER_DAILY_SWING_LOG_PATH", "/var/log/p-trade/daily-swing.log")
+)
 
 # 2026-08-16: skytrade-smallcap (Nifty Smallcap 250, weekly signals) is a
 # separate fork deployed as a subfolder alongside this app (/opt/p-trade/
@@ -1569,6 +1573,155 @@ def _todays_error_count() -> int:
 # Kite WebSocket 403 during a reconnect retry, then zero further log lines
 # for 7+ hours).
 _PIPELINE_STALE_SECONDS = 300
+
+
+def _daily_swing_position_json(position) -> dict:
+    spot_return_pct = None
+    if position.exit_price is not None:
+        spot_return_pct = (
+            Decimal(position.side)
+            * (position.exit_price - position.entry_price)
+            / position.entry_price
+            * 100
+        )
+    return {
+        "symbol": position.symbol,
+        "side": "long" if position.side == 1 else "short",
+        "setup_date": position.setup_date,
+        "entry_timestamp": position.entry_timestamp.isoformat(),
+        "entry_price": _decimal(position.entry_price),
+        "initial_stop": _decimal(position.initial_stop),
+        "active_stop": _decimal(position.active_stop),
+        "target": _decimal(position.target),
+        "best_close": _decimal(position.best_close),
+        "contract_expiry": position.contract_expiry,
+        "status": position.status,
+        "exit_timestamp": (
+            position.exit_timestamp.isoformat() if position.exit_timestamp else None
+        ),
+        "exit_price": _decimal(position.exit_price),
+        "exit_reason": position.exit_reason,
+        # This is the underlying spot move used by the strategy, not the
+        # futures-plus-option basket's broker P&L.
+        "spot_return_pct": _decimal(spot_return_pct),
+    }
+
+
+@app.get("/api/daily-swing")
+async def daily_swing(_: None = Depends(_require_session)) -> JSONResponse:
+    """Live Daily Swing state and its complete, separate trade ledger."""
+    client, config = _client()
+    try:
+        repository = DailySwingRepository(client)
+        await repository.ensure_schema()
+        positions = list(await repository.get_positions())
+        attempts = list(await repository.get_attempts())
+        closed = [position for position in positions if position.status == "closed"]
+        returns = [
+            Decimal(position.side)
+            * (position.exit_price - position.entry_price)
+            / position.entry_price
+            * 100
+            for position in closed
+            if position.exit_price is not None
+        ]
+        wins = sum(value > 0 for value in returns)
+        return JSONResponse(
+            {
+                "enabled": config.daily_swing_enabled,
+                "max_defined_risk": _decimal(config.daily_swing_max_defined_risk),
+                "active": [
+                    _daily_swing_position_json(position)
+                    for position in positions
+                    if position.status in {"entering", "open"}
+                ],
+                "history": [_daily_swing_position_json(position) for position in positions],
+                "attempts": attempts,
+                "summary": {
+                    "positions": len(positions),
+                    "closed": len(closed),
+                    "wins": wins,
+                    "win_rate": float(Decimal(wins) / len(returns) * 100) if returns else None,
+                    "average_spot_return_pct": (
+                        float(sum(returns) / len(returns)) if returns else None
+                    ),
+                },
+            }
+        )
+    finally:
+        await client.close()
+
+
+def _service_is_active(service: str) -> bool:
+    result = subprocess.run(
+        ["systemctl", "is-active", "--quiet", service], capture_output=True, text=True
+    )
+    return result.returncode == 0
+
+
+def _daily_swing_health(now: datetime | None = None) -> dict:
+    now = now or datetime.now(UTC)
+    service_active = _service_is_active("p-trade-daily-swing")
+    market_open = is_market_hours(now)
+    if not _DAILY_SWING_LOG_PATH.exists():
+        return {
+            "healthy": False,
+            "service_active": service_active,
+            "market_open": market_open,
+            "age_seconds": None,
+            "last_log_at": None,
+            "reason": "daily-swing log does not exist",
+        }
+    last_modified = _DAILY_SWING_LOG_PATH.stat().st_mtime
+    age_seconds = max(0, int(now.timestamp() - last_modified))
+    log_fresh = age_seconds < _PIPELINE_STALE_SECONDS
+    healthy = service_active and (not market_open or log_fresh)
+    reason = (
+        "service stopped"
+        if not service_active
+        else "no recent activity during market hours"
+        if market_open and not log_fresh
+        else "running"
+    )
+    return {
+        "healthy": healthy,
+        "service_active": service_active,
+        "market_open": market_open,
+        "age_seconds": age_seconds,
+        "last_log_at": datetime.fromtimestamp(last_modified, tz=UTC).isoformat(),
+        "reason": reason,
+    }
+
+
+@app.get("/api/daily-swing/health")
+async def daily_swing_health(_: None = Depends(_require_session)) -> JSONResponse:
+    return JSONResponse(_daily_swing_health())
+
+
+@app.get("/api/daily-swing/logs")
+async def daily_swing_logs(
+    lines: int = 200, _: None = Depends(_require_session)
+) -> JSONResponse:
+    if not _DAILY_SWING_LOG_PATH.exists():
+        return JSONResponse({"lines": []})
+    tail = subprocess.run(
+        ["tail", "-n", str(max(1, min(lines, 1000))), str(_DAILY_SWING_LOG_PATH)],
+        capture_output=True,
+        text=True,
+    )
+    return JSONResponse({"lines": tail.stdout.splitlines()})
+
+
+@app.post("/api/daily-swing/restart")
+async def restart_daily_swing(_: None = Depends(_require_admin)) -> JSONResponse:
+    result = subprocess.run(
+        ["systemctl", "restart", "p-trade-daily-swing"], capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        raise HTTPException(
+            status_code=500, detail=f"Restart failed: {result.stderr.strip() or 'unknown error'}"
+        )
+    return JSONResponse({"ok": True})
 
 
 def _live_pipeline_health() -> dict:

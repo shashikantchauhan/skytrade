@@ -195,148 +195,63 @@
     <div class="mark">SK</div>
     <div>
       <h1>SkyTrade</h1>
-      <div class="sub">Live NSE cash-equity signal &amp; execution dashboard</div>
+      <div class="sub">Daily Swing monitoring and trade history</div>
     </div>
   </div>
   <div class="topbar-right">
     <span id="market-status" class="pill neutral"><span class="dot"></span>&nbsp;</span>
-    <span id="pipeline-health" class="pill neutral" title="Live pipeline log freshness"><span class="dot"></span>&nbsp;</span>
-    <span class="row" id="kite-status"></span>
+    <span id="swing-health" class="pill neutral"><span class="dot"></span>Daily Swing: checking</span>
+    <span id="kite-status"></span>
     <button onclick="logout()">Log out</button>
   </div>
 </div>
 
-<section>
-  <div class="hero" id="hero-cards">Loading...</div>
-</section>
-
-<section class="admin-only">
-  <div class="row">
-    <button class="primary" onclick="trigger()">Run pipeline now</button>
-    <span class="msg" id="trigger-msg"></span>
-    <button class="danger" onclick="restartLivePipeline()">Restart live pipeline</button>
-    <span class="msg" id="restart-msg"></span>
-  </div>
-</section>
+<section><div class="hero" id="hero-cards">Loading...</div></section>
 
 <div class="tabnav">
-  <button class="tab-btn active" data-tab="positions" onclick="switchTab('positions')">Positions</button>
-  <button class="tab-btn" data-tab="trades" onclick="switchTab('trades')">Trades</button>
-  <button class="tab-btn" data-tab="gates" onclick="switchTab('gates')">Gates</button>
-  <button class="tab-btn" data-tab="settings" onclick="switchTab('settings')">Config &amp; logs</button>
+  <button class="tab-btn active" data-tab="overview" onclick="switchTab('overview')">Overview</button>
+  <button class="tab-btn" data-tab="history" onclick="switchTab('history')">Trade history</button>
+  <button class="tab-btn" data-tab="system" onclick="switchTab('system')">System</button>
 </div>
 
-<section class="tab-panel" data-tab="positions">
-  <h2>Live cash positions <span class="hint">real Kite orders -- see Config &amp; logs to turn this on/off</span></h2>
+<section class="tab-panel" data-tab="overview">
+  <h2>Active Daily Swing position <span class="hint">real futures basket with protective option</span></h2>
   <div class="panel table-wrap">
-    <table id="positions-table">
-      <thead><tr>
-        <th>Symbol</th><th>Entry time</th><th class="num">Entry</th><th class="num">Qty</th>
-        <th class="num">Current</th><th class="num">Unrealized P&amp;L</th>
-        <th class="num">Target</th><th class="num">Stop</th><th>GTT</th><th></th>
-      </tr></thead>
-      <tbody><tr class="empty-row"><td colspan="10">Loading...</td></tr></tbody>
-    </table>
-  </div>
-</section>
-
-<section class="tab-panel" data-tab="trades" hidden>
-  <div class="row between">
-    <h2><span id="trades-title">Closed trades (buy-only win rate</span>: <span id="win-rate">-</span>)</h2>
-    <label class="field">Filter by symbol
-      <select id="symbol-filter" onchange="loadTrades()">
-        <option value="">All symbols (recent 30)</option>
-      </select>
-    </label>
-  </div>
-  <div class="panel table-wrap">
-    <table id="trades-table">
-      <thead><tr>
-        <th>Symbol</th><th>Side</th><th>Entry time</th><th class="num">Entry</th>
-        <th>Exit time</th><th class="num">Exit</th><th class="num">Diff</th><th class="num">PnL%</th>
-      </tr></thead>
+    <table id="active-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th>Entry time</th><th class="num">Spot entry</th><th class="num">Active stop</th><th class="num">Target</th><th>Contract expiry</th></tr></thead>
       <tbody><tr class="empty-row"><td colspan="8">Loading...</td></tr></tbody>
     </table>
   </div>
-</section>
 
-<section class="tab-panel" data-tab="gates" hidden>
-  <h2>Today's signals <span class="hint">every real BUY/SELL that fired today, permanent record -- not just the last one</span></h2>
+  <h2 style="margin-top:1.5rem;">Recent entry decisions <span class="hint">confirmed candidates and why they entered or were blocked</span></h2>
   <div class="panel table-wrap">
-    <table id="gate-events-table">
-      <thead><tr>
-        <th>Symbol</th><th>Signal</th><th>Track record</th><th>Quality filter</th>
-        <th>Conviction</th><th>Fired at</th>
-      </tr></thead>
-      <tbody><tr class="empty-row"><td colspan="6">Loading...</td></tr></tbody>
+    <table id="attempts-table">
+      <thead><tr><th>Symbol</th><th>Setup date</th><th>Evaluated</th><th>Outcome</th><th>Detail</th></tr></thead>
+      <tbody><tr class="empty-row"><td colspan="5">Loading...</td></tr></tbody>
     </table>
   </div>
+</section>
 
-  <div class="row between" style="margin-top: 1.5rem;">
-    <h2>Current gate status <span class="hint">every tracked symbol, refreshed each cycle -- what AlphaEngine sees right now</span></h2>
-    <label class="field">Filter by signal
-      <select id="gates-signal-filter" onchange="renderGates()">
-        <option value="">All symbols</option>
-        <option value="BUY">BUY only</option>
-        <option value="SELL">SELL only</option>
-        <option value="NEUTRAL">NEUTRAL only</option>
-      </select>
-    </label>
-  </div>
+<section class="tab-panel" data-tab="history" hidden>
+  <h2>Daily Swing position history <span class="hint">live strategy records only; return is the underlying spot move, not basket P&amp;L</span></h2>
   <div class="panel table-wrap">
-    <table id="gates-table">
-      <thead><tr>
-        <th>Symbol</th><th>Signal</th><th>Track record</th><th>Quality filter</th>
-        <th>Conviction</th><th class="num">ADX</th><th class="num">Regime</th>
-        <th class="num">Vol margin</th><th>Evaluated</th>
-      </tr></thead>
+    <table id="history-table">
+      <thead><tr><th>Symbol</th><th>Side</th><th>Status</th><th>Entry</th><th class="num">Spot entry</th><th>Exit</th><th class="num">Spot exit</th><th>Reason</th><th class="num">Spot return</th></tr></thead>
       <tbody><tr class="empty-row"><td colspan="9">Loading...</td></tr></tbody>
     </table>
   </div>
-  <div class="note">Track record / quality / conviction are the exact three gates a real cash order has to clear -- computed the same way for every symbol every cycle, whether or not it currently has an active BUY/SELL signal, so you can see how close a NEUTRAL symbol is too. ADX/regime/volatility margin are the raw numbers behind the quality filter.</div>
 </section>
 
-<section class="tab-panel" data-tab="settings" hidden>
-  <h2>Config</h2>
-  <div class="panel row admin-only">
-    <label class="field">Capital<input id="cfg-capital" /></label>
-    <label class="field">Slots<input id="cfg-slots" /></label>
-    <label class="field">Min position<input id="cfg-min" /></label>
-    <button class="primary" onclick="saveConfig()" style="align-self: flex-end;">Save</button>
-    <span class="msg" id="config-msg"></span>
+<section class="tab-panel" data-tab="system" hidden>
+  <h2>Daily Swing service</h2>
+  <div class="cards" id="system-cards"></div>
+  <div class="panel row admin-only" style="margin-top:0.8rem;">
+    <button class="primary" onclick="window.location.href='/kite/login'">Login / refresh Kite</button>
+    <button class="danger" onclick="restartDailySwing()">Restart Daily Swing</button>
+    <span class="msg" id="restart-msg"></span>
   </div>
-
-  <h2 style="margin-top: 1.5rem;">Go Live -- real cash trading <span class="hint">real Kite orders, real money -- takes effect on the next scan cycle, no restart</span></h2>
-  <div class="panel danger admin-only" id="live-cash-panel">
-    <div class="row">
-      <span class="pill neutral" id="live-cash-status-pill">Loading...</span>
-      <span class="msg" id="live-cash-error-count"></span>
-    </div>
-    <div class="row" style="margin-top: 0.85rem;">
-      <label class="field" style="flex: 2;">Symbols (comma-separated)<input id="live-cash-symbols" placeholder="RELIANCE.NS,HDFCBANK.NS,ICICIBANK.NS,INFY.NS,TCS.NS" /></label>
-      <label class="field">Rs per symbol<input id="live-cash-notional" placeholder="5000" /></label>
-      <label class="field">Max concurrent positions<input id="live-cash-max-positions" placeholder="8" /></label>
-    </div>
-    <div class="row" style="margin-top: 0.6rem;">
-      <button onclick="useFullUniverse()">Use full symbol universe</button>
-      <span class="msg" id="live-cash-universe-count"></span>
-    </div>
-    <div class="row" style="margin-top: 0.6rem;">
-      <label class="field" style="flex-direction: row; align-items: center; gap: 0.4rem;">
-        <input type="checkbox" id="live-cash-delayed-retry" style="width: auto;" />
-        Retry a missed signal for 2 trading days
-      </label>
-    </div>
-    <div class="row" style="margin-top: 0.85rem;">
-      <button class="primary" onclick="setLiveCashTrading(true)">Go Live</button>
-      <button class="danger" onclick="setLiveCashTrading(false)">Stop -- go flat gate</button>
-      <span class="msg" id="live-cash-msg"></span>
-    </div>
-    <div class="note">Max concurrent positions caps real capital at risk to (max positions &times; Rs/symbol) regardless of how many symbols are eligible -- e.g. 8 &times; Rs5,000 = Rs40,000 max, even against the full universe. "Stop" freezes new entries and target-extension checks (no new risk added), but exits and GTT cancellation for anything already open still work regardless (de-risking is never blocked) -- nothing gets stranded. "Retry a missed signal" applies only to a candidate that already cleared every real gate and still didn't get a real order (capacity/cutoff/execution, not a rejected signal) -- retried if price comes back within ~0.5% within 2 trading days and the strategy's own exit hasn't fired since, re-checking quality/conviction against the day it actually retries.</div>
-  </div>
-
-  <h2 style="margin-top: 1.5rem;">Recent logs</h2>
-  <pre id="logs"></pre>
+  <h2 style="margin-top:1.5rem;">Recent Daily Swing logs</h2>
+  <pre id="logs">Loading...</pre>
 </section>
 
 <script>
@@ -358,362 +273,109 @@ async function logout() {
 }
 
 function fmt(n) { return n === null || n === undefined ? "-" : Number(n).toLocaleString("en-IN", {maximumFractionDigits: 2}); }
-
-// Every timestamp from the API is UTC ISO -- displayed in IST throughout
-// this dashboard since that's the timezone the strategy/market actually
-// operates in, to avoid the exact confusion UTC timestamps caused before.
 function fmtTime(iso) {
   if (!iso) return "-";
-  return new Date(iso).toLocaleString("en-IN", {
-    timeZone: "Asia/Kolkata", day: "2-digit", month: "short",
-    hour: "2-digit", minute: "2-digit", hour12: false,
-  });
+  return new Date(iso).toLocaleString("en-IN", {timeZone:"Asia/Kolkata", day:"2-digit", month:"short", hour:"2-digit", minute:"2-digit", hour12:false});
+}
+function pill(text, colour) { return `<span class="pill ${colour}">${text}</span>`; }
+function sidePill(side) { return pill(side.toUpperCase(), side === "long" ? "green" : "red"); }
+function statusPill(status) {
+  const colour = status === "open" ? "green" : status === "entering" ? "amber" : status === "rejected" ? "red" : "neutral";
+  return pill(status.toUpperCase(), colour);
 }
 
-// Pure client-side NSE session clock (9:15-15:30 IST, Mon-Fri) -- no
-// backend call needed, just a quick "is it worth watching right now" cue
-// next to the logout button.
 function updateMarketStatus() {
   const now = new Date();
-  const ist = new Date(now.toLocaleString("en-US", {timeZone: "Asia/Kolkata"}));
-  const day = ist.getDay();
-  const minutes = ist.getHours() * 60 + ist.getMinutes();
-  const open = day >= 1 && day <= 5 && minutes >= 9 * 60 + 15 && minutes < 15 * 60 + 30;
+  const ist = new Date(now.toLocaleString("en-US", {timeZone:"Asia/Kolkata"}));
+  const mins = ist.getHours() * 60 + ist.getMinutes();
+  const open = ist.getDay() >= 1 && ist.getDay() <= 5 && mins >= 555 && mins < 930;
   const el = document.getElementById("market-status");
   el.className = "pill " + (open ? "green" : "neutral");
   el.innerHTML = `<span class="dot"></span>Market ${open ? "open" : "closed"}`;
 }
-updateMarketStatus();
-setInterval(updateMarketStatus, 30000);
 
-async function loadPipelineHealth() {
-  const el = document.getElementById("pipeline-health");
-  try {
-    const h = await api("/api/live-pipeline-health");
-    if (h.age_seconds === null) {
-      el.className = "pill neutral";
-      el.innerHTML = `<span class="dot"></span>Pipeline: no log yet`;
-      return;
-    }
-    const mins = Math.floor(h.age_seconds / 60);
-    el.className = "pill " + (h.healthy ? "green" : "red");
-    el.innerHTML = h.healthy
-      ? `<span class="dot"></span>Pipeline live`
-      : `<span class="dot"></span>Pipeline stuck (${mins}m quiet)`;
-  } catch (e) {
-    el.className = "pill neutral";
-    el.innerHTML = `<span class="dot"></span>Pipeline: unknown`;
-  }
-}
-
-async function restartLivePipeline() {
-  const ok = window.confirm(
-    "Force-restart the live pipeline service now?\n\n" +
-    "Real positions are unaffected (their GTT brackets live at the broker), " +
-    "but the strategy stops watching for a few seconds during the restart."
-  );
-  if (!ok) return;
-  document.getElementById("restart-msg").textContent = "Restarting...";
-  try {
-    await api("/api/live-pipeline-health/restart", {method: "POST"});
-    document.getElementById("restart-msg").textContent = "Restarted.";
-  } catch (e) {
-    document.getElementById("restart-msg").textContent = "Failed: " + e.message;
-  }
-  await loadPipelineHealth();
-}
-
-async function loadStatus() {
-  const s = await api("/api/status");
-  if (!s.kite_connected) {
-    document.getElementById("hero-cards").innerHTML = `
-      <div class="hero-card" style="grid-column: 1 / -1;">
-        <div class="label">Real-money summary unavailable</div>
-        <div class="value" style="font-size: 1rem; font-weight: 600;">Kite isn't connected right now -- log in under Config &amp; logs to see live P&amp;L, positions, and available cash.</div>
-      </div>
-    `;
-    return;
-  }
-  const pnlCls = (v) => v === null || v === undefined ? "" : (v >= 0 ? "green" : "red");
+let latestSwing = null;
+async function loadDailySwing() {
+  const data = await api("/api/daily-swing");
+  latestSwing = data;
+  const summary = data.summary;
   document.getElementById("hero-cards").innerHTML = `
-    <div class="hero-card primary">
-      <div class="label">Today's P&amp;L</div>
-      <div class="value ${pnlCls(s.today_pnl)}">₹${fmt(s.today_pnl)}</div>
-      <div class="sub-value">realized + unrealized, real CNC trades</div>
-    </div>
-    <div class="hero-card">
-      <div class="label">Unrealized P&amp;L</div>
-      <div class="value ${pnlCls(s.unrealized_pnl)}">₹${fmt(s.unrealized_pnl)}</div>
-      <div class="sub-value">mark-to-market, open positions</div>
-    </div>
-    <div class="hero-card">
-      <div class="label">Open positions</div>
-      <div class="value">${s.open_position_count}</div>
-      <div class="sub-value">last run: ${s.last_run ? s.last_run.status : "unknown"}</div>
-    </div>
-    <div class="hero-card">
-      <div class="label">Available cash</div>
-      <div class="value">₹${fmt(s.available_cash)}</div>
-      <div class="sub-value">live Kite margin balance</div>
-    </div>
-  `;
+    <div class="hero-card primary"><div class="label">Strategy</div><div class="value ${data.enabled ? "green" : "red"}">${data.enabled ? "Enabled" : "Disabled"}</div><div class="sub-value">max defined loss ₹${fmt(data.max_defined_risk)}</div></div>
+    <div class="hero-card"><div class="label">Active position</div><div class="value">${data.active.length}</div><div class="sub-value">one global slot maximum</div></div>
+    <div class="hero-card"><div class="label">Closed live trades</div><div class="value">${summary.closed}</div><div class="sub-value">${summary.win_rate === null ? "no result yet" : fmt(summary.win_rate) + "% positive"}</div></div>
+    <div class="hero-card"><div class="label">Average spot return</div><div class="value ${summary.average_spot_return_pct >= 0 ? "green" : "red"}">${summary.average_spot_return_pct === null ? "-" : fmt(summary.average_spot_return_pct) + "%"}</div><div class="sub-value">underlying move, before basket pricing</div></div>`;
+
+  document.querySelector("#active-table tbody").innerHTML = data.active.map(p => `<tr>
+    <td><strong>${p.symbol}</strong></td><td>${sidePill(p.side)}</td><td>${statusPill(p.status)}</td>
+    <td>${fmtTime(p.entry_timestamp)}</td><td class="num">₹${fmt(p.entry_price)}</td>
+    <td class="num">₹${fmt(p.active_stop)}</td><td class="num">₹${fmt(p.target)}</td><td>${p.contract_expiry || "-"}</td>
+  </tr>`).join("") || `<tr class="empty-row"><td colspan="8">No Daily Swing position is open.</td></tr>`;
+
+  document.querySelector("#attempts-table tbody").innerHTML = data.attempts.map(a => `<tr>
+    <td><strong>${a.symbol}</strong></td><td>${a.setup_date}</td><td>${fmtTime(a.attempted_at)}</td>
+    <td>${pill(a.outcome, a.outcome === "evaluating" ? "green" : "amber")}</td><td>${a.detail || "-"}</td>
+  </tr>`).join("") || `<tr class="empty-row"><td colspan="5">No confirmed entry candidate has been recorded yet.</td></tr>`;
+
+  document.querySelector("#history-table tbody").innerHTML = data.history.map(p => {
+    const ret = p.spot_return_pct;
+    return `<tr><td><strong>${p.symbol}</strong></td><td>${sidePill(p.side)}</td><td>${statusPill(p.status)}</td>
+      <td>${fmtTime(p.entry_timestamp)}</td><td class="num">₹${fmt(p.entry_price)}</td>
+      <td>${fmtTime(p.exit_timestamp)}</td><td class="num">${p.exit_price === null ? "-" : "₹" + fmt(p.exit_price)}</td>
+      <td>${p.exit_reason || "-"}</td><td class="num ${ret === null ? "" : ret >= 0 ? "green" : "red"}">${ret === null ? "-" : fmt(ret) + "%"}</td></tr>`;
+  }).join("") || `<tr class="empty-row"><td colspan="9">No Daily Swing positions have been recorded yet.</td></tr>`;
 }
 
-async function loadPositions() {
-  const rows = await api("/api/live-cash-positions");
-  document.querySelector("#positions-table tbody").innerHTML = rows.map(p => {
-    const known = p.unrealized_pnl !== null && p.unrealized_pnl !== undefined;
-    const cls = known && p.unrealized_pnl >= 0 ? "green" : "red";
-    const pnlCell = known
-      ? `<td class="num ${cls}">₹${fmt(p.unrealized_pnl)} (${fmt(p.unrealized_pnl_pct)}%)</td>`
-      : `<td class="num">-</td>`;
-    const priceCell = known ? `₹${fmt(p.current_price)}` : "-";
-    const targetCell = p.target_price !== null ? `₹${fmt(p.target_price)}` : "-";
-    const stopCell = p.stop_price !== null ? `₹${fmt(p.stop_price)}` : "-";
-    const gttCls = p.gtt_status === "active" || p.gtt_status === "extended" ? "green" : "amber";
-    const gttCell = p.gtt_status ? `<span class="pill ${gttCls}">${p.gtt_status}</span>` : `<span class="pill red">none</span>`;
-    const safeSymbol = p.symbol.replace(/'/g, "\\'");
-    return `<tr>
-      <td><strong>${p.symbol}</strong></td><td>${fmtTime(p.entry_timestamp)}</td>
-      <td class="num">₹${fmt(p.entry_price)}</td><td class="num">${p.quantity}</td>
-      <td class="num">${priceCell}</td>${pnlCell}
-      <td class="num">${targetCell}</td><td class="num">${stopCell}</td><td>${gttCell}</td>
-      <td><button class="danger compact" onclick="exitPosition('${safeSymbol}', this)">Exit</button></td>
-    </tr>`;
-  }).join("") || `<tr class="empty-row"><td colspan="10">No real positions open right now.</td></tr>`;
-}
-
-async function exitPosition(symbol, button) {
-  const ok = window.confirm(
-    `Close the real ${symbol} position right now?\n\n` +
-    "This cancels its GTT bracket and places a real market sell -- this cannot be undone."
-  );
-  if (!ok) return;
-  const originalText = button.textContent;
-  button.disabled = true;
-  button.textContent = "Exiting...";
-  try {
-    const result = await api(`/api/live-cash-positions/${encodeURIComponent(symbol)}/exit`, {
-      method: "POST",
-    });
-    button.textContent = result.ok ? "Done" : "Failed";
-    if (!result.ok) alert(`${symbol}: ${result.message}`);
-  } catch (e) {
-    button.textContent = "Failed";
-    alert(`${symbol}: ${e.message}`);
-  }
-  await loadPositions();
-}
-
-let symbolsLoaded = false;
-
-async function loadSymbols() {
-  const rows = await api("/api/symbols");
-  const select = document.getElementById("symbol-filter");
-  const current = select.value;
-  select.innerHTML = '<option value="">All symbols (recent 30)</option>' + rows.map(r =>
-    `<option value="${r.symbol}">${r.symbol} (${r.trade_count} trades, ${fmt(r.win_rate)}% win)</option>`
-  ).join("");
-  select.value = current;
-  symbolsLoaded = true;
-}
-
-async function loadTrades() {
-  const select = document.getElementById("symbol-filter");
-  const symbol = select.value;
-  const query = symbol ? `symbol=${encodeURIComponent(symbol)}` : "limit=30";
-  const t = await api(`/api/trades?${query}`);
-  document.getElementById("trades-title").textContent = symbol
-    ? `${symbol} trades (win rate`
-    : "Closed trades (buy-only win rate";
-  document.getElementById("win-rate").textContent = t.overall_win_rate !== null ? fmt(t.overall_win_rate) + "%" : "-";
-  document.querySelector("#trades-table tbody").innerHTML = t.recent.map(r => {
-    const cls = r.pnl_percent >= 0 ? "green" : "red";
-    const sideCls = r.side === "buy" ? "green" : "red";
-    // BUY profits when price rises (exit - entry), SELL profits when price
-    // falls (entry - exit) -- same convention as domain.models.Trade.
-    const diff = r.side === "buy" ? r.exit_price - r.entry_price : r.entry_price - r.exit_price;
-    return `<tr>
-      <td><strong>${r.symbol}</strong></td><td><span class="pill ${sideCls}">${r.side.toUpperCase()}</span></td>
-      <td>${fmtTime(r.entry_timestamp)}</td><td class="num">₹${fmt(r.entry_price)}</td>
-      <td>${fmtTime(r.exit_timestamp)}</td><td class="num">₹${fmt(r.exit_price)}</td>
-      <td class="num">₹${fmt(diff)}</td><td class="num"><span class="pill ${cls}">${fmt(r.pnl_percent)}%</span></td>
-    </tr>`;
-  }).join("") || `<tr class="empty-row"><td colspan="8">No closed trades yet.</td></tr>`;
-}
-
-let _gatesData = [];
-
-async function loadGates() {
-  _gatesData = await api("/api/gate-status");
-  renderGates();
-}
-
-function renderGates() {
-  const filter = document.getElementById("gates-signal-filter").value;
-  const rows = filter ? _gatesData.filter(g => g.signal === filter) : _gatesData;
-  const pass = (ok) => `<span class="pill ${ok ? "green" : "red"}">${ok ? "PASS" : "fail"}</span>`;
-  const signalCls = (s) => s === "BUY" ? "green" : s === "SELL" ? "red" : "neutral";
-  document.querySelector("#gates-table tbody").innerHTML = rows.map(g => `
-    <tr>
-      <td><strong>${g.symbol}</strong></td>
-      <td><span class="pill ${signalCls(g.signal)}">${g.signal}</span></td>
-      <td>${pass(g.track_record_passed)}</td>
-      <td>${pass(g.quality_passed)}</td>
-      <td>${pass(g.conviction_passed)}</td>
-      <td class="num">${fmt(g.adx)}</td>
-      <td class="num">${fmt(g.regime_normalized)}</td>
-      <td class="num">${fmt(g.volatility_margin)}</td>
-      <td>${fmtTime(g.evaluated_at)}</td>
-    </tr>
-  `).join("") || `<tr class="empty-row"><td colspan="9">No gate data yet -- refreshes once the live pipeline has run a cycle.</td></tr>`;
-}
-
-async function loadGateEvents() {
-  const events = await api("/api/gate-status/events");
-  const pass = (ok) => `<span class="pill ${ok ? "green" : "red"}">${ok ? "PASS" : "fail"}</span>`;
-  const signalCls = (s) => s === "BUY" ? "green" : "red";
-  document.querySelector("#gate-events-table tbody").innerHTML = events.map(g => `
-    <tr>
-      <td><strong>${g.symbol}</strong></td>
-      <td><span class="pill ${signalCls(g.signal)}">${g.signal}</span></td>
-      <td>${pass(g.track_record_passed)}</td>
-      <td>${pass(g.quality_passed)}</td>
-      <td>${pass(g.conviction_passed)}</td>
-      <td>${fmtTime(g.evaluated_at)}</td>
-    </tr>
-  `).join("") || `<tr class="empty-row"><td colspan="6">No signal has fired yet today.</td></tr>`;
-}
-
-async function loadConfig() {
-  const c = await api("/api/config");
-  document.getElementById("cfg-capital").value = c.capital;
-  document.getElementById("cfg-slots").value = c.slots;
-  document.getElementById("cfg-min").value = c.min_position;
-}
-
-async function saveConfig() {
-  const body = {
-    capital: document.getElementById("cfg-capital").value,
-    slots: document.getElementById("cfg-slots").value,
-    min_position: document.getElementById("cfg-min").value,
-  };
-  const opts = {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(body),
-  };
-  await api("/api/config", opts);
-  document.getElementById("config-msg").textContent = "Saved - takes effect next pipeline run.";
-}
-
-let _liveCashUniverse = [];
-
-async function loadLiveCashTrading() {
-  const s = await api("/api/live-cash-trading");
-  _liveCashUniverse = s.universe_symbols || [];
-  const pill = document.getElementById("live-cash-status-pill");
-  pill.innerHTML = `<span class="dot"></span>${s.enabled ? "LIVE" : "OFF"}`;
-  pill.className = "pill " + (s.enabled ? "green" : "neutral");
-  // Don't stomp what the admin is actively typing.
-  const symbolsEl = document.getElementById("live-cash-symbols");
-  const notionalEl = document.getElementById("live-cash-notional");
-  const maxPosEl = document.getElementById("live-cash-max-positions");
-  const delayedRetryEl = document.getElementById("live-cash-delayed-retry");
-  if (document.activeElement !== symbolsEl) symbolsEl.value = s.symbols.join(",");
-  if (document.activeElement !== notionalEl) notionalEl.value = s.notional;
-  if (document.activeElement !== maxPosEl) maxPosEl.value = s.max_positions;
-  if (document.activeElement !== delayedRetryEl) delayedRetryEl.checked = !!s.delayed_retry_enabled;
-  const errCls = s.todays_error_count > 0 ? "red" : "muted";
-  document.getElementById("live-cash-error-count").innerHTML =
-    `<span class="${errCls}">Today's errors: ${s.todays_error_count}</span>`;
-  document.getElementById("live-cash-universe-count").textContent =
-    `${_liveCashUniverse.length} symbols in the tracked universe`;
-}
-
-function useFullUniverse() {
-  document.getElementById("live-cash-symbols").value = _liveCashUniverse.join(",");
-}
-
-async function setLiveCashTrading(enable) {
-  const symbols = document.getElementById("live-cash-symbols").value
-    .split(",").map(s => s.trim()).filter(Boolean);
-  const notional = document.getElementById("live-cash-notional").value;
-  const maxPositions = parseInt(document.getElementById("live-cash-max-positions").value, 10) || 8;
-  const delayedRetryEnabled = document.getElementById("live-cash-delayed-retry").checked;
-  if (enable) {
-    const ok = window.confirm(
-      `This places REAL Kite orders with real money. Eligible symbols: ${symbols.length}, ` +
-      `Rs${notional} per symbol, max ${maxPositions} concurrent positions ` +
-      `(max capital at risk: Rs${(notional * maxPositions).toLocaleString("en-IN")}). Confirm?`
-    );
-    if (!ok) return;
-  }
-  document.getElementById("live-cash-msg").textContent = "Saving...";
-  try {
-    await api("/api/live-cash-trading", {
-      method: "POST",
-      headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({
-        enabled: enable, symbols, notional, max_positions: maxPositions,
-        delayed_retry_enabled: delayedRetryEnabled,
-      }),
-    });
-    document.getElementById("live-cash-msg").textContent =
-      "Saved -- takes effect next scan cycle.";
-  } catch (e) {
-    document.getElementById("live-cash-msg").textContent = "Failed: " + e.message;
-  }
-  await loadLiveCashTrading();
-}
-
-async function trigger() {
-  document.getElementById("trigger-msg").textContent = "Triggering...";
-  await api("/api/trigger", {method: "POST"});
-  document.getElementById("trigger-msg").textContent = "Triggered - check logs below in a few minutes.";
-}
-
-async function loadLogs() {
-  const l = await api("/api/logs?lines=150");
-  document.getElementById("logs").textContent = l.lines.join("\n");
+let latestHealth = null;
+async function loadHealth() {
+  const h = await api("/api/daily-swing/health");
+  latestHealth = h;
+  const el = document.getElementById("swing-health");
+  el.className = "pill " + (h.healthy ? "green" : "red");
+  el.innerHTML = `<span class="dot"></span>Daily Swing: ${h.healthy ? "running" : "attention"}`;
+  document.getElementById("system-cards").innerHTML = `
+    <div class="card"><div class="label">Service</div><div class="value ${h.service_active ? "green" : "red"}">${h.service_active ? "Active" : "Stopped"}</div></div>
+    <div class="card"><div class="label">Health</div><div class="value ${h.healthy ? "green" : "red"}">${h.reason}</div></div>
+    <div class="card"><div class="label">Last log</div><div class="value">${h.age_seconds === null ? "-" : Math.floor(h.age_seconds / 60) + "m ago"}</div></div>
+    <div class="card"><div class="label">Market check</div><div class="value">${h.market_open ? "Live freshness enforced" : "Market closed"}</div></div>`;
 }
 
 async function loadKiteStatus() {
   const k = await api("/api/kite-status");
   const el = document.getElementById("kite-status");
-  if (!k.configured) { el.innerHTML = ""; return; }
-  if (k.logged_in) {
-    // obtained_at is already IST (Kite's own login_time), not UTC -- do not
-    // run it through fmtTime()'s UTC->IST conversion, that would shift it.
-    el.innerHTML = `<span class="pill green"><span class="dot"></span>Kite: ${k.obtained_at}</span> <button onclick="window.location.href='/kite/login'">Re-login</button>`;
-  } else {
-    el.innerHTML = `<span class="pill red"><span class="dot"></span>Kite: logged out</span> <button class="primary" onclick="window.location.href='/kite/login'">Login</button>`;
-  }
+  if (!k.configured) { el.innerHTML = pill("Kite not configured", "red"); return; }
+  el.innerHTML = k.logged_in ? pill("Kite logged in", "green") : pill("Kite logged out", "red");
+}
+
+async function loadLogs() {
+  const data = await api("/api/daily-swing/logs?lines=150");
+  document.getElementById("logs").textContent = data.lines.join("\n") || "No Daily Swing log lines yet.";
+}
+
+async function restartDailySwing() {
+  if (!window.confirm("Restart the Daily Swing monitoring service now?")) return;
+  const msg = document.getElementById("restart-msg");
+  msg.textContent = "Restarting...";
+  try {
+    await api("/api/daily-swing/restart", {method:"POST"});
+    msg.textContent = "Restarted.";
+  } catch (e) { msg.textContent = "Failed: " + e.message; }
+  await loadHealth();
 }
 
 let myRole = null;
-
 async function applyRole() {
-  // Server-side _require_admin is what actually enforces this (see
-  // webapp.py) -- this is purely so a viewer's screen doesn't show buttons
-  // that would just 403, e.g. after a spouse/friend's Kite login attempt
-  // once stomped the one active session the pipeline depends on.
   const me = await api("/api/me");
   myRole = me.role;
-  if (myRole !== "admin") {
-    document.querySelectorAll(".admin-only").forEach(el => el.classList.add("viewer-hidden"));
-  }
+  if (myRole !== "admin") document.querySelectorAll(".admin-only").forEach(el => el.classList.add("viewer-hidden"));
 }
 
 async function refreshAll() {
   if (myRole === null) await applyRole();
-  if (!symbolsLoaded) await loadSymbols();
-  const loaders = [loadStatus(), loadPositions(), loadTrades(), loadGates(), loadGateEvents(), loadLogs(), loadPipelineHealth()];
-  if (myRole === "admin") {
-    loaders.push(loadConfig(), loadKiteStatus(), loadLiveCashTrading());
-  }
-  await Promise.all(loaders);
+  await Promise.all([loadDailySwing(), loadHealth(), loadKiteStatus(), loadLogs()]);
 }
+
+updateMarketStatus();
+setInterval(updateMarketStatus, 30000);
 refreshAll();
 setInterval(refreshAll, 30000);
 </script>

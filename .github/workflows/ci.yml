@@ -60,15 +60,15 @@ jobs:
             # this workflow could stop it from replacing a healthy running
             # service.
             .venv/bin/python -c "from trading_scanner.config.settings import load_config; load_config()"
-            systemctl restart p-trade-live
             systemctl restart p-trade-dashboard
+            systemctl restart p-trade-daily-swing
             # Phase 19: fail the deploy (not just log a warning) if either
             # service doesn't come up healthy, instead of finding out later
             # from a missed heartbeat/silent gap -- give each a moment past
             # the restart before checking, same margin systemd itself needs
             # to report a genuine crash-on-start rather than "activating".
             sleep 5
-            for service in p-trade-live p-trade-dashboard; do
+            for service in p-trade-dashboard p-trade-daily-swing; do
               if [ "$(systemctl is-active "$service")" != "active" ]; then
                 echo "$service is not active after restart -- deploy failed." >&2
                 systemctl status "$service" --no-pager || true

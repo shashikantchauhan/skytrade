@@ -62,6 +62,7 @@ _API_DELAY_SECONDS = 0.36
 _MINIMUM_ENTRY_EXPIRY_SESSIONS = 17
 _EXPIRY_EXIT_DAYS = 10
 _EXIT_RETRY_SECONDS = 30
+_STALE_TICK_SECONDS = 180
 
 
 def _notifier(config: AppConfig):
@@ -121,6 +122,10 @@ class DailySwingLive:
         self.pending_exit_reason: str | None = None
         self.bucket_lock = asyncio.Lock()
         self.last_tick_at = datetime.now(UTC)
+        self.stale_tick_alerted = False
+        self.ready_notified_date: date | None = None
+        self.missing_token_notified_date: date | None = None
+        self.close_notified_date: date | None = None
 
     async def setup(self) -> None:
         for repository in (self.candles, self.positions, self.orders, self.sessions):
@@ -262,6 +267,14 @@ class DailySwingLive:
     async def drain(self, kite: KiteConnect) -> None:
         while True:
             ticks = await asyncio.to_thread(self.queue.get)
+            today = datetime.now(UTC).astimezone(IST).date()
+            if ticks and self.ready_notified_date != today:
+                await self.notifier.send_text(
+                    f"Market feed live: monitoring {len(self.token_to_symbol)} symbols; "
+                    f"today's setups={len(self.setups)}; "
+                    f"active={self.active.symbol if self.active else 'none'}."
+                )
+                self.ready_notified_date = today
             for tick in ticks:
                 aggregator = self.aggregators.get(tick.get("instrument_token"))
                 price = tick.get("last_price")
@@ -601,12 +614,32 @@ class DailySwingLive:
     async def heartbeat(self) -> None:
         while True:
             await asyncio.sleep(60)
-            if is_market_hours(datetime.now(UTC)):
-                logger.info(
-                    "Daily-swing heartbeat: last tick %.0fs ago; active=%s",
-                    (datetime.now(UTC) - self.last_tick_at).total_seconds(),
-                    self.active.symbol if self.active else "none",
-                )
+            if await self.check_tick_health(datetime.now(UTC)):
+                logger.warning("Restarting stale Daily Swing market-data connection.")
+                return
+
+    async def check_tick_health(self, now: datetime) -> bool:
+        """Notify on feed transitions and report whether a reconnect is required."""
+        if not is_market_hours(now):
+            return False
+        tick_age = (now - self.last_tick_at).total_seconds()
+        logger.info(
+            "Daily-swing heartbeat: last tick %.0fs ago; active=%s",
+            tick_age,
+            self.active.symbol if self.active else "none",
+        )
+        if tick_age >= _STALE_TICK_SECONDS and not self.stale_tick_alerted:
+            await self.notifier.send_text(
+                f"ALERT: market feed is stale; no tick for {tick_age / 60:.0f} minutes. "
+                "Daily Swing entries and live exits may be delayed."
+            )
+            self.stale_tick_alerted = True
+        elif tick_age < _STALE_TICK_SECONDS and self.stale_tick_alerted:
+            await self.notifier.send_text(
+                "RECOVERED: market ticks are flowing again; Daily Swing monitoring resumed."
+            )
+            self.stale_tick_alerted = False
+        return tick_age >= _STALE_TICK_SECONDS
 
     async def market_close(self, kite: KiteConnect) -> None:
         while is_market_hours(datetime.now(UTC)):
@@ -622,6 +655,13 @@ class DailySwingLive:
                 self.current_bucket = None
                 if candles:
                     await self.process_bucket(closed, candles, kite)
+        today = datetime.now(UTC).astimezone(IST).date()
+        if self.close_notified_date != today:
+            await self.notifier.send_text(
+                f"Market session finished; active={self.active.symbol if self.active else 'none'}; "
+                f"setups monitored={len(self.setups)}."
+            )
+            self.close_notified_date = today
 
     async def token_changed(self, current: str) -> None:
         while True:
@@ -653,11 +693,24 @@ class DailySwingLive:
 
     async def run(self) -> None:
         await self.setup()
+        await self.notifier.send_text(
+            f"Daily Swing service started; active={self.active.symbol if self.active else 'none'}."
+        )
         initialized_token = None
         try:
             while True:
                 token = await self.token()
                 if not token:
+                    today = datetime.now(UTC).astimezone(IST).date()
+                    if (
+                        is_market_hours(datetime.now(UTC))
+                        and self.missing_token_notified_date != today
+                    ):
+                        await self.notifier.send_text(
+                            "ACTION REQUIRED: Kite is not logged in. Daily Swing is waiting and "
+                            "cannot monitor or trade today's market."
+                        )
+                        self.missing_token_notified_date = today
                     await asyncio.sleep(60)
                     continue
                 kite = KiteConnect(api_key=self.config.kite_api_key)
@@ -666,6 +719,13 @@ class DailySwingLive:
                     await asyncio.to_thread(kite.profile)
                 except KiteTokenException:
                     logger.warning("Daily swing waiting for a fresh Kite login.")
+                    today = datetime.now(UTC).astimezone(IST).date()
+                    if self.missing_token_notified_date != today:
+                        await self.notifier.send_text(
+                            "ACTION REQUIRED: Kite session expired. Log in again from SkyTrade; "
+                            "Daily Swing is waiting."
+                        )
+                        self.missing_token_notified_date = today
                     await asyncio.sleep(60)
                     continue
                 if self.active is not None and self.active.status == "entering":
@@ -734,6 +794,10 @@ async def _run(config: AppConfig) -> None:
             await runner.run()
         except Exception:
             logger.exception("Daily-swing runner crashed; restarting in 30 seconds.")
+            await runner.notifier.send_text(
+                "ALERT: Daily Swing runner crashed. Automatic restart will be attempted "
+                "in 30 seconds."
+            )
             await asyncio.sleep(30)
 
 
