@@ -65,13 +65,20 @@ Files changed for Phase 1:
 
 ## Phase 1B — Backtest visibility and TradingView port
 
-Status: **implemented locally on 2026-09-18; pending CI deployment verification.**
+Status: **implemented, tested and deployed on 2026-09-18.**
 
 - The frozen CSV is tracked so the production dashboard can serve the same 180 research trades used by the audit.
 - The Backtest tab shows 180 trades, 40.56% wins, +0.582% average net trade return, 1.47 profit factor, and +104.72 percentage points as the arithmetic sum of independent trade returns.
 - `tradingview/daily_swing_strategy.pine` is a Pine Script v6 strategy for regular 30-minute NSE equity charts. It uses confirmed prior-day data, confirmation-candle-close entries, structural stops, 3R targets, the profit trail, ten-session time exit, and 0.20% round-trip commission.
 - The Pine port omits Nifty 500 cross-sectional breadth and uses a same-slot mean instead of the Python median. TradingView therefore supports visual and symbol-level testing, but its trade list is not expected to match the Python universe backtest.
 - `tradingview/README.md` contains usage and interpretation instructions.
+
+Validation and deployment:
+
+- Full suite: `452 passed`; Ruff, dashboard JavaScript syntax and `git diff --check` passed.
+- Commit `61a40a0` passed both GitHub Actions test and deploy jobs.
+- VPS reached `61a40a0`; dashboard and Daily Swing services were active and enabled, while retired `p-trade-live` remained inactive and disabled.
+- The server loaded all 180 CSV rows and reproduced the audit summary. Its deployed tick-stall threshold is 1,800 seconds.
 
 Deployment verification completed:
 
